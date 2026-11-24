@@ -4653,6 +4653,19 @@ describe("the editor while this page does not drive the row", () => {
     expect(writeMock.mock.calls[0]![2]).toBe(TYPED)
   })
 
+  // The standing read-only line says why; the encoding menu's greyed item says
+  // it too, in the same words, beneath itself.
+  it("says the read-only sentence beneath Save with encoding while it is greyed", async () => {
+    await mountWithDirtyTab()
+    drive("agent:s1", "other")
+    fireEvent.click(await screen.findByRole("button", { name: /^file encoding:/i }))
+    const item = (await screen.findByRole("menuitem", { name: /save with encoding/i })) as HTMLElement
+    expect(item.getAttribute("aria-disabled")).toBe("true")
+    const why = document.getElementById(item.getAttribute("aria-describedby") ?? "")
+    expect(why?.textContent).toBe(AGENT_READ_ONLY)
+    expect(item.nextElementSibling?.contains(why ?? null)).toBe(true)
+  })
+
   it("greys out creating, renaming, moving and deleting, and refuses a dropped file out loud", async () => {
     treeMock.mockImplementation(async () => ({
       dir: "",

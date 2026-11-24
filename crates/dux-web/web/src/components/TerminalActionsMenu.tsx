@@ -1,7 +1,7 @@
 import { ExternalLink, FileCode2, X } from "lucide-react"
 
 import { MenuItemReason } from "@/components/MenuReason"
-import { useMenuReason } from "@/hooks/use-menu-reason"
+import { useMenuReason, type MenuReasonHandle } from "@/hooks/use-menu-reason"
 import {
   DropdownMenuGroup,
   DropdownMenuItem,
@@ -31,12 +31,16 @@ export function TerminalActionsMenu({
   terminalId,
   owner,
   editorEntries = true,
+  reasonAbove,
 }: {
   terminalId: string
   owner: TerminalOwnerRef
   /** False where the menu already carries the editor entries for the same root,
    * so none is listed twice: an agent's menu over its own companion terminal. */
   editorEntries?: boolean
+  /** The reason a menu above this group already says for the agent's row: Close…
+   * names that line rather than saying it a second time. */
+  reasonAbove?: MenuReasonHandle
 }) {
   // The editor's root is the directory this terminal was SPAWNED in, and a
   // terminal owned by an agent is sent to that agent's editor instead: same
@@ -51,9 +55,9 @@ export function TerminalActionsMenu({
   const changeReason = usePartChangeReason()(
     sessionId !== null ? { sessionId } : { terminalId },
   )
-  // Said only for a terminal that is a row of its own: an agent's terminal sits
-  // under the agent's menu, which says it at its head.
-  const closeReason = useMenuReason(sessionId === null ? changeReason : null)
+  // Said here unless a menu above already says it: an agent's terminal sits
+  // under the agent's menu, which says it at its head, and Close… names that.
+  const closeReason = useMenuReason(reasonAbove === undefined ? changeReason : null)
   return (
     <DropdownMenuGroup>
       {/* Inside the group rather than above it: the primitive's label part reads
@@ -94,7 +98,7 @@ export function TerminalActionsMenu({
         <>
           <DropdownMenuItem
             disabled={changeReason !== null}
-            aria-describedby={closeReason.describedBy}
+            aria-describedby={closeReason.describedBy ?? reasonAbove?.describedBy}
             onClick={() => openDeleteTerminal(terminalId)}
           >
             <X />

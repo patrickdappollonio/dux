@@ -2,6 +2,9 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
+import { MenuItemReason } from "@/components/MenuReason"
+import { useMenuReason } from "@/hooks/use-menu-reason"
+import { PROJECT_FOLDER_MISSING } from "@/lib/projects"
 import {
   createProjectTerminal,
   openAttachWorktree,
@@ -55,6 +58,11 @@ export function ProjectMenuItems({
   const ghAvailable = bootstrap?.gh_available ?? false
   const project = spine?.projects.find((p) => p.id === id)
   const orphaned = project === undefined
+  // The two items that need the folder each say why they are greyed, in the
+  // words the Projects list uses for the same state.
+  const missing = project?.path_missing ? PROJECT_FOLDER_MISSING : null
+  const terminalReason = useMenuReason(missing)
+  const baseBranchReason = useMenuReason(missing)
 
   return (
     <>
@@ -98,6 +106,7 @@ export function ProjectMenuItems({
               the shell lands is what the reader cannot otherwise guess. */}
           <DropdownMenuItem
             disabled={project.path_missing}
+            aria-describedby={terminalReason.describedBy}
             onClick={() => {
               onLeave?.()
               createProjectTerminal(id)
@@ -106,6 +115,7 @@ export function ProjectMenuItems({
             <SquareTerminal />
             New terminal at the project root
           </DropdownMenuItem>
+          <MenuItemReason reason={terminalReason} />
           {/* Runs at once and opens nothing, so no trailing "…"; its busy and
               final statuses say what happened. */}
           <DropdownMenuItem onClick={() => pullProject(id)}>
@@ -121,11 +131,13 @@ export function ProjectMenuItems({
               needs the folder to be there. */}
           <DropdownMenuItem
             disabled={project.path_missing}
+            aria-describedby={baseBranchReason.describedBy}
             onClick={() => openChangeBaseBranch(id)}
           >
             <GitBranchPlus />
             Change base branch…
           </DropdownMenuItem>
+          <MenuItemReason reason={baseBranchReason} />
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => openProjectInfo(id)}>
             <Info />

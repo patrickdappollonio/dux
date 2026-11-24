@@ -4,6 +4,7 @@ import { type ReactNode, type Ref } from "react"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/AgentActionsMenu"
+import { useAgentChangeReason } from "@/hooks/use-agent-change-reason"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MenuItemReason } from "@/components/MenuReason"
 import { useMenuReason } from "@/hooks/use-menu-reason"
@@ -163,10 +164,13 @@ export function PaneMenuBody({
   const watched = useAgentRowWatch(
     subject.kind === "agent" ? subject.session.id : null,
   ).watched
+  // The agent's one reason, made here so the terminal group beneath its
+  // actions can name the line the agent's menu says at its head.
+  const agentReason = useAgentChangeReason(subject.kind === "agent" ? subject.session : null)
   // The subject's own rows.
   const actions: ReactNode =
     subject.kind === "agent" ? (
-      <AgentActionsMenu session={subject.session} />
+      <AgentActionsMenu session={subject.session} changeReason={agentReason} />
     ) : (
       <TerminalActionsMenu
         terminalId={subject.terminalId}
@@ -190,6 +194,8 @@ export function PaneMenuBody({
           owner={pane.owner}
           // The agent's own group above already opens this same editor.
           editorEntries={false}
+          // And already says why the agent's row may not change.
+          reasonAbove={agentReason}
         />
       </>
     ) : null

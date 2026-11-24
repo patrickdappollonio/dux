@@ -32,11 +32,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
+  ADDING_TAB_HINT,
   ONLY_TAB_CLOSE_REFUSAL,
   defaultProviderForSession,
   isFirstTab,
   sessionAsShown,
   tabLabels,
+  tabLimitHint,
 } from "@/lib/agentTabs"
 import {
   addToAgentBlockHint,
@@ -107,9 +109,9 @@ export function AgentTabsStrip({
     block !== null
       ? addToAgentBlockHint(block, device)
       : atCap
-        ? `Tab limit reached (${cap})`
+        ? tabLimitHint(cap)
         : creating
-          ? "Adding…"
+          ? ADDING_TAB_HINT
           : `New ${defaultProvider} tab`
 
   return (

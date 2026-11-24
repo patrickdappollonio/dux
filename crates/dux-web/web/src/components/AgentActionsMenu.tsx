@@ -23,7 +23,7 @@ import {
   Variable,
 } from "lucide-react"
 
-import { MenuReasonsHead } from "@/components/MenuReason"
+import { MenuItemReason, MenuReasonsHead } from "@/components/MenuReason"
 import { useMenuReason, type MenuReasonHandle } from "@/hooks/use-menu-reason"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import {
@@ -35,7 +35,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu"
-import { defaultProviderForSession } from "@/lib/agentTabs"
+import { ADDING_TAB_HINT, defaultProviderForSession, tabLimitHint } from "@/lib/agentTabs"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   newTerminalLabel,
@@ -76,18 +76,20 @@ import {
   useDux,
 } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
-import {
-  agentChangeBlockReason,
-  useRowDriverLabel,
-  useAgentChangeBlock,
-} from "@/hooks/use-agent-active-elsewhere"
 
 // Every per-agent action, in one place so no surface can drift from another.
 //
 // It is never rendered on its own: `PaneMenuBody` is the menu and this is the
 // group inside it about the agent, which is why the pane's input group is the
 // wrapper's rather than this one's, and why there is no context to pass.
-export function AgentActionsMenu({ session }: { session: SessionView }) {
+export function AgentActionsMenu({
+  session,
+  changeReason,
+}: {
+  session: SessionView
+  /** What `useAgentChangeReason` made for this agent, which the menu says at its head. */
+  changeReason: MenuReasonHandle
+}) {
   const duxState = useDux()
   const { bootstrap, spine, createTabInFlight } = duxState
   const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
@@ -107,12 +109,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   const branchGit = supportsBranchGit(session.workspace)
   // While this device does not drive the agent's row, the mutating entries
   // disable, each naming the one reason said at the head of the menu.
-  const block = useAgentChangeBlock(session)
-  const device = useRowDriverLabel({ sessionId: session.id })
-  const changeReason = useMenuReason(
-    block === null ? null : agentChangeBlockReason(block, device),
-  )
-  const changesBlocked = block !== null
+  const changesBlocked = changeReason.text !== null
   const describedBy = changeReason.describedBy
   // Whether there is a process to ask to shut down at all. The SERVER's answer,
   // from the same oracle the engine's teardown and the terminal UI's palette
@@ -132,6 +129,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           sessionId={session.id}
           providers={providers}
           defaultProvider={defaultProvider}
+          tabCap={tabCap}
           atTabCap={atTabCap}
           addingTab={addingTab}
           changeReason={changeReason}
@@ -281,6 +279,7 @@ function AgentTabSubmenu({
   sessionId,
   providers,
   defaultProvider,
+  tabCap,
   atTabCap,
   addingTab,
   changeReason,
@@ -288,39 +287,54 @@ function AgentTabSubmenu({
   sessionId: string
   providers: string[]
   defaultProvider: string
+  tabCap: number
   atTabCap: boolean
   addingTab: boolean
   changeReason: MenuReasonHandle
 }) {
+  // The words the tab strip's `+` says for the same two states. The row's own
+  // reason, said at the head of the menu, outranks them, as it does there.
+  const limitReason = useMenuReason(
+    changeReason.text !== null
+      ? null
+      : atTabCap
+        ? tabLimitHint(tabCap)
+        : addingTab
+          ? ADDING_TAB_HINT
+          : null,
+  )
   return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger
-        disabled={atTabCap || addingTab || changeReason.text !== null}
-        aria-describedby={changeReason.describedBy}
-      >
-        <Plus />
-        <span className="min-w-0 truncate">New agent tab…</span>
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent>
-        {providers.map((provider) => {
-          const isDefault = provider === defaultProvider
-          return (
-            <DropdownMenuItem
-              key={provider}
-              onClick={() => addTab(sessionId, provider)}
-            >
-              {isDefault ? <Check /> : <Bot />}
-              {provider}
-              {isDefault ? (
-                <span className="ml-auto text-xs text-muted-foreground">
-                  default
-                </span>
-              ) : null}
-            </DropdownMenuItem>
-          )
-        })}
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
+    <>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger
+          disabled={atTabCap || addingTab || changeReason.text !== null}
+          aria-describedby={changeReason.describedBy ?? limitReason.describedBy}
+        >
+          <Plus />
+          <span className="min-w-0 truncate">New agent tab…</span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent>
+          {providers.map((provider) => {
+            const isDefault = provider === defaultProvider
+            return (
+              <DropdownMenuItem
+                key={provider}
+                onClick={() => addTab(sessionId, provider)}
+              >
+                {isDefault ? <Check /> : <Bot />}
+                {provider}
+                {isDefault ? (
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    default
+                  </span>
+                ) : null}
+              </DropdownMenuItem>
+            )
+          })}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      <MenuItemReason reason={limitReason} />
+    </>
   )
 }
 

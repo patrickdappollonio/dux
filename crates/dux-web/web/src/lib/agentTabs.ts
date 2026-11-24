@@ -16,6 +16,14 @@ export function isFirstTab(session: SessionView, tabId: string): boolean {
   return tabId === session.slot_tab_id
 }
 
+/** Why the `+` and "New agent tab…" are off at the per-agent tab cap. */
+export function tabLimitHint(cap: number): string {
+  return `Tab limit reached (${cap})`
+}
+
+/** Why they are off while a tab is being added. */
+export const ADDING_TAB_HINT = "Adding…"
+
 // Mirror of dux-core's `agent_tabs::ONLY_TAB_CLOSE_REFUSAL`, which the server's
 // own 400 carries: the browser refuses the gesture up front and must refuse in
 // exactly the same words. Pinned as a literal by the test below.

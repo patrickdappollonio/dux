@@ -289,6 +289,35 @@ describe("an agent's menu over one of its companion terminals", () => {
     ).toBeTruthy()
   })
 
+  // The agent's reason is said once, at the head of its actions, and the
+  // terminal's Close… under them names that line.
+  // Not under a card, which hides the terminal group altogether: while the pane
+  // that drove the row here is reconnecting, nothing may be changed yet.
+  it("ties the terminal's Close… to the agent's one reason while the row cannot be changed", async () => {
+    const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
+    registerPaneCover("s1", "none", { row: agentRowKey("s1"), driver: "reconnecting" })
+    try {
+      render(
+        <PaneMenu
+          subject={{ kind: "agent", session: session() }}
+          pane={terminalPane}
+          appearance="header"
+          settingsDrill={false}
+        />,
+      )
+      await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+      const lines = document.querySelectorAll('[data-slot="menu-reason"]')
+      expect(lines).toHaveLength(1)
+      const close = screen
+        .getAllByRole("menuitem")
+        .find((el) => el.textContent?.includes("Close…"))!
+      expect(close.getAttribute("aria-disabled")).toBe("true")
+      expect(close.getAttribute("aria-describedby")).toBe(lines[0]!.id)
+    } finally {
+      resetPaneCovers()
+    }
+  })
+
   // A terminal just created is on screen before the agents list names it, and
   // until then its group has no Close… to offer and its editor is the agent's.
   it("adds no empty Terminal group for a terminal the list does not name yet", async () => {

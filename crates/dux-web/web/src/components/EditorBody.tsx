@@ -120,6 +120,8 @@ import { rowKeyOfTarget } from "@/lib/paneCover"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useMenuReason } from "@/hooks/use-menu-reason"
+import { MenuItemReason } from "@/components/MenuReason"
 import { Spinner } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
@@ -312,6 +314,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     changeBlock === null
       ? null
       : editorReadOnlyReason(changeBlock, root.kind === "agent" ? "agent" : "terminal", driver)
+  // The standing read-only line's own sentence, said beneath "Save with
+  // encoding" in the encoding menu, which that item is greyed by.
+  const saveEncodingReason = useMenuReason(writeBlocked)
   const tabsState = editorTabs[key]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null
@@ -1622,7 +1627,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         </DropdownMenuSub>
         {!inDiff && !hardReadOnly && (
           <DropdownMenuSub>
-            <DropdownMenuSubTrigger disabled={fileBusy || writeBlocked !== null}>
+            <DropdownMenuSubTrigger
+              disabled={fileBusy || writeBlocked !== null}
+              aria-describedby={saveEncodingReason.describedBy}
+            >
               <SaveAll />
               Save with encoding
             </DropdownMenuSubTrigger>
@@ -1656,6 +1664,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         )}
+        {!inDiff && !hardReadOnly && <MenuItemReason reason={saveEncodingReason} />}
       </>
     )
   }

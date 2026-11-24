@@ -54,6 +54,7 @@ function installStubs() {
 }
 installStubs()
 const { AgentActionsMenu } = await import("./AgentActionsMenu")
+const { useAgentChangeReason } = await import("@/hooks/use-agent-change-reason")
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } = await import(
   "@/components/ui/dropdown-menu"
 )
@@ -104,12 +105,16 @@ function seed(session: SessionView, ghAvailable: boolean) {
   } as unknown as DuxState
 }
 
+function AgentMenuUnderTest({ session }: { session: SessionView }) {
+  return <AgentActionsMenu session={session} changeReason={useAgentChangeReason(session)} />
+}
+
 function openMenu(session: SessionView) {
   render(
     <DropdownMenu>
       <DropdownMenuTrigger>open</DropdownMenuTrigger>
       <DropdownMenuContent>
-        <AgentActionsMenu session={session} />
+        <AgentMenuUnderTest session={session} />
       </DropdownMenuContent>
     </DropdownMenu>,
   )
@@ -390,12 +395,37 @@ describe("AgentActionsMenu contents and tab availability", () => {
       .getByText("New agent tab…")
       .closest('[role="menuitem"]')
     expect(trigger?.getAttribute("aria-disabled")).toBe("true")
+    // It says why in the words the tab strip's `+` uses, beneath the item.
+    const why = document.getElementById(trigger?.getAttribute("aria-describedby") ?? "")
+    expect(why?.textContent).toBe("Tab limit reached (1)")
+    expect(trigger?.nextElementSibling?.contains(why ?? null)).toBe(true)
     expect(
       screen
         .getByText("Rename agent…")
         .closest('[role="menuitem"]')
         ?.getAttribute("aria-disabled"),
     ).not.toBe("true")
+  })
+
+  it("says Adding… beneath the new-tab submenu while a tab is being added", async () => {
+    const session = makeSession({ id: "s1" })
+    seed(session, true)
+    mockState = { ...mockState, createTabInFlight: ["s1"] } as unknown as DuxState
+
+    await openMenu(session)
+    const trigger = screen.getByText("New agent tab…").closest('[role="menuitem"]')
+    expect(trigger?.getAttribute("aria-disabled")).toBe("true")
+    expect(
+      document.getElementById(trigger?.getAttribute("aria-describedby") ?? "")?.textContent,
+    ).toBe("Adding…")
+  })
+
+  it("leaves a free new-tab submenu with no reason", async () => {
+    const session = makeSession({ id: "s1" })
+    seed(session, true)
+    await openMenu(session)
+    const trigger = screen.getByText("New agent tab…").closest('[role="menuitem"]')
+    expect(trigger?.hasAttribute("aria-describedby")).toBe(false)
   })
 })
 

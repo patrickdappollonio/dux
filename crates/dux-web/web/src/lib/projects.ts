@@ -1,6 +1,10 @@
 import type { ProjectView, SessionView, SidebarModel } from "@/lib/types"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
+/** What the app says about a project whose folder is gone from the disk: the Projects list's warning,
+ * and the reason beneath the project menu's items that need the folder. */
+export const PROJECT_FOLDER_MISSING = "Folder missing"
+
 // The shape both the desktop sidebar and the mobile home screen render from.
 export interface PartitionedProjects {
   // Sessions grouped under their owning project id, in display order.
