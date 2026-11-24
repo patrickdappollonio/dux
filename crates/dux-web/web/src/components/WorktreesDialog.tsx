@@ -18,6 +18,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu"
+import { FormGroup } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ScrollList, ScrollListRows } from "@/components/ui/scroll-list"
@@ -729,36 +730,42 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
       </ScrollArea>
 
       {selected ? (
-        <div className="grid shrink-0 gap-1">
-          <Input
-            value={name}
-            onChange={(e) => {
-              const el = e.target
-              const raw = el.value
-              const caret = el.selectionStart ?? raw.length
-              setName(sanitizeAgentName(raw))
-              // Restore the caret after live sanitization shrinks the string,
-              // so mid-string edits don't jump to the end (same as CreateAgent).
-              const sanitized = sanitizeAgentName(raw)
-              if (sanitized !== raw) {
-                const next = Math.max(0, caret - (raw.length - sanitized.length))
-                requestAnimationFrame(() => el.setSelectionRange(next, next))
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault()
-                handleAttach()
-              }
-            }}
-            placeholder="Display name"
-            aria-invalid={invalidNonEmpty}
-            autoFocus
-          />
-          <span className="text-xs text-muted-foreground">
-            Display name only: the branch already exists. Any name git
-            accepts for a branch.
-          </span>
+        <div className="shrink-0">
+          <FormGroup
+            layout="stacked"
+            control="single"
+            spokenName="Display name"
+            help="Display name only: the branch already exists. Any name git accepts for a branch."
+            invalid={invalidNonEmpty}
+          >
+            {(field) => (
+              <Input
+                {...field}
+                value={name}
+                onChange={(e) => {
+                  const el = e.target
+                  const raw = el.value
+                  const caret = el.selectionStart ?? raw.length
+                  setName(sanitizeAgentName(raw))
+                  // Restore the caret after live sanitization shrinks the string,
+                  // so mid-string edits don't jump to the end (same as CreateAgent).
+                  const sanitized = sanitizeAgentName(raw)
+                  if (sanitized !== raw) {
+                    const next = Math.max(0, caret - (raw.length - sanitized.length))
+                    requestAnimationFrame(() => el.setSelectionRange(next, next))
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault()
+                    handleAttach()
+                  }
+                }}
+                placeholder="Display name"
+                autoFocus
+              />
+            )}
+          </FormGroup>
         </div>
       ) : null}
 
