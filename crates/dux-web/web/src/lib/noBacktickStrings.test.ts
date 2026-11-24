@@ -5,10 +5,10 @@ import { describe, expect, it } from "vitest"
 
 // A toast never shows a literal backtick.
 //
-// The browser's toasts (raised through `lib/notify.ts`) draw their text as it
-// is, so a command written between backticks shows the backticks. A name in a
-// toast the browser raises itself is a `Prose` name, which `notify` draws as
-// the `InlineCode` chip. The server's statuses carry their names the same way,
+// The browser's toasts (raised through `lib/notify.ts`) draw a finished string
+// with its backticked spans as chips (`renderMarked`), but a status built from
+// parts is the way to name a thing: a name in a toast the browser raises itself
+// is a `Prose` name, which `notify` draws as the `InlineCode` chip. The server's statuses carry their names the same way,
 // and the Rust side has its own guard for them
 // (`crates/dux-core/tests/status_messages_carry_no_backticks.rs`).
 //
@@ -115,6 +115,11 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     file: "lib/inlineMarkdown.tsx",
     line: "const literal = hasDanglingBacktick && isLastPart ? `\\`${part}` : part",
     reason: "renderInlineCode putting back an unpaired backtick it did not consume.",
+  },
+  {
+    file: "lib/prose.tsx",
+    line: 'const parts = text.split("`")',
+    reason: "markedProse itself, splitting on the delimiter it turns into chips.",
   },
   {
     file: "lib/termselect.ts",

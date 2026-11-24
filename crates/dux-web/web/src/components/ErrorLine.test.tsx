@@ -63,4 +63,12 @@ describe("ErrorLine", () => {
       }
     }
   })
+
+  it("draws a marked command as a chip, except in the log shape, which shows its text as it came", () => {
+    const { rerender } = render(<ErrorLine>Run `dux config set` first.</ErrorLine>)
+    expect(screen.getByRole("alert").textContent).toBe("Run dux config set first.")
+    expect(screen.getByRole("alert").querySelector("code")?.textContent).toBe("dux config set")
+    rerender(<ErrorLine shape="log">missing field `name`</ErrorLine>)
+    expect(screen.getByRole("alert").textContent).toBe("missing field `name`")
+  })
 })

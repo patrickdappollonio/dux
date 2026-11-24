@@ -26,7 +26,7 @@ import { Button } from "@/components/ui/button"
 import { ToastCountdown } from "@/components/ui/sonner"
 
 import { authPaused, subscribeAuth } from "./authGate"
-import { type Prose, proseText, renderProse } from "./prose"
+import { type Prose, proseText, renderMarked, renderProse } from "./prose"
 
 /// What a notification says: a finished sentence, or a sentence built from
 /// words and names (`lib/prose.tsx`), whose names are drawn as the shared inline
@@ -40,11 +40,11 @@ export function noticeText(notice: Notice): string {
   return typeof notice === "string" ? notice : proseText(notice)
 }
 
-// What sonner is handed. A finished sentence stays the string it always was.
+// What sonner is handed. A finished sentence stays the string it always was,
+// unless it marks a command or a setting with backticks (`renderMarked`).
 function noticeBody(notice: Notice): ReactNode {
-  return typeof notice === "string"
-    ? notice
-    : createElement(Fragment, null, ...renderProse(notice))
+  const drawn = typeof notice === "string" ? renderMarked(notice) : renderProse(notice)
+  return typeof drawn === "string" ? drawn : createElement(Fragment, null, ...drawn)
 }
 
 /// Fallback window (seconds) used before the bootstrap document lands, matching

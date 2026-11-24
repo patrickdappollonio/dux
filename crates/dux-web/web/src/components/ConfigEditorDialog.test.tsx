@@ -161,4 +161,19 @@ describe("ConfigEditorDialog conflict", () => {
     reload.click()
     expect(store.openConfigEditor).toHaveBeenCalled()
   })
+  it("draws the command in the refusal as a chip, with its words and no backticks", () => {
+    const refusal =
+      "config.toml changed on disk since you opened it (a `dux config set`, a blocked address, or another editor), and saving would undo that change."
+    seed({
+      configEditorOpen: true,
+      configEditorContent: "[ui]\n",
+      configEditorConflict: refusal,
+    } as Partial<DuxState>)
+    render(<ConfigEditorDialog />)
+    const box = document.querySelector("[data-stale-save]")
+    const chips = box!.querySelectorAll("[data-slot='inline-code']")
+    expect([...chips].map((chip) => chip.textContent)).toEqual(["dux config set"])
+    expect(box?.textContent).toContain(refusal.replaceAll("`", ""))
+    expect(box?.textContent).not.toContain("`")
+  })
 })

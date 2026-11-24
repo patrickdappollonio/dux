@@ -169,6 +169,41 @@ export function renderProse(prose: Prose): ReactNode[] {
   )
 }
 
+// Sentences the browser shows but dux's server wrote, as a plain string: a
+// refusal's text, a stored error, a relayed reason. Their commands, settings and
+// files are marked with backticks, the way the config file's own comments and
+// the settings descriptions mark them. Nothing in such a string says which
+// backticks are dux's and which came from text a person typed that the sentence
+// echoes back, so a span is read only where it can only be dux's marking:
+// every backtick pairs up (an odd count leaves the whole text as typed, so one
+// echoed backtick cannot shift the rest), and each span holds a word on a single
+// line with no space at either end. Anything else stays as typed.
+
+/** The sentence's backticked spans as names; the text itself when it has none. */
+export function markedProse(text: string): Prose {
+  const parts = text.split("`")
+  if (parts.length < 3 || parts.length % 2 === 0) return [text]
+  const spans = parts.filter((_, index) => index % 2 === 1)
+  if (spans.some((span) => span === "" || span !== span.trim() || /[\r\n]/.test(span))) {
+    return [text]
+  }
+  return parts.flatMap((part, index): ProseSegment[] =>
+    index % 2 === 1 ? [chip(part)] : part === "" ? [] : [part],
+  )
+}
+
+/**
+ * A server-written sentence for the screen: each backticked span drawn as the
+ * shared chip with the backticks gone, a string with none returned as it came.
+ * The one conversion every component that shows relayed text goes through
+ * (`ErrorLine`, `Notice`, the toasts, a disabled control's hint), so no caller
+ * has to remember it. What a screen reader reads is the chip's text.
+ */
+export function renderMarked(text: string): string | ReactNode[] {
+  const segments = markedProse(text)
+  return segments.length === 1 && segments[0] === text ? text : renderProse(segments)
+}
+
 // The three bodies of the dialog that offers a pull request's repository. The
 // terminal UI builds the same segments (`dux_core::prose`), and the shared
 // fixture pins the words.

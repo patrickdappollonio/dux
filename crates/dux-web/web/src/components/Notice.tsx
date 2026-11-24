@@ -3,6 +3,7 @@ import { X } from "lucide-react"
 import { type ComponentProps, type ReactNode, type Ref, useId } from "react"
 
 import { Button } from "@/components/ui/button"
+import { renderMarked } from "@/lib/prose"
 import { cn } from "@/lib/utils"
 
 // A shape, a tone, an optional icon, words and optional buttons. The caller
@@ -159,7 +160,7 @@ export function Notice({
     <>
       {lead != null ? <strong className={cn("font-semibold", look.heading)}>{lead}</strong> : null}
       {lead != null ? " " : null}
-      {children}
+      {typeof children === "string" ? renderMarked(children) : children}
     </>
   )
   const body = (

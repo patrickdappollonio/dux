@@ -47,6 +47,7 @@ import {
   proseText,
   quotedChip,
   renderProse,
+  renderMarked,
   endProse,
   joinProse,
   prose,
@@ -476,5 +477,28 @@ describe("the sentences that offer a pull request's repository", () => {
       { name: "#3", quoted: false },
       ".",
     ])
+  })
+})
+
+describe("renderMarked", () => {
+  const words = (text: string) => {
+    const { container } = render(<>{renderMarked(text)}</>)
+    return {
+      text: container.textContent,
+      chips: [...container.querySelectorAll("code")].map((c) => c.textContent),
+    }
+  }
+
+  it("draws a backticked span as a chip and drops the backticks", () => {
+    expect(words("Run `dux config set` then `dux reload` now.")).toEqual({
+      text: "Run dux config set then dux reload now.",
+      chips: ["dux config set", "dux reload"],
+    })
+  })
+
+  it("leaves text it cannot read as spans exactly as typed", () => {
+    for (const text of ["no ticks here", "a lone ` tick", "odd `a` and `b", "empty `` span", "`a b ` padded", "a `b\nc` break"]) {
+      expect(renderMarked(text)).toBe(text)
+    }
   })
 })
