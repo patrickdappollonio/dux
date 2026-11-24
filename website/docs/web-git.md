@@ -152,7 +152,7 @@ The changes pane's header carries two controls: an **Editor** button that takes 
 
 **The header stays in every state the pane can be in:** while the changes load, when they fail to, and when the pane has nothing to show because a standalone agent's folder has no repository or an agent's directory is gone.
 
-- **Commit…** and **Refresh changes** stay in the menu greyed out, with a line at the top saying why. They come back on their own once the folder holds a repository again; there is nothing to press, because dux looks at the folder again within about ten seconds while the agent is selected.
+- **Commit…** and **Refresh changes** stay in the menu greyed out, with a line above them saying why. They come back on their own once the folder holds a repository again; there is nothing to press, because dux looks at the folder again within about ten seconds while the agent is selected.
 - **Push** and **Pull** are greyed out the same way when a managed agent's working copy is gone. A [standalone agent](/docs/creating-agents) never has them, so they are absent from its menu rather than greyed out.
 - **Hide Changes pane** and the **Editor** button keep working, except that the button is greyed out too when the directory itself is gone.
 

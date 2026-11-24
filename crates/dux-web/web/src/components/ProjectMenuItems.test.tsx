@@ -176,3 +176,30 @@ describe("ProjectMenuItems default-branch entry", () => {
     expect(screen.queryByText("Checkout default branch…")).toBeNull()
   })
 })
+
+// A project whose folder is gone greys the two entries that need it, and says
+// why in the words the Projects list uses for the same state.
+describe("ProjectMenuItems for a project whose folder is missing", () => {
+  const reasonOf = (text: string) => {
+    const item = screen.getByText(text).closest('[role="menuitem"]') as HTMLElement
+    const id = item.getAttribute("aria-describedby")
+    return { item, why: id ? document.getElementById(id) : null }
+  }
+
+  it("says Folder missing beneath each entry that needs the folder", async () => {
+    pathMissing = true
+    await openMenu()
+    for (const text of ["New terminal at the project root", "Change base branch…"]) {
+      const { item, why } = reasonOf(text)
+      expect(item.getAttribute("aria-disabled"), text).toBe("true")
+      expect(why?.textContent, text).toBe("Folder missing")
+      expect(item.nextElementSibling?.contains(why ?? null), text).toBe(true)
+    }
+  })
+
+  it("says nothing while the folder is there", async () => {
+    await openMenu()
+    expect(screen.queryByText("Folder missing")).toBeNull()
+    expect(reasonOf("Change base branch…").item.hasAttribute("aria-describedby")).toBe(false)
+  })
+})

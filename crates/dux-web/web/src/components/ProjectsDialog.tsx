@@ -7,6 +7,7 @@ import { useProjectSearch, type ProjectListRow } from "@/components/projectSearc
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { formatRegularCount } from "@/lib/formatRegularCount"
+import { PROJECT_FOLDER_MISSING } from "@/lib/projects"
 import {
   applyFrozenOrder,
   orderProjectsByRecency,
@@ -95,7 +96,7 @@ function ProjectsBody({ open, onClosed }: { open: boolean; onClosed: () => void 
           {/* The folder's tail is what tells two projects apart, so the path
               gives way at its start and the hover says all of it. */}
           <StartTruncatedText text={project.path} className="font-mono" tooltip />
-          {project.path_missing ? <Warning>Folder missing</Warning> : null}
+          {project.path_missing ? <Warning>{PROJECT_FOLDER_MISSING}</Warning> : null}
           <span className="flex shrink-0 items-center gap-1">
             <GitBranch className="size-3 shrink-0" />
             {project.leading_branch ?? "no base yet"}

@@ -199,7 +199,7 @@ same process if it was running, same link. It simply becomes the tab the agent o
 > [!IMPORTANT]
 > An agent always has a first tab, so its **only** tab cannot be closed. dux says so
 > rather than closing it, in the same words on both surfaces: on the web the *Close tab*
-> entry is greyed out with the reason above it, and in the terminal UI the close key
+> entry is greyed out with the reason beneath it, and in the terminal UI the close key
 > answers with that note instead of a confirmation.
 >
 > Add another tab first, or detach the agent to stop everything it is running (the Task

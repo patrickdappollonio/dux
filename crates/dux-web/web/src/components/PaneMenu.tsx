@@ -1,10 +1,13 @@
 import { Maximize2, Plus, Settings, SquareSlash } from "lucide-react"
-import { useId, type ReactNode, type Ref } from "react"
+import { type ReactNode, type Ref } from "react"
 
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/AgentActionsMenu"
+import { useAgentChangeReason } from "@/hooks/use-agent-change-reason"
 import { InputMenuItems } from "@/components/InputMenuItems"
+import { MenuItemReason } from "@/components/MenuReason"
+import { useMenuReason } from "@/hooks/use-menu-reason"
 import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TerminalActionsMenu } from "@/components/TerminalActionsMenu"
@@ -161,10 +164,13 @@ export function PaneMenuBody({
   const watched = useAgentRowWatch(
     subject.kind === "agent" ? subject.session.id : null,
   ).watched
+  // The agent's one reason, made here so the terminal group beneath its
+  // actions can name the line the agent's menu says at its head.
+  const agentReason = useAgentChangeReason(subject.kind === "agent" ? subject.session : null)
   // The subject's own rows.
   const actions: ReactNode =
     subject.kind === "agent" ? (
-      <AgentActionsMenu session={subject.session} />
+      <AgentActionsMenu session={subject.session} changeReason={agentReason} />
     ) : (
       <TerminalActionsMenu
         terminalId={subject.terminalId}
@@ -188,6 +194,8 @@ export function PaneMenuBody({
           owner={pane.owner}
           // The agent's own group above already opens this same editor.
           editorEntries={false}
+          // And already says why the agent's row may not change.
+          reasonAbove={agentReason}
         />
       </>
     ) : null
@@ -253,30 +261,24 @@ function FoldedHeaderGroup({
   controls: FoldedHeaderControls
   theater: boolean
 }) {
-  const macrosReasonId = useId()
-  const newTabReasonId = useId()
-  const macrosBlocked = controls.macrosBlocked
-  const newTabBlocked = controls.newTabBlocked ?? null
+  const macrosReason = useMenuReason(controls.macrosBlocked)
+  const newTabReason = useMenuReason(controls.newTabBlocked ?? null)
   return (
     <>
       <DropdownMenuGroup>
         <DropdownMenuLabel>{MENU_GROUP_LABELS.pane}</DropdownMenuLabel>
         {controls.newTab ? (
-          <DropdownMenuGroup>
-            {newTabBlocked !== null ? (
-              <DropdownMenuLabel id={newTabReasonId} className="max-w-64">
-                {newTabBlocked}
-              </DropdownMenuLabel>
-            ) : null}
+          <>
             <DropdownMenuItem
-              disabled={newTabBlocked !== null}
-              aria-describedby={newTabBlocked !== null ? newTabReasonId : undefined}
+              disabled={newTabReason.text !== null}
+              aria-describedby={newTabReason.describedBy}
               onClick={controls.newTab}
             >
               <Plus />
               New tab…
             </DropdownMenuItem>
-          </DropdownMenuGroup>
+            <MenuItemReason reason={newTabReason} />
+          </>
         ) : null}
         {theater ? null : (
           <DropdownMenuItem onClick={controls.theater}>
@@ -284,24 +286,16 @@ function FoldedHeaderGroup({
             Theater
           </DropdownMenuItem>
         )}
-        {/* A group of its own, because the primitive's label part names its
-          * group: the reason is shown once and the row names it as its
-          * description, the way the Macros… button's tooltip says it. */}
-        <DropdownMenuGroup>
-          {macrosBlocked !== null ? (
-            <DropdownMenuLabel id={macrosReasonId} className="max-w-64">
-              {macrosBlocked}
-            </DropdownMenuLabel>
-          ) : null}
-          <DropdownMenuItem
-            disabled={macrosBlocked !== null}
-            aria-describedby={macrosBlocked !== null ? macrosReasonId : undefined}
-            onClick={controls.macros}
-          >
-            <SquareSlash />
-            Macros…
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
+        {/* The reason the Macros… button's tooltip gives, said beneath the row. */}
+        <DropdownMenuItem
+          disabled={macrosReason.text !== null}
+          aria-describedby={macrosReason.describedBy}
+          onClick={controls.macros}
+        >
+          <SquareSlash />
+          Macros…
+        </DropdownMenuItem>
+        <MenuItemReason reason={macrosReason} />
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
     </>

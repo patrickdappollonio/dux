@@ -218,6 +218,9 @@ export interface NewLauncherRow {
   /** True when activating it opens a further step, which earns a chevron. */
   opensStep: boolean
   disabled: boolean
+  /** What a disabled row is waiting for: a project, which its group's lead
+   *  sentence names, or an agent, which nothing says yet. Null when enabled. */
+  waitingFor: "project" | "agent" | null
   action: NewLauncherAction
 }
 
@@ -322,6 +325,7 @@ export function newLauncherModel(ctx: {
       icon: entry.icon,
       opensStep,
       disabled: noProjects && NEEDS_A_PROJECT.has(entry.id),
+      waitingFor: noProjects && NEEDS_A_PROJECT.has(entry.id) ? "project" : null,
       action: { kind: "run", run: entry.run },
     }
   }
@@ -355,6 +359,7 @@ export function newLauncherModel(ctx: {
         icon: SquareTerminal,
         opensStep: true,
         disabled: noAgents,
+        waitingFor: noAgents ? "agent" : null,
         action: { kind: "pick-agent" },
       },
       ...terminalItems.map(row),

@@ -41,6 +41,7 @@ function installStubs() {
 installStubs()
 
 const { TerminalActionsMenu } = await import("./TerminalActionsMenu")
+const { MenuReasonsHead } = await import("./MenuReason")
 const { editorRootForTarget } = await import("@/lib/editorRoot")
 const { standaloneEditorHash } = await import("@/lib/store")
 const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
@@ -160,5 +161,36 @@ describe("the terminal's own actions", () => {
     registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver: "other" })
     await open({ kind: "session", sessionId: "s1" })
     expect(item("Close…").getAttribute("aria-disabled")).toBe("true")
+  })
+
+  // Under the agent's menu the agent's reason is said once, at its head, and
+  // the terminal group's Close… names that line instead of saying it again.
+  it("names the agent's own reason on Close… under the agent's menu", async () => {
+    registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver: "other" })
+    const { useAgentChangeReason } = await import("@/hooks/use-agent-change-reason")
+    function Both() {
+      const reason = useAgentChangeReason({ id: "s1", tabs: [], workspace: { kind: "managed" } } as never)
+      return (
+        <DropdownMenu>
+          <DropdownMenuTrigger>open</DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <MenuReasonsHead reasons={[reason]} />
+            <TerminalActionsMenu
+              terminalId="t7"
+              owner={{ kind: "session", sessionId: "s1" }}
+              reasonAbove={reason}
+            />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )
+    }
+    render(<Both />)
+    fireEvent.click(screen.getByText("open"))
+    await screen.findByRole("menu")
+    const close = item("Close…")
+    expect(close.getAttribute("aria-disabled")).toBe("true")
+    const lines = document.querySelectorAll('[data-slot="menu-reason"]')
+    expect(lines).toHaveLength(1)
+    expect(close.getAttribute("aria-describedby")).toBe(lines[0]!.id)
   })
 })

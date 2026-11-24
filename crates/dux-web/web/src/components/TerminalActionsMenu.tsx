@@ -1,6 +1,7 @@
-import { useId } from "react"
 import { ExternalLink, FileCode2, X } from "lucide-react"
 
+import { MenuItemReason } from "@/components/MenuReason"
+import { useMenuReason, type MenuReasonHandle } from "@/hooks/use-menu-reason"
 import {
   DropdownMenuGroup,
   DropdownMenuItem,
@@ -30,12 +31,16 @@ export function TerminalActionsMenu({
   terminalId,
   owner,
   editorEntries = true,
+  reasonAbove,
 }: {
   terminalId: string
   owner: TerminalOwnerRef
   /** False where the menu already carries the editor entries for the same root,
    * so none is listed twice: an agent's menu over its own companion terminal. */
   editorEntries?: boolean
+  /** The reason a menu above this group already says for the agent's row: Close…
+   * names that line rather than saying it a second time. */
+  reasonAbove?: MenuReasonHandle
 }) {
   // The editor's root is the directory this terminal was SPAWNED in, and a
   // terminal owned by an agent is sent to that agent's editor instead: same
@@ -46,11 +51,13 @@ export function TerminalActionsMenu({
   // its close confirm has nothing to confirm until then, so Close… waits.
   const listed = spineListsTerminal(useDux().spine?.terminals, terminalId)
   // Closing changes the row the terminal belongs to: its agent's, or its own.
-  const reasonId = useId()
   const sessionId = ownerSessionId(owner)
   const changeReason = usePartChangeReason()(
     sessionId !== null ? { sessionId } : { terminalId },
   )
+  // Said here unless a menu above already says it: an agent's terminal sits
+  // under the agent's menu, which says it at its head, and Close… names that.
+  const closeReason = useMenuReason(reasonAbove === undefined ? changeReason : null)
   return (
     <DropdownMenuGroup>
       {/* Inside the group rather than above it: the primitive's label part reads
@@ -88,26 +95,17 @@ export function TerminalActionsMenu({
       {/* Neutral color per the destructive convention: the `…` plus
           ConfirmDeleteTerminalDialog are the danger signal. */}
       {listed ? (
-        // A group of its own, because the primitive's label part names its
-        // group. The reason is a label rather than a tooltip, because a
-        // disabled item takes no pointer events and touch has no hover; it is
-        // shown only for a terminal that is a row of its own, since an agent's
-        // terminal sits under the agent's menu, which says it at its head.
-        <DropdownMenuGroup>
-          {changeReason !== null && sessionId === null ? (
-            <DropdownMenuLabel id={reasonId} className="max-w-60 whitespace-normal">
-              {changeReason}
-            </DropdownMenuLabel>
-          ) : null}
+        <>
           <DropdownMenuItem
             disabled={changeReason !== null}
-            aria-describedby={changeReason !== null && sessionId === null ? reasonId : undefined}
+            aria-describedby={closeReason.describedBy ?? reasonAbove?.describedBy}
             onClick={() => openDeleteTerminal(terminalId)}
           >
             <X />
             Close…
           </DropdownMenuItem>
-        </DropdownMenuGroup>
+          <MenuItemReason reason={closeReason} />
+        </>
       ) : null}
     </DropdownMenuGroup>
   )

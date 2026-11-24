@@ -18,6 +18,7 @@ import type { ChangesSlice, DuxState } from "@/lib/store"
 import { HOVER_REVEAL, REVEAL_ROW } from "@/lib/hoverReveal"
 import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 import { toastText } from "@/test/toastText"
+import { menuLayout, separatorProblems } from "@/test/menuLayout"
 
 // The Changes pane's "Refresh changes" item has exactly one job that a reader
 // cannot see by looking at it: it must take the FORCING path. The store's
@@ -555,13 +556,13 @@ describe("the Changes pane header in a quiet state", () => {
     })
   }
 
-  // The reason line is the menu primitive's own label, inside a real group.
-  it("puts the reason in the menu's label part", async () => {
+  // The reason line is the shared menu reason, which the git items name.
+  it("says the reason through the shared menu reason", async () => {
     mockState = folderAt("no_repo", folderStates[0]!.sentence)
     render(<ChangedFiles />)
     const menu = await openMenu()
     const reason = menu.getByText("This folder has no git repository.")
-    expect(reason.getAttribute("data-slot")).toBe("dropdown-menu-label")
+    expect(reason.getAttribute("data-slot")).toBe("menu-reason")
     expect(itemOf(menu, "Commit…").getAttribute("aria-describedby")).toBe(reason.id)
   })
 
@@ -653,8 +654,12 @@ describe("the Changes pane header in a quiet state", () => {
       const item = itemOf(menu, "Open editor")
       expect(item.getAttribute("aria-disabled")).toBe("true")
       expect(reasonOf(item)).toBe("This folder no longer exists on disk.")
-      // The git items share the sentence, which the menu says once.
+      // The git items share the sentence, which the menu says once, first.
       expect(menu.getAllByText("This folder no longer exists on disk.")).toHaveLength(1)
+      const layout = menuLayout(screen.getByRole("menu"))
+      expect(layout[0]).toBe("reason: This folder no longer exists on disk.")
+      expect(layout[1]).toBe("---")
+      expect(separatorProblems(layout)).toEqual([])
     } finally {
       restore()
     }
@@ -2658,6 +2663,66 @@ describe("the Changes pane while this page does not drive the agent", () => {
     expect(itemOf(menu, "Edit").getAttribute("aria-disabled")).not.toBe("true")
     fireEvent.click(itemOf(menu, "Stage"))
     expect(stageOne).not.toHaveBeenCalled()
+  })
+
+  // The reason covers Stage and Discard, not Edit: it sits over them, below
+  // the Edit that stays live, and never above it.
+  it("says a row's reason over the writes it greys, beneath the live Edit", async () => {
+    mockState = withFiles([], [["a.ts", "M"]])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Actions for a.ts"))
+    const layout = menuLayout(await screen.findByRole("menu"))
+    expect(layout).toEqual(["Edit", "---", `reason: ${OTHER}`, "Stage", "---", "Discard…"])
+    expect(separatorProblems(layout)).toEqual([])
+  })
+
+  it("starts a row's menu on the reason when there is no Edit above it", async () => {
+    // A deleted file has nothing to edit.
+    mockState = withFiles([], [["gone.ts", "D"]])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Actions for gone.ts"))
+    const layout = menuLayout(await screen.findByRole("menu"))
+    expect(layout[0]).toBe(`reason: ${OTHER}`)
+    expect(separatorProblems(layout)).toEqual([])
+  })
+
+  // The folded editor has no reason of its own here, so the git reason sits over
+  // the git items, set apart from the editor item above.
+  it("puts the git reason over the git items, beneath the folded editor", async () => {
+    const restore = headerWidth(120)
+    try {
+      mockState = withFiles([["staged.ts", "M"]], [])
+      driveElsewhere()
+      render(<ChangedFiles />)
+      fireEvent.click(screen.getByLabelText("Changes actions"))
+      const layout = menuLayout(await screen.findByRole("menu"))
+      expect(layout).toEqual([
+        "Open editor",
+        "---",
+        `reason: ${OTHER}`,
+        "Commit…",
+        "Push",
+        "Pull",
+        "Refresh changes",
+        "---",
+        "Hide Changes pane",
+      ])
+      expect(separatorProblems(layout)).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it("starts the unfolded header menu on the git reason, set apart from the git items", async () => {
+    mockState = withFiles([["staged.ts", "M"]], [])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    const layout = menuLayout(await screen.findByRole("menu"))
+    expect(layout.slice(0, 3)).toEqual([`reason: ${OTHER}`, "---", "Commit…"])
+    expect(separatorProblems(layout)).toEqual([])
   })
 
   it("greys out the selection's verbs but keeps selecting", () => {
