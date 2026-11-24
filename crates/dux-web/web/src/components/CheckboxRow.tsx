@@ -1,7 +1,8 @@
 import type { ReactNode } from "react"
+import { AlertTriangle } from "lucide-react"
 
 import { Checkbox } from "@/components/ui/checkbox"
-import { CHECK_LABEL_TEXT, FIELD_HELP_TEXT } from "@/components/ui/form-text"
+import { FIELD_HELP_TEXT, FIELD_LABEL_TEXT, FIELD_WARNING_TEXT } from "@/components/ui/form-text"
 import { cn } from "@/lib/utils"
 
 interface CheckboxRowProps {
@@ -12,6 +13,8 @@ interface CheckboxRowProps {
   children: ReactNode
   /** A line under the words, read with the box. */
   help?: ReactNode
+  /** A "warning" help line is drawn in the warning colour behind a warning sign. */
+  helpTone?: "warning"
 }
 
 // A dialog's option row: the box and a label that is the whole rest of the row.
@@ -28,6 +31,7 @@ export function CheckboxRow({
   disabled,
   children,
   help,
+  helpTone,
 }: CheckboxRowProps) {
   const helpId = help != null ? `${id}-help` : undefined
   const row = (
@@ -44,7 +48,7 @@ export function CheckboxRow({
         htmlFor={id}
         className={cn(
           "flex min-w-0 flex-1 items-center self-stretch peer-data-disabled:cursor-not-allowed peer-data-disabled:opacity-50",
-          CHECK_LABEL_TEXT,
+          FIELD_LABEL_TEXT,
         )}
       >
         <span className="min-w-0">{children}</span>
@@ -56,9 +60,16 @@ export function CheckboxRow({
   return (
     <div className="flex flex-col gap-1">
       {row}
-      <div id={helpId} className={cn("pl-6", FIELD_HELP_TEXT)}>
-        {help}
-      </div>
+      {helpTone === "warning" ? (
+        <div id={helpId} className={cn("flex items-start gap-1.5 pl-6", FIELD_WARNING_TEXT)}>
+          <AlertTriangle aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+          <span>{help}</span>
+        </div>
+      ) : (
+        <div id={helpId} className={cn("pl-6", FIELD_HELP_TEXT)}>
+          {help}
+        </div>
+      )}
     </div>
   )
 }

@@ -52,7 +52,7 @@ const NOT_FIELDS: Record<string, { count: number; reason: string }> = {
   "components/terminal/partPieces.tsx": { count: 1, reason: "the headline of the file-drop overlay" },
 }
 
-const SHARED_LOOKS = /\b(?:FIELD_LABEL_TEXT|FIELD_HELP_TEXT|FIELD_WARNING_TEXT|FIELD_CODE_TEXT|CHECK_LABEL_TEXT)\b/
+const SHARED_LOOKS = /\b(?:FIELD_LABEL_TEXT|FIELD_HELP_TEXT|FIELD_WARNING_TEXT|FIELD_CODE_TEXT|FIELD_OPTIONAL_TEXT)\b/
 
 /** The whole opening tag that starts at `at` (`code[at]` is its `<`): it ends at the
  * first `>` outside a quote, a `{…}` expression and a template, so an arrow

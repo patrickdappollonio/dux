@@ -155,7 +155,7 @@ describe("warning tone", () => {
   })
 
   it.each([
-    "components/RenameSessionDialog.tsx",
+    "components/ui/form-text.ts",
     "components/AddProjectDialog.tsx",
     "components/AgentInfoDialog.tsx",
   ])("%s paints its warning with the token", (name) => {

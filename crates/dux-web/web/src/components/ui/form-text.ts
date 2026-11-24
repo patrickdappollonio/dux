@@ -1,6 +1,5 @@
 // The words around a field, shared by `FormGroup` and `CheckboxRow`.
 export const FIELD_LABEL_TEXT = "text-sm font-medium text-foreground"
-export const CHECK_LABEL_TEXT = "text-sm"
 // The "(optional)" after a label, at normal weight in the help's colour.
 export const FIELD_OPTIONAL_TEXT = "font-normal text-muted-foreground"
 export const FIELD_HELP_TEXT = "text-xs text-muted-foreground"
