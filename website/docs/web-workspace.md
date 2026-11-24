@@ -241,7 +241,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 
 **Where the button is.**
 
-- **On a computer** it is in the terminal's header, beside **Macros…** and the pane's own `⋯`.
+- **On a computer** it is in the terminal's header, beside **Macros…** and the pane's own `⋯`. When a long name needs the room, the header's buttons move into that `⋯` one at a time, **Theater** first, then **Macros…**, then **New tab…**, and come back as the room returns.
 - **On a phone** it is the first button in the flap that hangs off the band above the terminal. That band is the strip of the part on screen when the agent has two or more tabs or two or more terminals (its tab strip over the agent, the dock strip over a terminal) and the header itself otherwise, and the flap takes the colour of whichever one it is hanging from, so it always reads as part of it.
 
 **What happens when you go in.**
@@ -579,7 +579,7 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 
 dux picks the layout for you, and you can pick the other one from the app menu: **Use the computer layout** on the phone layout, **Use the phone layout** on the computer layout. A phone with a keyboard attached may have room for the computer layout, and a small window may read better as a phone. Your choice belongs to that browser at that dux address: every tab and window of it follows the choice at once, and nothing else does (not another browser, not another device). It survives rotating and reloading. While it is in force, **Choose the layout automatically** in the same menu hands the decision back to dux.
 
-On a screen narrower than a tablet, the computer layout keeps the sidebar at its icon rail so the page keeps its room and the cog stays on screen. Its expand button slides the whole sidebar out over the page instead, and picking something tucks it away again. The changes pane starts closed there too; its button beside the cog opens it, and opening or closing it at that width does not change your **Show the Changes pane** preference.
+On a screen narrower than a tablet, the computer layout keeps the sidebar at its icon rail so the page keeps its room and the cog stays on screen. Its expand button slides the whole sidebar out over the page instead, and picking something tucks it away again. The changes pane starts closed there too; its button just before the pane's `⋯` opens it, and opening or closing it at that width does not change your **Show the Changes pane** preference.
 
 ### The screens
 

@@ -71,16 +71,16 @@ export type PaneMenuSettingsDrill = {
   settingsDrill: boolean
 }
 
-/// The computer header's own controls while they are folded into its `⋯`: each
-/// row runs what its button runs. `newTab` is absent where the pane has no New
-/// tab…, and `newTabBlocked` and `macrosBlocked` are the reasons the New tab…
-/// and Macros… buttons would be disabled.
+/// The computer header's controls that are folded into its `⋯` now: each row
+/// runs what its button runs, and a control still in the header is absent.
+/// `newTabBlocked` and `macrosBlocked` are the reasons those buttons would be
+/// disabled.
 export type FoldedHeaderControls = {
   newTab?: () => void
   newTabBlocked?: string | null
-  theater: () => void
-  macros: () => void
-  macrosBlocked: string | null
+  theater?: () => void
+  macros?: () => void
+  macrosBlocked?: string | null
 }
 
 function paneMenuLabel(subject: PaneMenuSubject): string {
@@ -261,8 +261,11 @@ function FoldedHeaderGroup({
   controls: FoldedHeaderControls
   theater: boolean
 }) {
-  const macrosReason = useMenuReason(controls.macrosBlocked)
+  const macrosReason = useMenuReason(controls.macrosBlocked ?? null)
   const newTabReason = useMenuReason(controls.newTabBlocked ?? null)
+  const theaterRow = controls.theater && !theater ? controls.theater : null
+  // Theater folded alone while the mode is on leaves nothing to head.
+  if (!controls.newTab && !theaterRow && !controls.macros) return null
   return (
     <>
       <DropdownMenuGroup>
@@ -280,22 +283,26 @@ function FoldedHeaderGroup({
             <MenuItemReason reason={newTabReason} />
           </>
         ) : null}
-        {theater ? null : (
-          <DropdownMenuItem onClick={controls.theater}>
+        {theaterRow ? (
+          <DropdownMenuItem onClick={theaterRow}>
             <Maximize2 />
             Theater
           </DropdownMenuItem>
-        )}
+        ) : null}
         {/* The reason the Macros… button's tooltip gives, said beneath the row. */}
-        <DropdownMenuItem
-          disabled={macrosReason.text !== null}
-          aria-describedby={macrosReason.describedBy}
-          onClick={controls.macros}
-        >
-          <SquareSlash />
-          Macros…
-        </DropdownMenuItem>
-        <MenuItemReason reason={macrosReason} />
+        {controls.macros ? (
+          <>
+            <DropdownMenuItem
+              disabled={macrosReason.text !== null}
+              aria-describedby={macrosReason.describedBy}
+              onClick={controls.macros}
+            >
+              <SquareSlash />
+              Macros…
+            </DropdownMenuItem>
+            <MenuItemReason reason={macrosReason} />
+          </>
+        ) : null}
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
     </>
