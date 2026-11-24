@@ -91,6 +91,15 @@ describe("AttachPullRequestDialog", () => {
     )
   })
 
+  it("names its one box by what it takes and reads the agent's count with it", () => {
+    seed("s1", "", [bare])
+    render(<AttachPullRequestDialog />)
+    const box = screen.getByRole("textbox", { name: "Pull request URL or number" })
+    expect(document.getElementById(box.getAttribute("aria-describedby")!)?.textContent).toBe(
+      "quacky-mallard has no pull requests yet. One from another repository works too.",
+    )
+  })
+
   it("names the agent as a chip and counts the pull requests it has, since attaching adds", () => {
     seed("s1", "", [
       {
