@@ -3508,10 +3508,8 @@ impl App {
             if self.terminal_input.has_unread() {
                 break;
             }
-            if !matches!(
-                self.input_target,
-                InputTarget::Agent | InputTarget::Terminal
-            ) {
+            // A key that opened a dialog leaves the next read to its reader.
+            if self.run_input_reader() != super::RunInputReader::Forwarding {
                 break;
             }
             // Look without waiting: stop if no data.

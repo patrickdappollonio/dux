@@ -956,6 +956,24 @@ mod dialogs_and_take_over {
         assert_every_cut_matches(setup, &pieces.concat(), &want);
     }
 
+    /// With the take-over card up in fullscreen, the palette key opens the
+    /// palette, and a key read just after it, in the next read the maximized
+    /// pane takes within its frame, reaches the palette: here Escape, which
+    /// closes it. The palette key ends the pane's own read buffer, so the
+    /// Escape comes in a read of its own.
+    #[test]
+    fn a_key_in_the_read_after_the_palette_key_reaches_the_palette() {
+        let setup = Setup {
+            driver: Driver::Browser,
+            ..MAXIMIZED
+        };
+        let palette = default_key(Action::OpenPalette);
+        let filler = vec![b'a'; 4096 - palette.len()];
+        let pieces: &[&[u8]] = &[&filler, &palette, b"\x1b"];
+        let want = assert_burst_matches_paced(setup, pieces);
+        assert_eq!(want.prompt, "None", "the Escape closed the palette");
+    }
+
     /// A paste begun in the read that carries the take-over key, its line
     /// break cut across two reads, arrives as one paste whose line breaks
     /// are the program's, however the reads cut it.
