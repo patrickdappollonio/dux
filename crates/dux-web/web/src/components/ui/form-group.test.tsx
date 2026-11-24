@@ -104,7 +104,7 @@ describe("FormGroup", () => {
           control="single"
           label="Text"
           help="Each line is sent as Alt+Enter."
-          note="Shown on agents."
+          notes={[{ words: "Shown on agents." }]}
           error="The text is empty."
           describedBy="elsewhere"
         >
@@ -148,7 +148,7 @@ describe("FormGroup", () => {
 
   it("draws the help between the label and the field when stacked", () => {
     render(
-      <FormGroup layout="stacked" control="single" label="Text" help="Help words." note="Note words.">
+      <FormGroup layout="stacked" control="single" label="Text" help="Help words." notes={[{ words: "Note words." }]}>
         {(field) => <Textarea {...field} />}
       </FormGroup>,
     )
@@ -191,7 +191,7 @@ describe("FormGroup", () => {
 
   it("puts the control beside the words on a computer, its note among the words", () => {
     render(
-      <FormGroup layout="side" control="single" label="Port" help="Help words." note="Note words.">
+      <FormGroup layout="side" control="single" label="Port" help="Help words." notes={[{ words: "Note words." }]}>
         {(field) => <Input {...field} />}
       </FormGroup>,
     )
@@ -237,6 +237,138 @@ describe("FormGroup", () => {
     )
     expect(screen.getByRole("textbox", { name: "Name" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "More" })).toBeTruthy()
+  })
+
+  it("says so when a field has no name: an empty label, an empty spoken name, a label that draws nothing", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    const empty = [
+      <FormGroup key="a" layout="stacked" control="single" label="">
+        {(field) => <Input {...field} />}
+      </FormGroup>,
+      <FormGroup key="b" layout="stacked" control="single" spokenName="  ">
+        {(field) => <Input {...field} />}
+      </FormGroup>,
+      <FormGroup key="c" layout="stacked" control="single" label={<></>}>
+        {(field) => <Input {...field} />}
+      </FormGroup>,
+    ]
+    for (const group of empty) {
+      error.mockClear()
+      const { unmount } = render(group)
+      expect(error, String(group.key)).toHaveBeenCalledWith(expect.stringContaining("has no name"))
+      unmount()
+    }
+  })
+
+  it("raises nothing when the control carries all of its wiring, a select and a group included", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    render(
+      <>
+        <FormGroup layout="stacked" control="single" label="Name" help="Help." notes={[{ words: "Note." }]} error="Bad." invalid>
+          {(field) => <Input {...field} />}
+        </FormGroup>
+        <FormGroup layout="stacked" control="single" label="Provider" help="Help." invalid>
+          {(field) => (
+            <Select defaultValue="a">
+              <SelectTrigger {...field}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="a">alpha</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+        </FormGroup>
+        <FormGroup layout="stacked" control="group" label="Shown on" help="Help." invalid>
+          {(field) => (
+            <RadioGroup
+              aria-labelledby={field["aria-labelledby"]}
+              aria-describedby={field["aria-describedby"]}
+              aria-invalid={field["aria-invalid"]}
+            >
+              <Radio.Root value="a">A</Radio.Root>
+            </RadioGroup>
+          )}
+        </FormGroup>
+      </>,
+    )
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  it("says so when the control drops or overrides part of its wiring, not only its id", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    const cases: [string, React.ReactElement][] = [
+      [
+        "aria-describedby",
+        <FormGroup key="a" layout="stacked" control="single" label="Text" help="Help.">
+          {(field) => <Textarea {...field} aria-describedby={undefined} />}
+        </FormGroup>,
+      ],
+      [
+        "aria-invalid",
+        <FormGroup key="b" layout="stacked" control="single" label="Text" invalid>
+          {(field) => <Textarea {...field} aria-invalid={undefined} />}
+        </FormGroup>,
+      ],
+      [
+        "aria-invalid",
+        <FormGroup key="c" layout="stacked" control="group" label="Shown on" invalid>
+          {(field) => (
+            <RadioGroup aria-labelledby={field["aria-labelledby"]} aria-describedby={field["aria-describedby"]}>
+              <Radio.Root value="a">A</Radio.Root>
+            </RadioGroup>
+          )}
+        </FormGroup>,
+      ],
+    ]
+    for (const [part, group] of cases) {
+      error.mockClear()
+      const { unmount } = render(group)
+      expect(error, String(group.key)).toHaveBeenCalledWith(expect.stringContaining(part))
+      unmount()
+    }
+  })
+
+  it("draws every note line in order, a warning in the warning colour, and reads them all with the field", () => {
+    render(
+      <FormGroup
+        layout="side"
+        control="single"
+        label="Port"
+        help="Help."
+        notes={[{ words: "Zero means off." }, { words: "Not saved yet.", tone: "warning" }, { words: undefined }]}
+      >
+        {(field) => <Input {...field} />}
+      </FormGroup>,
+    )
+    expect(descriptions(screen.getByRole("textbox", { name: "Port" }))).toEqual([
+      "Help.",
+      "Zero means off.",
+      "Not saved yet.",
+    ])
+    expect(screen.getByText("Zero means off.").className).toContain("text-muted-foreground")
+    expect(screen.getByText("Not saved yet.").className).toContain("text-dux-warning")
+  })
+
+  it("puts the notes among a side field's words, above its control on a phone, and under a stacked field's control", () => {
+    phone = true
+    render(
+      <>
+        <FormGroup layout="side" width="wide" control="single" label="Side" notes={[{ words: "Side note." }]} error="Side error.">
+          {(field) => <Input {...field} />}
+        </FormGroup>
+        <FormGroup layout="stacked" control="single" label="Stack" notes={[{ words: "Stack note." }]} error="Stack error.">
+          {(field) => <Input {...field} />}
+        </FormGroup>
+      </>,
+    )
+    const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+    const side = screen.getByRole("textbox", { name: "Side" })
+    expect(follows(screen.getByText("Side note."), side)).toBe(true)
+    expect(follows(screen.getByText("Side error."), side)).toBe(true)
+    const stack = screen.getByRole("textbox", { name: "Stack" })
+    expect(follows(stack, screen.getByText("Stack note."))).toBe(true)
+    expect(follows(stack, screen.getByText("Stack error."))).toBe(true)
   })
 
   it("says so when a caller leaves the wiring off its control", () => {

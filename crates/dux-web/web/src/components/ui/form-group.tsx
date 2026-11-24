@@ -1,7 +1,7 @@
-import { useEffect, useId, useRef, type ReactNode } from "react"
+import { useEffect, useId, useRef, type ReactElement, type ReactNode } from "react"
 
 import { ErrorLine, type ErrorLineAnnounce } from "@/components/ErrorLine"
-import { FIELD_HELP_TEXT, FIELD_LABEL_TEXT } from "@/components/ui/form-text"
+import { FIELD_HELP_TEXT, FIELD_LABEL_TEXT, FIELD_WARNING_TEXT } from "@/components/ui/form-text"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
@@ -15,13 +15,23 @@ export interface FieldWiring {
 }
 
 // A field is named by words drawn above or beside it, or, with none drawn, by a
-// name only a screen reader says.
-type FieldName = { label: ReactNode; spokenName?: never } | { spokenName: string; label?: never }
+// name only a screen reader says. Neither may be missing: a label is a string or
+// an element, so a value that may be undefined, null or false does not compile.
+// The compiler cannot see an empty string, so the group reports one when drawn.
+type FieldName = { label: ReactElement | string; spokenName?: never } | { spokenName: string; label?: never }
 
-// "side" puts the words on the left and the control on the right; a "wide"
-// control goes under the words on a phone. "stacked" draws the words, then the
-// control, then its note; "fill" makes the group and its control take the
-// height left in a column.
+// One line about the current value. A "warning" one reads as the warning it is.
+export interface NoteLine {
+  words: ReactNode
+  tone?: "warning"
+}
+
+// The layout decides where the note lines and the error go, never the width of
+// the screen. "side" keeps all of a field's words (label, help, notes, error)
+// in one block beside the control, and on a phone a "wide" control goes under
+// that whole block, so the notes are above it. "stacked" draws the label and
+// help, then the control, then the notes and the error under it; "fill" makes
+// the group and its control take the height left in a column.
 type FieldLayout =
   | { layout: "side"; width?: "compact" | "wide"; height?: never }
   | { layout: "stacked"; height?: "content" | "fill"; width?: never }
@@ -32,8 +42,9 @@ export type FormGroupProps = FieldName &
     // controls (a radio group) named by the label's id.
     control: "single" | "group"
     help?: ReactNode
-    // About the current value: a scope, what the chosen option means.
-    note?: ReactNode
+    // About the current value (a scope, what the chosen option means), a line
+    // each, in order, after the help. A line with no words is not drawn.
+    notes?: readonly NoteLine[]
     error?: ReactNode
     errorAnnounce?: ErrorLineAnnounce
     // Ids of lines drawn elsewhere that also describe the control.
@@ -50,14 +61,16 @@ export type FormGroupProps = FieldName &
 
 /** One labelled field: its words, its control and how the two are tied, in one of two layouts. */
 export function FormGroup(props: FormGroupProps) {
-  const { control, help, note, error, errorAnnounce = "silent", describedBy, invalid, changed, before, after, children } =
+  const { control, help, notes, error, errorAnnounce = "silent", describedBy, invalid, changed, before, after, children } =
     props
   const phone = useIsMobile()
   const base = useId()
   const id = `${base}control`
   const labelId = `${base}label`
   const helpId = help != null ? `${base}help` : undefined
-  const noteId = note != null ? `${base}note` : undefined
+  const noteLines = (notes ?? []).flatMap((line, i) =>
+    line.words == null || line.words === false || line.words === "" ? [] : [{ ...line, id: `${base}note${i}` }],
+  )
   const hasError = error != null && error !== false && error !== ""
   const errorId = hasError ? `${base}error` : undefined
   const spoken = props.spokenName !== undefined
@@ -67,14 +80,23 @@ export function FormGroup(props: FormGroupProps) {
     id: control === "single" ? id : undefined,
     "aria-label": spoken ? props.spokenName : undefined,
     "aria-labelledby": control === "group" && !spoken ? labelId : undefined,
-    "aria-describedby": [helpId, noteId, errorId, describedBy].filter(Boolean).join(" ") || undefined,
+    "aria-describedby": [helpId, ...noteLines.map((line) => line.id), errorId, describedBy].filter(Boolean).join(" ") || undefined,
     "aria-invalid": invalid || hasError ? true : undefined,
   }
 
   useEffect(() => {
     if (!import.meta.env.DEV || box.current === null) return
-    if (!wired(box.current, field)) {
-      console.error("FormGroup: the control does not carry the wiring it was handed; spread it onto the control.")
+    const named = spoken
+      ? props.spokenName
+      : box.current.ownerDocument.getElementById(labelId)?.textContent
+    if (!named?.trim()) {
+      console.error("FormGroup: the field has no name; give it a label or a spokenName that is not empty.")
+    }
+    const missing = unwired(box.current, field)
+    if (missing.length > 0) {
+      console.error(
+        `FormGroup: the control does not carry ${missing.join(", ")} of the wiring it was handed; spread all of it onto the control.`,
+      )
     }
   })
 
@@ -96,6 +118,8 @@ export function FormGroup(props: FormGroupProps) {
       {props.label}
     </span>
   )
+  // Not `UnsavedDot`: that is the editor's "unsaved edits" glyph with a
+  // tooltip; this is a small dot that says in words the value differs from its default.
   const labelLine =
     labelEl !== null && changed ? (
       <div className="flex items-center gap-1.5">
@@ -111,11 +135,16 @@ export function FormGroup(props: FormGroupProps) {
       {help}
     </div>
   ) : null
-  const noteEl = noteId ? (
-    <div id={noteId} className={FIELD_HELP_TEXT}>
-      {note}
-    </div>
-  ) : null
+  const noteEl =
+    noteLines.length > 0 ? (
+      <>
+        {noteLines.map((line) => (
+          <div key={line.id} id={line.id} className={line.tone === "warning" ? FIELD_WARNING_TEXT : FIELD_HELP_TEXT}>
+            {line.words}
+          </div>
+        ))}
+      </>
+    ) : null
   const errorEl = (
     <ErrorLine announce={errorAnnounce} size="xs" id={errorId}>
       {hasError ? error : null}
@@ -183,11 +212,21 @@ export function FormGroup(props: FormGroupProps) {
   )
 }
 
-// Whether the control under `root` carries what it was handed: a single
-// control its id, a group its label.
-function wired(root: HTMLElement, field: FieldWiring): boolean {
-  if (field.id !== undefined) return root.contains(root.ownerDocument.getElementById(field.id))
+// The parts of the wiring the control under `root` does not carry. It is found
+// by its id (a single control) or by its name (a group), then each id of its
+// description and its invalid mark must be on it.
+function unwired(root: HTMLElement, field: FieldWiring): string[] {
   const attr = field["aria-label"] !== undefined ? "aria-label" : "aria-labelledby"
-  const want = field[attr]
-  return Array.from(root.querySelectorAll(`[${attr}]`)).some((el) => el.getAttribute(attr) === want)
+  const el =
+    field.id !== undefined
+      ? root.ownerDocument.getElementById(field.id)
+      : Array.from(root.querySelectorAll(`[${attr}]`)).find((e) => e.getAttribute(attr) === field[attr])
+  if (el === null || el === undefined || !root.contains(el)) return [field.id !== undefined ? "id" : attr]
+  const missing: string[] = []
+  const have = new Set((el.getAttribute("aria-describedby") ?? "").split(/\s+/))
+  if (!(field["aria-describedby"] ?? "").split(/\s+/).filter(Boolean).every((id) => have.has(id))) {
+    missing.push("aria-describedby")
+  }
+  if (field["aria-invalid"] !== undefined && el.getAttribute("aria-invalid") !== "true") missing.push("aria-invalid")
+  return missing
 }

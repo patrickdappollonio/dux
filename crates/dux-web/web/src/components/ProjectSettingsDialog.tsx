@@ -192,7 +192,7 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
           )}
         </FormGroup>
 
-        <FormGroup layout="stacked" control="single" label="Environment" note={leftOutNote}>
+        <FormGroup layout="stacked" control="single" label="Environment" notes={[{ words: leftOutNote }]}>
           {(field) => (
             <Textarea
               {...field}

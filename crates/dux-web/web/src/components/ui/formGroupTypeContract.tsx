@@ -4,6 +4,7 @@
 import { FormGroup } from "./form-group"
 
 export function FormGroupTypeContract({ name }: { name: string | undefined }) {
+  const words: string | false | null = name === undefined ? null : name
   return (
     <>
       <FormGroup layout="stacked" control="single" label="Name">
@@ -32,6 +33,26 @@ export function FormGroupTypeContract({ name }: { name: string | undefined }) {
       </FormGroup>
       {/* @ts-expect-error a field picks its layout */}
       <FormGroup control="single" label="Name">
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a label that may be missing leaves the field nameless */}
+      <FormGroup layout="stacked" control="single" label={name}>
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error an absent label is no name */}
+      <FormGroup layout="stacked" control="single" label={undefined}>
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a label that may be null or false is no name */}
+      <FormGroup layout="stacked" control="single" label={words}>
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a number is not words */}
+      <FormGroup layout="stacked" control="single" label={0}>
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a note line is a line of words with a named tone */}
+      <FormGroup layout="stacked" control="single" label="Name" notes={[{ words: "x", tone: "red" }]}>
         {(field) => <input {...field} />}
       </FormGroup>
       {/* @ts-expect-error a field says whether its control is one or a group */}

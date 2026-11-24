@@ -28,7 +28,7 @@ import {
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ErrorLine } from "@/components/ErrorLine"
-import { FormGroup } from "@/components/ui/form-group"
+import { FormGroup, type FieldWiring } from "@/components/ui/form-group"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import {
   Modal,
@@ -415,7 +415,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
         </Button>
       </div>
       <SegmentedChoice
-        label="Show macros for"
+        field={{ "aria-label": "Show macros for" }}
         value={filter}
         options={FILTERS.map((f) => ({
           value: f.value,
@@ -680,17 +680,13 @@ function emptyListText(query: string, filter: MacroFilter): string {
 // One choice among a few, drawn as a segmented control: a radio group, so it
 // is announced as a single choice and the arrow keys move it.
 function SegmentedChoice<T extends string>({
-  label,
-  labelledBy,
-  describedBy,
+  field,
   value,
   options,
   onChange,
   className,
 }: {
-  label?: string
-  labelledBy?: string
-  describedBy?: string
+  field: FieldWiring
   value: T
   options: { value: T; label: ReactNode }[]
   onChange: (value: T) => void
@@ -698,9 +694,10 @@ function SegmentedChoice<T extends string>({
 }) {
   return (
     <RadioGroup
-      aria-label={label}
-      aria-labelledby={labelledBy}
-      aria-describedby={describedBy}
+      aria-label={field["aria-label"]}
+      aria-labelledby={field["aria-labelledby"]}
+      aria-describedby={field["aria-describedby"]}
+      aria-invalid={field["aria-invalid"]}
       value={value}
       onValueChange={(next) => {
         const found = options.find((option) => option.value === next)
@@ -998,13 +995,11 @@ function MacroFields({
         layout="stacked"
         control="group"
         label="Shown on"
-        note={MACRO_SURFACE_OPTIONS.find((option) => option.value === macro.surface)?.description}
+        notes={[{ words: MACRO_SURFACE_OPTIONS.find((option) => option.value === macro.surface)?.description }]}
       >
         {(field) => (
           <SegmentedChoice
-            label={field["aria-label"]}
-            labelledBy={field["aria-labelledby"]}
-            describedBy={field["aria-describedby"]}
+            field={field}
             value={macro.surface}
             options={MACRO_SURFACE_OPTIONS}
             onChange={(surface) => onChange({ surface })}
