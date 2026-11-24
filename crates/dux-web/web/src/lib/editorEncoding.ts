@@ -9,6 +9,8 @@
 
 import { chip, prose, type Prose } from "./prose"
 import type { UnwritableReason } from "./fileApi"
+import { assertNever } from "./assertNever"
+import type { LaneOp } from "./editorLane"
 
 // What a save writes: the encoding's WHATWG name, and whether the bytes start
 // with its byte-order mark.
@@ -269,4 +271,23 @@ export function encodingNotices(
     })
   }
   return all.filter((n) => !n.dismissable || !dismissed(n.kind))
+}
+
+// What the encoding menu says while the open file is busy, by what it is busy
+// with. A freshness check only looks at the disk and reloads nothing, so it
+// says "checked", not "reloaded".
+export function encodingBusyReason(op: LaneOp): string {
+  switch (op) {
+    case "save":
+    case "convert":
+      return "This file is being saved. Choose an encoding once the save has finished."
+    case "reopen":
+      return "This file is being reopened in another encoding. Choose an encoding once it has finished."
+    case "reload":
+      return "This file is being reloaded from disk. Choose an encoding once it has finished."
+    case "freshness":
+      return "This file is being checked against the disk. Choose an encoding once it has finished."
+    default:
+      return assertNever(op)
+  }
 }

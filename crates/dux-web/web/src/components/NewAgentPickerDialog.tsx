@@ -2,6 +2,7 @@ import { FolderPlus } from "lucide-react"
 import { useMemo, useState } from "react"
 
 import { Modal, useModalLifetime, type ModalDoor } from "@/components/modal"
+import { ScrollList } from "@/components/ui/scroll-list"
 import { ProjectRows } from "@/components/ProjectList"
 import { useProjectSearch, type ProjectListRow } from "@/components/projectSearch"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
@@ -172,14 +173,16 @@ function Picker({ open, onClosed }: { open: boolean; onClosed: () => void }) {
       steadyHeight
       doors={intent === "new" ? [addProject, addStandalone] : [addProject]}
     >
-      <ProjectRows
-        search={search}
-        heading="Choose a project"
-        onPick={onProjectRow}
-        // New agent… and New terminal take the user somewhere else, so the
-        // picker closes first rather than staying open over where they land.
-        menu={(id) => <ProjectMenuItems id={id} onLeave={closeNewAgentPicker} />}
-      />
+      <ScrollList scroll="enclosing">
+        <ProjectRows
+          search={search}
+          heading="Choose a project"
+          onPick={onProjectRow}
+          // New agent… and New terminal take the user somewhere else, so the
+          // picker closes first rather than staying open over where they land.
+          menu={(id) => <ProjectMenuItems id={id} onLeave={closeNewAgentPicker} />}
+        />
+      </ScrollList>
     </Modal>
   )
 }

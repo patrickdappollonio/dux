@@ -99,9 +99,14 @@ afterEach(() => {
 })
 
 describe.each([
-  ["the agent's environment", AgentEnvDialog, "KEY=VALUE"],
-  ["the agent's startup command", AgentStartupCommandDialog, "npm run dev"],
-])("%s", (_name, Dialog, placeholder) => {
+  ["the agent's environment", AgentEnvDialog, "KEY=VALUE", "Environment variables"],
+  ["the agent's startup command", AgentStartupCommandDialog, "npm run dev", "Startup command"],
+])("%s", (_name, Dialog, placeholder, spoken) => {
+  it("names its one box by what it takes, with no label drawn", () => {
+    render(<Dialog />)
+    expect(screen.getByRole("textbox", { name: spoken })).toBe(screen.getByPlaceholderText(placeholder))
+  })
+
   it("puts the caret in the text under a mouse", async () => {
     render(<Dialog />)
     await waitFor(() =>
@@ -123,6 +128,38 @@ describe.each([
 })
 
 describe("project settings", () => {
+  it("names each field by its label, and a press on a label reaches its control", async () => {
+    render(<ProjectSettingsDialog />)
+    const provider = screen.getByRole("combobox", { name: "Default provider" })
+    expect(screen.getByRole("combobox", { name: "Auto-reopen agents" })).toBeTruthy()
+    for (const name of ["Default provider", "Auto-reopen agents", "Startup command", "Environment"]) {
+      expect((screen.getByText(name) as HTMLLabelElement).control, name).toBe(
+        screen.getByRole(name.includes("agents") || name.includes("provider") ? "combobox" : "textbox", { name }),
+      )
+    }
+    await act(async () => {
+      fireEvent.click(screen.getByText("Default provider"))
+    })
+    expect(provider.getAttribute("aria-expanded")).toBe("true")
+  })
+
+  it("reads the note about lines Save leaves out with the environment", () => {
+    mockState = { ...mockState, spine: { ...mockState.spine!, projects: [{ ...project, env: {} }] } } as DuxState
+    render(<ProjectSettingsDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment" })
+    fireEvent.change(env, { target: { value: "not a variable" } })
+    const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")
+    expect(note?.textContent).toMatch(/Save leaves it out/)
+  })
+
+  it("reads the note about lines Save leaves out with the agent's environment", () => {
+    render(<AgentEnvDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment variables" })
+    fireEvent.change(env, { target: { value: "not a variable" } })
+    const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")
+    expect(note?.textContent).toMatch(/Save leaves it out/)
+  })
+
   it("covers the screen and closes from its own button on a phone", async () => {
     phone = true
     coarsePointer()

@@ -41,7 +41,7 @@ function paddingPx(value: string): number {
 }
 
 // The part of the container a row must sit inside to count as in view. A list
-// that fades an edge while rows are hidden past it (`.dux-list-fade`) carries
+// that fades an edge while rows are hidden past it (a `ScrollList`) carries
 // the fade depth as its scroll padding, so a row under a fade that is showing
 // is not in view, and `scrollIntoView` lands it clear of that same padding.
 function clearBox(container: HTMLElement): { top: number; bottom: number } {

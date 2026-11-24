@@ -138,7 +138,7 @@ Clicking a row still opens its diff; only the checkbox selects. On a phone the d
 
 ## Commit, push, pull
 
-The changes pane's header carries two controls: an **Editor** button that takes you straight to the editor for the agent whose changes you are looking at (in the page on a computer, in the editor's own tab on a phone, where it shows the icon alone), and a `⋯` menu. In a pane too narrow for the title and the button, the button moves into the `⋯` as **Open editor**. To open a shell for that agent, use **New tab…** in the centre pane's header or **New terminal in the worktree** (**in the folder**, for a standalone agent) in the agent's `⋯` menu. The header's `⋯` menu holds the rest:
+The changes pane's header carries two controls: an **Editor** button that takes you straight to the editor for the agent whose changes you are looking at (in the page on a computer, in the editor's own tab on a phone, where it shows the icon alone), and a `⋯` menu. In a pane too narrow for the title and the button, the button moves into the `⋯` as **Open editor**. To open a shell for that agent, use **New tab…** in the centre pane's header or **New terminal tab in the worktree** (**in the folder**, for a standalone agent) in the agent's `⋯` menu. The header's `⋯` menu holds the rest:
 
 - **Commit…** opens a dialog for a multi-line message and commits **only the staged files**. It is disabled until something is staged, with a line under it saying so, and `Cmd/Ctrl+Enter` submits.
 - **Push** and **Pull** are one click each, with a progress toast that reports back to the browser tab you triggered them from.
@@ -147,7 +147,7 @@ The changes pane's header carries two controls: an **Editor** button that takes 
 
 **Hiding and bringing the pane back.** Dragging the split all the way closed does the same as **Hide Changes pane**, though only when you let go: drag past the snap and back out before releasing and the pane stays. Either way:
 
-- A button appears on the right of the header to bring it back at a sensible width, carrying the agent's changed-file count so you can still see at a glance how much has moved.
+- A button appears on the right of the header to bring it back at a sensible width, reading the agent's count of changed files and the word, such as "1 file" or "27 files", so you can still see at a glance how much has moved.
 - The **Show the Changes pane** row in **Preferences** is the other way in, since hiding the pane takes this menu with it.
 
 **The header stays in every state the pane can be in:** while the changes load, when they fail to, and when the pane has nothing to show because a standalone agent's folder has no repository or an agent's directory is gone.

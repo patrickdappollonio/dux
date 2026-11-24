@@ -299,14 +299,18 @@ export function workspaceDirectory(workspace: AgentWorkspaceWire): string {
   })
 }
 
-/** What the agent menu's terminal entry says. A companion terminal opens in the
- * agent's own directory, so naming the worktree for both kinds would promise a
- * standalone agent something it does not have. */
-export function newTerminalLabel(workspace: AgentWorkspaceWire): string {
+/** The word for the directory an agent works in: a standalone agent has no
+ * worktree, so a sentence about where its tabs and terminals run says folder. */
+export function workspacePlace(workspace: AgentWorkspaceWire): "worktree" | "folder" {
   return matchWorkspace(workspace, {
-    managed: () => "New terminal in the worktree",
-    folder: () => "New terminal in the folder",
+    managed: () => "worktree" as const,
+    folder: () => "folder" as const,
   })
+}
+
+/** What the agent menu's terminal entry says. */
+export function newTerminalLabel(workspace: AgentWorkspaceWire): string {
+  return `New terminal tab in the ${workspacePlace(workspace)}`
 }
 
 /** What the agent row's second line names: the project (resolved by the

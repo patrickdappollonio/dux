@@ -618,7 +618,7 @@ describe("the agent and dock strips", () => {
         screen.getAllByLabelText("Tab actions")[0].parentElement!,
         screen.getByLabelText("Terminal actions").parentElement!,
       ],
-      [screen.getByLabelText("New tab"), screen.getByLabelText("New terminal")],
+      [screen.getByLabelText("New tab"), screen.getByLabelText("New terminal tab")],
     ]
     for (const [a, d] of pairs) {
       expect(Array.from(d.classList).sort()).toEqual(Array.from(a.classList).sort())

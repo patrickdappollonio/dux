@@ -16,16 +16,13 @@ import {
   FileCode2,
   FilePlus,
   FileText,
-  FileType,
   GitCompare,
   Laptop,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
   RefreshCw,
-  RotateCw,
   Save,
-  SaveAll,
   SquareTerminal,
   X,
 } from "lucide-react"
@@ -52,10 +49,9 @@ import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
 import { laneKey, useLaneBusy } from "@/lib/editorLane"
 import {
-  REOPEN_CHOICES,
-  SAVE_CHOICES,
   dismissNotice,
   encodingNotices,
+  encodingBusyReason,
   encodingLabel,
   noticeDismissed,
   sameSaveEncoding,
@@ -121,7 +117,7 @@ import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useMenuReason } from "@/hooks/use-menu-reason"
-import { MenuItemReason } from "@/components/MenuReason"
+import { EncodingMenuRows } from "@/components/EncodingMenuRows"
 import { Spinner } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
@@ -828,16 +824,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     activeTab === null ? null : laneKey(key, activeTab.path),
   )
   const fileBusy = laneOp !== undefined
-  // Said beneath "Save with encoding" in the encoding menu, which both greys:
-  // the standing read-only line's sentence, or, for a writable file, the one
-  // saying a save is out. The read-only sentence wins when both hold, since it
-  // outlasts the save. Another operation on the lane (a reopen, a reload) greys
-  // the item too but is not a save, so it says nothing.
-  const saveEncodingReason = useMenuReason(
-    writeBlocked ??
-      (laneOp === "save" || laneOp === "convert" ? SAVE_IN_FLIGHT_REASON : null),
+  // The encoding menu's two rows are both greyed while the file is busy, so
+  // one line above them says what it is busy with. "Save with encoding" is
+  // greyed by a second cause of its own, the editor being read-only, which
+  // outlasts any operation and is said beneath that row alone. A row greyed by
+  // both names both lines.
+  const busyEncodingReason = useMenuReason(
+    laneOp === undefined ? null : encodingBusyReason(laneOp),
   )
-
+  const readOnlyEncodingReason = useMenuReason(writeBlocked)
   // The diff is cached per tab+path; ready when the loaded diff is for the
   // active tab's CURRENT path. While ready, a change-signal differing from the
   // one captured at load means the file changed underneath, surface a reload
@@ -1587,73 +1582,16 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       else requestReopen(encoding)
     }
     return (
-      <>
-        <DropdownMenuSub>
-          {/* Not while this tab is saving: the save's answer is about the text
-              it sent, and a reopen would put a different decoding under it. */}
-          <DropdownMenuSubTrigger disabled={fileBusy}>
-            <RotateCw />
-            Reopen with encoding
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
-            {REOPEN_CHOICES.map((choice) => (
-              <DropdownMenuItem
-                key={choice.encoding}
-                aria-current={
-                  choice.encoding === current.encoding ? "true" : undefined
-                }
-                onClick={() => reopen(choice.encoding)}
-              >
-                <FileType />
-                {choice.label}
-                {choice.encoding === current.encoding && (
-                  <Check className="ml-auto" />
-                )}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        {!inDiff && !hardReadOnly && (
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger
-              disabled={fileBusy || writeBlocked !== null}
-              aria-describedby={saveEncodingReason.describedBy}
-            >
-              <SaveAll />
-              Save with encoding
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
-              {SAVE_CHOICES.map((choice) => {
-                const isCurrent = sameSaveEncoding(choice, current)
-                return (
-                  <DropdownMenuItem
-                    key={`${choice.encoding}:${choice.bom}`}
-                    aria-current={isCurrent ? "true" : undefined}
-                    // A file its encoding cannot write back unchanged can be
-                    // converted, never saved again in that same encoding.
-                    // The current encoding and mark is never a row to act
-                    // on: it is not a conversion, and not an edit either, so
-                    // a save from it would only rewrite untouched bytes (the
-                    // line endings, say) for nothing.
-                    disabled={isCurrent}
-                    onClick={() =>
-                      saveWithEncoding({
-                        encoding: choice.encoding,
-                        bom: choice.bom,
-                      })
-                    }
-                  >
-                    <FileType />
-                    {choice.label}
-                    {isCurrent && <Check className="ml-auto" />}
-                  </DropdownMenuItem>
-                )
-              })}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        )}
-        {!inDiff && !hardReadOnly && <MenuItemReason reason={saveEncodingReason} />}
-      </>
+      <EncodingMenuRows
+        busy={busyEncodingReason}
+        readOnly={readOnlyEncodingReason}
+        fileBusy={fileBusy}
+        writeBlocked={writeBlocked !== null}
+        canSave={!inDiff && !hardReadOnly}
+        current={current}
+        onReopen={reopen}
+        onSave={saveWithEncoding}
+      />
     )
   }
 
@@ -2713,9 +2651,6 @@ function contentForPreview(
   }
   return buffer?.draft ?? ""
 }
-
-const SAVE_IN_FLIGHT_REASON =
-  "This file is being saved. Choose an encoding once the save has finished."
 
 function tabIsSaving(savingTabId: string | null, tab: EditorTab | null): boolean {
   return savingTabId !== null && savingTabId === tab?.id

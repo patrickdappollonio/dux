@@ -13,6 +13,7 @@ import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { InlineCode } from "@/components/ui/inline-code"
+import { FormGroup } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import {
   addProjectPrimaryAction,
@@ -42,6 +43,7 @@ import {
 } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import type { DirEntryView } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 // The inline "New folder" affordance beside the current path: a ghost button that
 // swaps for an input + Create/Cancel. On success it navigates INTO the new
@@ -100,28 +102,36 @@ function NewFolderControl({
     // Beside the path on a computer; on a phone a row of its own, where the
     // name takes the width the two buttons leave.
     <div className="flex min-w-0 items-center gap-1 max-md:w-full">
-      <Input
-        autoFocus
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault()
-            create()
-          } else if (e.key === "Escape") {
-            e.preventDefault()
-            // stopPropagation is load-bearing: base-ui's dialog dismiss
-            // listens for Escape at the document level and does NOT check
-            // defaultPrevented, so without it the Escape meant to cancel
-            // this inline editor also closes the whole picker (losing the
-            // browse location, selection, and inspection).
-            e.stopPropagation()
-            reset()
-          }
-        }}
-        placeholder="Folder name"
-        className="h-8 w-40 min-w-0 flex-1 max-md:h-10 pointer-coarse:h-10"
-      />
+      {/* The box's own width and growth, on the field around it. */}
+      <div className="w-40 min-w-0 flex-1">
+        <FormGroup layout="stacked" control="single" spokenName="New folder name">
+          {(field) => (
+            <Input
+              {...field}
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault()
+                  create()
+                } else if (e.key === "Escape") {
+                  e.preventDefault()
+                  // stopPropagation is load-bearing: base-ui's dialog dismiss
+                  // listens for Escape at the document level and does NOT check
+                  // defaultPrevented, so without it the Escape meant to cancel
+                  // this inline editor also closes the whole picker (losing the
+                  // browse location, selection, and inspection).
+                  e.stopPropagation()
+                  reset()
+                }
+              }}
+              placeholder="Folder name"
+              className="h-8 w-full min-w-0 max-md:h-10 pointer-coarse:h-10"
+            />
+          )}
+        </FormGroup>
+      </div>
       <Button
         variant="outline"
         size="sm"
@@ -147,7 +157,9 @@ function NewFolderControl({
 // change so the rightmost segment stays visible, and still scrollable and
 // selectable so the path can be copied. Shared by the current-directory header
 // and the selected-target line so the two render identically.
-function PathField({ value }: { value: string }) {
+// "row" shares a wrapping row with the New folder control; "column" sits in a
+// column, where a flex basis would be its height.
+function PathField({ value, place, name }: { value: string; place: "row" | "column"; name: string }) {
   const ref = useRef<HTMLInputElement>(null)
   // useLayoutEffect so the scroll-to-end happens before paint: otherwise the
   // browser paints the leading segment for one frame and snaps to the tail.
@@ -157,17 +169,23 @@ function PathField({ value }: { value: string }) {
     if (el) el.scrollLeft = el.scrollWidth
   }, [value])
   return (
-    <input
-      ref={ref}
-      readOnly
-      // tabIndex=-1 keeps this out of the tab order and the dialog's initial
-      // focus (it is an inert, read-only field), while staying click-selectable
-      // so the path can still be copied.
-      tabIndex={-1}
-      value={value}
-      aria-label="Path"
-      className="w-full min-w-0 flex-1 basis-56 rounded-lg border border-input bg-input/30 px-2 py-1 font-mono text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-    />
+    <div className={cn("min-w-0", place === "row" && "flex-1 basis-56")}>
+      <FormGroup layout="stacked" control="single" spokenName={name}>
+        {(field) => (
+          <input
+            {...field}
+            ref={ref}
+            readOnly
+            // tabIndex=-1 keeps this out of the tab order and the dialog's initial
+            // focus (it is an inert, read-only field), while staying click-selectable
+            // so the path can still be copied.
+            tabIndex={-1}
+            value={value}
+            className="w-full min-w-0 rounded-lg border border-input bg-input/30 px-2 py-1 font-mono text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+          />
+        )}
+      </FormGroup>
+    </div>
   )
 }
 
@@ -276,12 +294,10 @@ function SelectionDetails({
 }: SelectionDetailsProps) {
   return (
     <div className="flex shrink-0 flex-col gap-2">
-      <Input
-        value={name}
-        onChange={(event) => setName(event.target.value)}
-        placeholder="Project name (optional)"
-      />
-      <PathField value={selected} />
+      <FormGroup layout="stacked" control="single" label="Project name" optional>
+        {(field) => <Input {...field} value={name} onChange={(event) => setName(event.target.value)} />}
+      </FormGroup>
+      <PathField value={selected} place="column" name="Chosen folder" />
       {inspecting ? (
         <LoadingSentence spinner="glyph" size="xs">
           Checking the folder…
@@ -485,7 +501,7 @@ function AddProjectBrowser({ open, onClosed }: { open: boolean; onClosed: () => 
       // share a row while both fit and stack when they do not.
       toolbar={
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <PathField value={browsePath} />
+          <PathField value={browsePath} place="row" name="Current folder" />
           <NewFolderControl browsePath={browsePath} buttonRef={newFolderRef} />
         </div>
       }

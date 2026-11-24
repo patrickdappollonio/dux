@@ -81,6 +81,18 @@ describe("NewEntryDialog", () => {
     expect(screen.getByRole("button", { name: /Create/ }).hasAttribute("disabled")).toBe(true)
   })
 
+  it("names its one box by what to type, a file's or a folder's name, and draws no label for it", () => {
+    const { rerender } = render(
+      <NewEntryDialog target={{ kind: "file", dir: "" }} onClose={() => {}} onSubmit={() => Promise.resolve()} />,
+    )
+    expect(screen.getByRole("textbox", { name: "File name" })).toBeTruthy()
+    expect(screen.queryByText("File name")).toBeNull()
+    rerender(
+      <NewEntryDialog target={{ kind: "folder", dir: "" }} onClose={() => {}} onSubmit={() => Promise.resolve()} />,
+    )
+    expect(screen.getByRole("textbox", { name: "Folder name" })).toBeTruthy()
+  })
+
   it("shows the target dir, using / for the root", () => {
     render(
       <NewEntryDialog

@@ -13,6 +13,7 @@ import {
   managedWorkspace,
   matchWorkspace,
   newTerminalLabel,
+  workspacePlace,
   sessionLabel,
   standaloneAgentDefaultName,
   supportsBranchGit,
@@ -221,9 +222,9 @@ describe("folderDisplayName", () => {
 
 describe("newTerminalLabel", () => {
   it("names the worktree for a managed agent and the folder for a standalone one", () => {
-    expect(newTerminalLabel(managed)).toBe("New terminal in the worktree")
+    expect(newTerminalLabel(managed)).toBe("New terminal tab in the worktree")
     expect(newTerminalLabel(folder("working_repo"))).toBe(
-      "New terminal in the folder",
+      "New terminal tab in the folder",
     )
   })
 
@@ -236,6 +237,15 @@ describe("newTerminalLabel", () => {
       "unprobed",
     ] as FolderRepoStatus[]) {
       expect(newTerminalLabel(folder(status))).not.toMatch(/worktree/)
+    }
+  })
+})
+
+describe("workspacePlace", () => {
+  it("is the worktree for a managed agent and the folder for a standalone one, whatever git makes of the folder", () => {
+    expect(workspacePlace(managed)).toBe("worktree")
+    for (const status of ["working_repo", "no_repo", "unprobed"] as FolderRepoStatus[]) {
+      expect(workspacePlace(folder(status))).toBe("folder")
     }
   })
 })

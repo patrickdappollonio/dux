@@ -1,6 +1,7 @@
 import { useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
+import { FormGroup } from "@/components/ui/form-group"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   Select,
@@ -91,21 +92,22 @@ function ChangeProviderForm({ open, onClosed }: { open: boolean; onClosed: () =>
         disabledReason: unchanged ? "Pick a provider other than the one this agent uses." : null,
       }}
     >
-      <div className="grid gap-2">
-        <label className="text-sm font-medium">Provider</label>
-        <Select value={provider} onValueChange={(value) => setProvider(value ?? provider)}>
-          <SelectTrigger className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {providers.map((p) => (
-              <SelectItem key={p} value={p}>
-                {p}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <FormGroup layout="stacked" control="single" spokenName="Provider">
+        {(field) => (
+          <Select value={provider} onValueChange={(value) => setProvider(value ?? provider)}>
+            <SelectTrigger {...field} className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {providers.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {p}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </FormGroup>
     </Modal>
   )
 }

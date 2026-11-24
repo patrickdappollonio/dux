@@ -111,8 +111,10 @@ function saveButton(): HTMLButtonElement {
   return screen.getByRole("button", { name: "Save" }) as HTMLButtonElement
 }
 
+// The line the branch box reads as its description.
 function note(): HTMLElement {
-  return screen.getByTestId("rename-branch-note")
+  const box = screen.getByRole("checkbox", { name: "Also rename the git branch" })
+  return document.getElementById(box.getAttribute("aria-describedby")!)!
 }
 
 beforeEach(() => {
@@ -158,6 +160,16 @@ describe("RenameSessionDialog", () => {
     expect(saveButton().disabled).toBe(false)
     fireEvent.click(saveButton())
     expect(submitRename).toHaveBeenCalledOnce()
+  })
+
+  it("reads the name's rules with its box, and what the branch box does with that box", async () => {
+    seed("s1", managedSession)
+    renderDialog()
+    const read = (el: HTMLElement) =>
+      (el.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent)
+    expect(read(screen.getByRole("textbox", { name: "Agent name" }))).toEqual(["Any name git accepts for a branch."])
+    await waitFor(() => expect(branchPushed).toHaveBeenCalledWith("s1"))
+    expect(read(screen.getByRole("checkbox", { name: "Also rename the git branch" }))).toEqual([note().textContent])
   })
 
   it("saves an empty name as a reset", () => {

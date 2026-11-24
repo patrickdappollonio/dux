@@ -108,7 +108,14 @@ describe("LoginPage", () => {
     // Announced once; the countdown itself is not a live region, so a screen
     // reader is not read every second.
     expect(screen.getByRole("alert").textContent).toBe("Too many sign-in attempts from the network.")
+    const field = screen.getByLabelText("Password")
+    expect(field.hasAttribute("aria-invalid")).toBe(false)
+    expect((field.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent)).toEqual([
+      "Too many sign-in attempts from the network.",
+      "Try again in 3 seconds.",
+    ])
     const countdown = screen.getByText("Try again in 3 seconds.")
+    expect(countdown.className).toContain("text-xs")
     expect(countdown.closest("[role=alert]")).toBeNull()
     expect(countdown.closest("[aria-live=polite],[aria-live=assertive]")).toBeNull()
     expect(screen.getByRole("button", { name: "Sign in" })).toHaveProperty("disabled", true)
@@ -148,6 +155,9 @@ describe("LoginPage", () => {
     await act(async () => submit(""))
     expect(screen.getByRole("alert").textContent).toBe("Enter your password.")
     expect(signIn).not.toHaveBeenCalled()
+    const field = screen.getByLabelText("Password")
+    expect(field.getAttribute("aria-invalid")).toBe("true")
+    expect(document.getElementById(field.getAttribute("aria-describedby")!)?.textContent).toBe("Enter your password.")
   })
 
   it("warns, clearly, that a plain HTTP connection can be read", () => {

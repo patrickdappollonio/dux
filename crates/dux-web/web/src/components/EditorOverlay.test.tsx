@@ -4254,40 +4254,58 @@ describe("a file that is not plain UTF-8", () => {
     expect((await encodingButton()).textContent).toContain("Windows-1252")
   })
 
-  // Two causes grey the item: the read-only sentence is said ahead of the
-  // save's, and with neither the item says nothing.
-  it("says a save is out beneath Save with encoding only while one is", async () => {
+  // One line above both rows, worded for what the file is busy with; idle, none.
+  it("says what the file is busy with once, above both encoding rows, and nothing when idle", async () => {
     const SAVING = "This file is being saved. Choose an encoding once the save has finished."
+    const REOPENING =
+      "This file is being reopened in another encoding. Choose an encoding once it has finished."
+    const RELOADING =
+      "This file is being reloaded from disk. Choose an encoding once it has finished."
+    const CHECKING =
+      "This file is being checked against the disk. Choose an encoding once it has finished."
     await mountWithTab(PATH)
     await loaded("café\n")
     const { acquireLane, laneKey } = await import("@/lib/editorLane")
-    const item = async () => {
+    const open = async () => {
       fireEvent.click(await encodingButton())
-      return (await screen.findByRole("menuitem", { name: /save with encoding/i })) as HTMLElement
+      const reopen = (await screen.findByRole("menuitem", { name: /reopen with encoding/i })) as HTMLElement
+      const save = (await screen.findByRole("menuitem", { name: /save with encoding/i })) as HTMLElement
+      return { reopen, save }
     }
-    const idle = await item()
-    expect(idle.getAttribute("aria-disabled")).not.toBe("true")
-    expect(idle.hasAttribute("aria-describedby")).toBe(false)
+    const close = async () => {
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+    }
+    const idle = await open()
+    for (const item of [idle.reopen, idle.save]) {
+      expect(item.getAttribute("aria-disabled")).not.toBe("true")
+      expect(item.hasAttribute("aria-describedby")).toBe(false)
+    }
     expect(document.querySelector('[data-slot="menu-reason"]')).toBeNull()
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
-    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+    await close()
 
-    const release = acquireLane(laneKey(rootKey(agentRoot(SESSION)), PATH), "save")!
-    const busy = await item()
-    expect(busy.getAttribute("aria-disabled")).toBe("true")
-    const why = document.getElementById(busy.getAttribute("aria-describedby") ?? "")
-    expect(why?.textContent).toBe(SAVING)
-    expect(busy.nextElementSibling?.contains(why ?? null)).toBe(true)
-    release()
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
-    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
-
-    // A reopen greys the item too, but is not a save: no sentence about one.
-    const releaseReopen = acquireLane(laneKey(rootKey(agentRoot(SESSION)), PATH), "reopen")!
-    const reopening = await item()
-    expect(reopening.getAttribute("aria-disabled")).toBe("true")
-    expect(document.querySelector('[data-slot="menu-reason"]')).toBeNull()
-    releaseReopen()
+    const cases = [
+      ["save", SAVING],
+      ["convert", SAVING],
+      ["reopen", REOPENING],
+      ["reload", RELOADING],
+      ["freshness", CHECKING],
+    ] as const
+    for (const [op, sentence] of cases) {
+      const release = acquireLane(laneKey(rootKey(agentRoot(SESSION)), PATH), op)!
+      const { reopen, save } = await open()
+      const lines = [...document.querySelectorAll('[data-slot="menu-reason"]')]
+      expect(lines.map((l) => l.textContent)).toEqual([sentence])
+      const line = lines[0]!
+      for (const item of [reopen, save]) {
+        expect(item.getAttribute("aria-disabled")).toBe("true")
+        expect(document.getElementById(item.getAttribute("aria-describedby") ?? "")).toBe(line)
+        expect(line.compareDocumentPosition(item) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      }
+      expect(reopen.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      release()
+      await close()
+    }
   })
 
   it("converts the file with Save with encoding, and the item then says UTF-8", async () => {
@@ -4702,6 +4720,30 @@ describe("the editor while this page does not drive the row", () => {
     const why = document.getElementById(item.getAttribute("aria-describedby") ?? "")
     expect(why?.textContent).toBe(AGENT_READ_ONLY)
     expect(item.nextElementSibling?.contains(why ?? null)).toBe(true)
+  })
+
+  // Busy and read-only together: the busy line covers both rows, and Save with
+  // encoding, greyed by the read-only cause too, names that sentence as well.
+  it("says both causes for Save with encoding while read-only and busy, each once", async () => {
+    await mountWithDirtyTab()
+    drive("agent:s1", "other")
+    const { acquireLane, laneKey } = await import("@/lib/editorLane")
+    const release = acquireLane(laneKey(rootKey(agentRoot(SESSION)), PATH), "reopen")!
+    fireEvent.click(await screen.findByRole("button", { name: /^file encoding:/i }))
+    const reopen = (await screen.findByRole("menuitem", { name: /reopen with encoding/i })) as HTMLElement
+    const save = (await screen.findByRole("menuitem", { name: /save with encoding/i })) as HTMLElement
+    const said = [...document.querySelectorAll('[data-slot="menu-reason"]')].map((l) => l.textContent)
+    expect(said).toEqual([
+      "This file is being reopened in another encoding. Choose an encoding once it has finished.",
+      AGENT_READ_ONLY,
+    ])
+    const names = (el: HTMLElement) =>
+      (el.getAttribute("aria-describedby") ?? "")
+        .split(" ")
+        .map((id) => document.getElementById(id)?.textContent)
+    expect(names(reopen)).toEqual([said[0]])
+    expect(names(save)).toEqual(said)
+    release()
   })
 
   it("greys out creating, renaming, moving and deleting, and refuses a dropped file out loud", async () => {

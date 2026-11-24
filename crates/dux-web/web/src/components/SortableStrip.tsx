@@ -16,6 +16,7 @@ import { SortableContext, horizontalListSortingStrategy } from "@dnd-kit/sortabl
 import { useLayoutEffect, useRef, type ReactNode } from "react"
 
 import { MOUSE_DRAG_ACTIVATION, TOUCH_DRAG_ACTIVATION } from "@/lib/dragActivation"
+import { SORT_MODIFIERS } from "@/lib/dragBounds"
 import { moveItem, ordersMatch } from "@/lib/reorder"
 
 // The drag half of a pill strip, shared by every strip whose pills reorder along
@@ -92,6 +93,7 @@ export function SortableStrip({
   return (
     <DndContext
       sensors={sensors}
+      modifiers={SORT_MODIFIERS}
       collisionDetection={closestCenter}
       onDragEnd={handleDragEnd}
       onDragCancel={settled}

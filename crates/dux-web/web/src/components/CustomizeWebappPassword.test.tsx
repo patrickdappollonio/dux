@@ -162,6 +162,20 @@ describe("the password row", () => {
     expect(screen.getByLabelText("New password again")).toHaveProperty("type", "password")
   })
 
+  it("groups its fields under its title and reads its help with the group", () => {
+    render(<CustomizeWebappDialog />)
+    const group = screen.getByRole("group", { name: "Password" })
+    const read = (group.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+    expect(read[0]).toContain("Asked of every browser")
+    expect(read[1]).toContain("At least 12 characters")
+    for (const label of ["Current password", "New password", "New password again"]) {
+      expect(group.contains(screen.getByLabelText(label)), label).toBe(true)
+    }
+  })
+
   it("is never changed from a default and has no reset, but a typed password is an unsaved change", () => {
     render(<CustomizeWebappDialog />)
     type("New password", STRONG)
@@ -391,7 +405,7 @@ describe("the password row under a search", () => {
     render(<CustomizeWebappDialog />)
     type("Search settings", "tail")
     const inStatus = [...document.querySelectorAll("mark")].filter((m) =>
-      m.closest("p")?.textContent?.startsWith("No password is set."),
+      m.closest("p, div")?.textContent?.startsWith("No password is set."),
     )
     expect(inStatus.map((m) => m.textContent)).toEqual(["tail"])
   })

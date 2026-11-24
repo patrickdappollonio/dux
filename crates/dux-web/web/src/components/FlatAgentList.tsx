@@ -26,7 +26,7 @@ import {
   TriangleAlert,
 } from "lucide-react"
 import type { ComponentProps, CSSProperties, ReactNode } from "react"
-import { useCallback, useRef, useState } from "react"
+import { useRef, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
@@ -41,7 +41,6 @@ import {
   terminalRowKey,
   useRevealSelectedRow,
 } from "@/hooks/use-reveal-selected-row"
-import { useScrollEdges } from "@/hooks/use-scroll-edges"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { PaneMenuBody } from "@/components/PaneMenu"
@@ -60,6 +59,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ScrollList, ScrollListRows } from "@/components/ui/scroll-list"
 import { agentRowVisual } from "@/lib/agentRow"
 import {
   agentSearchLocation,
@@ -73,6 +73,7 @@ import {
   MOUSE_DRAG_ACTIVATION,
   TOUCH_DRAG_ACTIVATION,
 } from "@/lib/dragActivation"
+import { SORT_MODIFIERS } from "@/lib/dragBounds"
 import {
   FLAT_SORT_LABELS,
   flatRowKey,
@@ -618,22 +619,24 @@ function QuietTail({
         </Badge>
       </button>
       {open ? (
-        <div className="mt-1 flex flex-col gap-1">
-          {sessions.map((session) => (
-            <AgentFlatRow
-              key={session.id}
-              session={session}
-              projectName={projectName(
-                workspaceProjectId(session.workspace) ?? "",
-              )}
-              selectedTarget={selectedTarget}
-              handlers={handlers}
-              sortable={false}
-              query={query}
-              pickId={pickId(agentRowKey(session.id))}
-              picked={pickedKey === agentRowKey(session.id)}
-            />
-          ))}
+        <div className="mt-1">
+          <ScrollListRows gap="normal" semantics="none">
+            {sessions.map((session) => (
+              <AgentFlatRow
+                key={session.id}
+                session={session}
+                projectName={projectName(
+                  workspaceProjectId(session.workspace) ?? "",
+                )}
+                selectedTarget={selectedTarget}
+                handlers={handlers}
+                sortable={false}
+                query={query}
+                pickId={pickId(agentRowKey(session.id))}
+                picked={pickedKey === agentRowKey(session.id)}
+              />
+            ))}
+          </ScrollListRows>
         </div>
       ) : null}
     </div>
@@ -863,14 +866,6 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   // A newly selected row is scrolled into view, a just-created one as soon as
   // its row arrives, so a launch never happens out of sight below the fold.
   const revealRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
-  const { ref: edgesRef, moreAbove, moreBelow } = useScrollEdges<HTMLDivElement>()
-  const setListNode = useCallback(
-    (node: HTMLDivElement | null) => {
-      revealRef(node)
-      edgesRef(node)
-    },
-    [revealRef, edgesRef],
-  )
   // Mouse drags on a 6px pull; touch drags on a HOLD, or it fights the list's
   // scroll gesture. The values live in lib/dragActivation.ts.
   const sensors = useSensors(
@@ -975,14 +970,12 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         />
       </div>
 
-      {/* Fades out at its top edge while rows are hidden above and at its
-          bottom edge while more are hidden below; see `.dux-list-fade` for
-          why that is a mask. */}
-      <div
-        ref={setListNode}
-        data-more-above={moreAbove ? "" : undefined}
-        data-more-below={moreBelow ? "" : undefined}
-        className="dux-list-fade min-h-0 flex-1 overflow-y-auto px-2 pt-[3px] pb-2 no-scrollbar"
+      <ScrollList
+        scroll="own"
+        height="fill"
+        scrollbar="hidden"
+        inset="pane"
+        scrollerRef={revealRef}
       >
         {nothing ? (
           <EmptyState
@@ -1025,6 +1018,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                 terminals alike: they sort together, so they drag together. */}
             <DndContext
               sensors={sensors}
+              modifiers={SORT_MODIFIERS}
               collisionDetection={closestCenter}
               onDragEnd={handleDragEnd}
             >
@@ -1032,7 +1026,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                 items={visibleMain.map(flatRowKey)}
                 strategy={verticalListSortingStrategy}
               >
-                <div className="flex flex-col gap-1">
+                <ScrollListRows gap="normal" semantics="none">
                   {visibleMain.map((row) => {
                     const key = flatRowKey(row)
                     return row.kind === "agent" ? (
@@ -1065,7 +1059,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                       />
                     )
                   })}
-                </div>
+                </ScrollListRows>
               </SortableContext>
             </DndContext>
 
@@ -1082,7 +1076,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             />
           </>
         )}
-      </div>
+      </ScrollList>
     </div>
   )
 }

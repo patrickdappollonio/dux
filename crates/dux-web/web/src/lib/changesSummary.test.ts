@@ -36,7 +36,6 @@ describe("changesSummary", () => {
     const summary = changesSummary(s, "s1")
     expect(summary).toEqual({
       count: 3,
-      label: "±3",
       countLabel: "3 changed files",
     })
   })
@@ -61,7 +60,6 @@ describe("changesSummary", () => {
   it("reads a clean worktree as the zero state, the way the phone does", () => {
     expect(changesSummary(slice(), "s1")).toEqual({
       count: 0,
-      label: "±0",
       countLabel: "0 changed files",
     })
   })

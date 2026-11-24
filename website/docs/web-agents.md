@@ -262,7 +262,7 @@ heading: **Tabs and project**, **Running**, **Agent**, **Startup**, **Worktree**
 - **Rename agent…** renames it, and its git branch too if you tick the box, exactly as in the
   terminal UI; see [renaming an agent](/docs/creating-agents#renaming-an-agent).
 - **Change agent provider…** and **Force recreate agent…**, covered below.
-- **New agent tab…**, **New terminal in the worktree** (or **in the folder**, for a
+- **New agent tab…**, **New terminal tab in the worktree** (or **in the folder**, for a
   standalone agent), and **Detach agent…** (only while something is running).
 - **Agent info…**, **Open editor here** or **in new tab**, and **Copy local path**.
 - **Recreate working copy…**, which only appears when the agent's folder has gone missing.

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react"
-import { AlertTriangle } from "lucide-react"
 
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
+import { FormGroup } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { matchWorkspace, standaloneAgentDefaultName } from "@/lib/agentWorkspace"
@@ -116,53 +116,50 @@ export function RenameSessionDialog() {
         disabledReason: saveRefusal,
       }}
     >
-      <Input
-        value={renameDraft}
-        onChange={(e) => {
-          const el = e.target
-          const raw = el.value
-          const caret = el.selectionStart ?? raw.length
-          setRenameDraft(raw)
-          // Keep the caret put when sanitization shrinks the string (same
-          // approach as the new-agent input).
-          const sanitized = sanitizeAgentName(raw)
-          if (sanitized !== raw) {
-            const next = Math.max(0, caret - (raw.length - sanitized.length))
-            requestAnimationFrame(() => el.setSelectionRange(next, next))
-          }
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault()
-            handleSubmit()
-          }
-        }}
-        placeholder={fallbackName}
-        aria-label="Agent name"
-        aria-invalid={invalidNonEmpty}
-      />
-      <p className="text-xs text-muted-foreground">Any name git accepts for a branch.</p>
+      <FormGroup
+        layout="stacked"
+        control="single"
+        spokenName="Agent name"
+        help="Any name git accepts for a branch."
+        invalid={invalidNonEmpty}
+      >
+        {(field) => (
+          <Input
+            {...field}
+            value={renameDraft}
+            onChange={(e) => {
+              const el = e.target
+              const raw = el.value
+              const caret = el.selectionStart ?? raw.length
+              setRenameDraft(raw)
+              // Keep the caret put when sanitization shrinks the string (same
+              // approach as the new-agent input).
+              const sanitized = sanitizeAgentName(raw)
+              if (sanitized !== raw) {
+                const next = Math.max(0, caret - (raw.length - sanitized.length))
+                requestAnimationFrame(() => el.setSelectionRange(next, next))
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault()
+                handleSubmit()
+              }
+            }}
+            placeholder={fallbackName}
+          />
+        )}
+      </FormGroup>
       {branch !== null && (
-        <div className="grid gap-1">
-          <CheckboxRow
-            id="rename-branch"
-            checked={renameBranch}
-            onCheckedChange={(checked) => setRenameBranch(checked)}
-          >
-            Also rename the git branch
-          </CheckboxRow>
-          <p
-            className={
-              warns
-                ? "flex items-start gap-1.5 text-xs text-dux-warning"
-                : "text-xs text-muted-foreground"
-            }
-            data-testid="rename-branch-note"
-          >
-            {warns && <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
-            <span>{renderProse(renameBranchNoteProse(branch, openPr, pushed))}</span>
-          </p>
-        </div>
+        <CheckboxRow
+          id="rename-branch"
+          checked={renameBranch}
+          onCheckedChange={(checked) => setRenameBranch(checked)}
+          help={renderProse(renameBranchNoteProse(branch, openPr, pushed))}
+          helpTone={warns ? "warning" : undefined}
+        >
+          Also rename the git branch
+        </CheckboxRow>
       )}
       <ErrorLine size="xs">{blocked}</ErrorLine>
     </Modal>

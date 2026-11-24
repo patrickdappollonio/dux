@@ -2,7 +2,9 @@
 import { act, cleanup, render } from "@testing-library/react"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { hasMoreAbove, hasMoreBelow, useScrollEdges } from "@/hooks/use-scroll-edges"
+import * as React from "react"
+
+import { hasMoreAbove, hasMoreBelow, useScrollEdgesOf } from "@/hooks/use-scroll-edges"
 
 describe("hasMoreBelow", () => {
   it("is on while the list can scroll further down", () => {
@@ -41,10 +43,12 @@ function setMetrics(el: HTMLElement, m: { scrollTop: number; scrollHeight: numbe
 }
 
 function Probe({ rows }: { rows: number }) {
-  const { ref, moreAbove, moreBelow } = useScrollEdges<HTMLDivElement>()
+  const [node, setNode] = React.useState<HTMLDivElement | null>(null)
+  const { moreAbove, moreBelow, scrollbar } = useScrollEdgesOf(node)
   return (
     <div
-      ref={ref}
+      ref={setNode}
+      data-scrollbar={scrollbar}
       data-testid="list"
       data-more-above={moreAbove ? "" : undefined}
       data-more-below={moreBelow ? "" : undefined}
@@ -63,8 +67,20 @@ function scrollTo(list: HTMLElement, scrollTop: number) {
   })
 }
 
-describe("useScrollEdges", () => {
+describe("useScrollEdgesOf", () => {
   afterEach(cleanup)
+
+  it("reports the width a scrollbar takes from the box, and none for a floating one", () => {
+    const { getByTestId } = render(<Probe rows={1} />)
+    const list = getByTestId("list")
+    expect(list.getAttribute("data-scrollbar")).toBe("0")
+    Object.defineProperty(list, "offsetWidth", { configurable: true, value: 215 })
+    Object.defineProperty(list, "clientWidth", { configurable: true, value: 200 })
+    act(() => {
+      list.dispatchEvent(new Event("scroll"))
+    })
+    expect(list.getAttribute("data-scrollbar")).toBe("15")
+  })
 
   it("follows scrolls and rows arriving, at both edges", async () => {
     const { getByTestId, rerender } = render(<Probe rows={1} />)

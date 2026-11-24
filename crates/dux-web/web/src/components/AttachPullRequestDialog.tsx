@@ -1,5 +1,8 @@
+import { useId } from "react"
+
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
+import { FormGroup, HelpLine } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { formatRegularCount } from "@/lib/formatRegularCount"
@@ -25,6 +28,7 @@ export function AttachPullRequestDialog() {
   const session = spine?.sessions.find((s) => s.id === attachPullRequestTarget)
 
   const name = session ? sessionLabel(session) : ""
+  const countId = useId()
   const count = session ? sessionPrs(session).length : 0
   const empty = attachPullRequestDraft.trim() === ""
 
@@ -54,26 +58,31 @@ export function AttachPullRequestDialog() {
         disabledReason: empty ? "Enter the pull request first." : null,
       }}
     >
-      <p className="text-sm text-muted-foreground">
+      <HelpLine id={countId}>
         <InlineCode>{name}</InlineCode>{" "}
         {count === 0
           ? "has no pull requests yet."
           : `has ${formatRegularCount(count, "pull request")} now.`}{" "}
         One from another repository works too.
-      </p>
-      <Input
-        value={attachPullRequestDraft}
-        onChange={(e) => setAttachPullRequestDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault()
-            handleSubmit()
-          }
-        }}
-        placeholder="PR URL, #123, or 123"
-        // 44px under a finger, the height of the footer's buttons there.
-        className="pointer-coarse:h-11"
-      />
+      </HelpLine>
+      <FormGroup layout="stacked" control="single" spokenName="Pull request URL or number" describedBy={countId}>
+        {(field) => (
+          <Input
+            {...field}
+            value={attachPullRequestDraft}
+            onChange={(e) => setAttachPullRequestDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault()
+                handleSubmit()
+              }
+            }}
+            placeholder="PR URL, #123, or 123"
+            // 44px under a finger, the height of the footer's buttons there.
+            className="pointer-coarse:h-11"
+          />
+        )}
+      </FormGroup>
     </Modal>
   )
 }

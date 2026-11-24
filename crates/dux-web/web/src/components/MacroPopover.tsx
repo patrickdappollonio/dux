@@ -23,6 +23,7 @@ import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { targetPtyId } from "@/components/terminalAreaModel"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
+import { useFoldHold } from "@/hooks/use-fold-to-fit"
 import { useMacrosBlockedHint } from "@/hooks/use-macros-blocked"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { FOCUS_RING } from "@/lib/focusRing"
@@ -88,11 +89,18 @@ export function MacroPopover({
   const [ownOpen, setOwnOpen] = useState(false)
   const open = anchored ? anchored.open : ownOpen
   const setOpen = anchored ? anchored.onOpenChange : setOwnOpen
+  // The computer header does not fold its controls while this is open, nor
+  // until its close has finished handing focus back.
+  const settleFold = useFoldHold(open)
   // A pane that becomes blocked closes the picker, so it does not come back by
   // itself once the pane is free again.
   useEffect(() => {
     if (blocked && open) setOpen(false)
   }, [blocked, open, setOpen])
+  // A blocked pane draws no popover, so no close ever finishes to say so.
+  useEffect(() => {
+    if (blocked) settleFold()
+  }, [blocked, settleFold])
   const isMobile = useIsMobile()
   const coarsePointer = useIsCoarsePointer()
   // Set when the LAST pick landed in the mobile compose draft rather than the
@@ -167,7 +175,14 @@ export function MacroPopover({
   return (
     // Tab stays in the picker, which base-ui does only with a Close part inside
     // it; the page keeps its scroll and a click outside still dismisses it.
-    <Popover open={open} onOpenChange={setOpen} modal="trap-focus">
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
+      onOpenChangeComplete={(now) => {
+        if (!now) settleFold()
+      }}
+      modal="trap-focus"
+    >
       {/* The ellipsis on the label says the button opens a menu of choices
           rather than acting.
 
@@ -247,8 +262,8 @@ function MacroCommand({
   return (
     // min-h-0 lets the Command column shrink when the popup hits its
     // viewport cap, so the list below scrolls instead of pushing the
-    // Edit-macros footer off screen.
-    <Command className="min-h-0">
+    // Edit-macros footer off screen. `label` is the search box's name.
+    <Command className="min-h-0" label="Search macros">
       {/* No autofocus in the sheet: menus never pop the soft keyboard
           on open, and this now presents as one of them; tapping the
           field summons the keyboard. Desktop keeps type-immediately

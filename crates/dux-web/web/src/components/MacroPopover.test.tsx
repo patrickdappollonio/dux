@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { computeAccessibleName } from "dom-accessibility-api"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { useRef, useState } from "react"
@@ -167,6 +168,8 @@ describe("MacroPopover phone sheet presentation", () => {
     expect(document.querySelector('[data-slot="popover-backdrop"]')).toBeNull()
     const input = document.querySelector('[data-slot="command-input"]')
     expect(document.activeElement).toBe(input)
+    // Named for a screen reader, not only by its placeholder.
+    expect(computeAccessibleName(input!)).toBe("Search macros")
   })
 })
 

@@ -2,7 +2,9 @@ import { useLayoutEffect, useRef, useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { StaleSaveNotice } from "@/components/StaleSaveNotice"
+import { FormGroup } from "@/components/ui/form-group"
 import { Textarea } from "@/components/ui/textarea"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { envEdit, envLeftOutNote, envToText } from "@/lib/env"
 import {
@@ -47,6 +49,8 @@ function GlobalEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void
   const coarse = useIsCoarsePointer()
   const edit = envEdit(seeded.saved, seeded.text, text)
   const leftOutNote = envLeftOutNote(edit.leftOut)
+  // On a phone the text takes the height the covering dialog leaves.
+  const phone = useIsMobile()
 
   // A reload reseeds the text and takes the Reload button away with its
   // banner, so focus is placed again as an open places it: the text under a
@@ -92,14 +96,24 @@ function GlobalEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void
         leaves: ["the global environment"],
       }}
     >
-      <Textarea
-        ref={field}
-        placeholder="KEY=VALUE"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        className="min-h-48 font-mono max-md:flex-1"
-      />
-      {leftOutNote ? <p className="text-sm text-muted-foreground">{leftOutNote}</p> : null}
+      <FormGroup
+        layout="stacked"
+        height={phone ? "fill" : "content"}
+        control="single"
+        spokenName="Environment variables"
+        notes={[{ words: leftOutNote }]}
+      >
+        {(wiring) => (
+          <Textarea
+            {...wiring}
+            ref={field}
+            placeholder="KEY=VALUE"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="min-h-48 font-mono max-md:flex-1"
+          />
+        )}
+      </FormGroup>
       {conflict ? (
         // The table changed after the dialog read it and nothing was saved.
         // Reloading throws these edits away, so "Keep editing" has focus.

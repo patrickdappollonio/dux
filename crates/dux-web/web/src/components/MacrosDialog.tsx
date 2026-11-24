@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react"
+import type { CSSProperties, ReactNode, RefObject } from "react"
 import { Radio } from "@base-ui/react/radio"
 import { RadioGroup } from "@base-ui/react/radio-group"
 import {
@@ -28,6 +28,7 @@ import {
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ErrorLine } from "@/components/ErrorLine"
+import { FormGroup, type FieldWiring } from "@/components/ui/form-group"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import {
   Modal,
@@ -68,6 +69,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { EmptyState, ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ScrollList, ScrollListRows } from "@/components/ui/scroll-list"
 import { Input } from "@/components/ui/input"
 import { tabsListVariants } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
@@ -76,6 +78,7 @@ import {
   MOUSE_DRAG_ACTIVATION,
   TOUCH_DRAG_ACTIVATION,
 } from "@/lib/dragActivation"
+import { SORT_MODIFIERS } from "@/lib/dragBounds"
 import { FOCUS_RING } from "@/lib/focusRing"
 import {
   MACRO_SURFACE_OPTIONS,
@@ -413,7 +416,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
         </Button>
       </div>
       <SegmentedChoice
-        label="Show macros for"
+        field={{ "aria-label": "Show macros for" }}
         value={filter}
         options={FILTERS.map((f) => ({
           value: f.value,
@@ -573,7 +576,13 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
           }
           footerNote={notices ?? undefined}
         >
-          {editing ? editor : items.length === 0 ? empty : list}
+          {editing ? (
+            editor
+          ) : items.length === 0 ? (
+            empty
+          ) : (
+            <ScrollList scroll="enclosing">{list}</ScrollList>
+          )}
         </Modal>
         {confirm}
       </>
@@ -599,12 +608,9 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
               {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
                   into the column gap so the rows still line up with the search. */}
               <div ref={setListRoom} className="flex min-h-0 flex-1 flex-col">
-                <div
-                  className="-mr-2 flex min-h-0 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]"
-                  style={{ height: listHeight }}
-                >
+                <ScrollList scroll="own" height={{ px: listHeight }} scrollbar="gutter" reveal="flush">
                   {list}
-                </div>
+                </ScrollList>
               </div>
             </div>
             <div className="flex min-h-0 flex-col overflow-y-auto rounded-lg border p-4">
@@ -675,17 +681,13 @@ function emptyListText(query: string, filter: MacroFilter): string {
 // One choice among a few, drawn as a segmented control: a radio group, so it
 // is announced as a single choice and the arrow keys move it.
 function SegmentedChoice<T extends string>({
-  label,
-  labelledBy,
-  describedBy,
+  field,
   value,
   options,
   onChange,
   className,
 }: {
-  label?: string
-  labelledBy?: string
-  describedBy?: string
+  field: FieldWiring
   value: T
   options: { value: T; label: ReactNode }[]
   onChange: (value: T) => void
@@ -693,9 +695,10 @@ function SegmentedChoice<T extends string>({
 }) {
   return (
     <RadioGroup
-      aria-label={label}
-      aria-labelledby={labelledBy}
-      aria-describedby={describedBy}
+      aria-label={field["aria-label"]}
+      aria-labelledby={field["aria-labelledby"]}
+      aria-describedby={field["aria-describedby"]}
+      aria-invalid={field["aria-invalid"]}
       value={value}
       onValueChange={(next) => {
         const found = options.find((option) => option.value === next)
@@ -760,20 +763,9 @@ function MacroList({
     onMove(keyOf(String(event.active.id)), keyOf(String(event.over.id)))
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLUListElement>) {
-    const at = items.findIndex((item) => item.key === selectedKey)
-    const target =
-      event.key === "ArrowDown"
-        ? items[Math.min(at + 1, items.length - 1)]
-        : event.key === "ArrowUp"
-          ? items[Math.max(at - 1, 0)]
-          : event.key === "Home"
-            ? items[0]
-            : event.key === "End"
-              ? items[items.length - 1]
-              : undefined
+  function moveTo(index: number) {
+    const target = items[index]
     if (target === undefined) return
-    event.preventDefault()
     onHighlight(target.key)
     rowEls.current.get(target.key)?.focus()
   }
@@ -786,13 +778,17 @@ function MacroList({
   const tabStop = items.some((item) => item.key === selectedKey) ? selectedKey : items[0].key
 
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+    <DndContext sensors={sensors} modifiers={SORT_MODIFIERS} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={items.map((item) => dragId(item.key))} strategy={verticalListSortingStrategy}>
-        <ul
-          role="listbox"
-          aria-label="Macros"
-          className="flex flex-col gap-0.5"
-          onKeyDown={handleKeyDown}
+        <ScrollListRows
+          gap="tight"
+          semantics="listbox"
+          label="Macros"
+          movement={{
+            count: items.length,
+            at: items.findIndex((item) => item.key === selectedKey),
+            onMove: moveTo,
+          }}
         >
           {items.map((item) => (
             <MacroRow
@@ -812,7 +808,7 @@ function MacroList({
               onActivate={() => onActivate(item.key)}
             />
           ))}
-        </ul>
+        </ScrollListRows>
       </SortableContext>
     </DndContext>
   )
@@ -940,21 +936,13 @@ function MacroFields({
   const confirming = useRef(false)
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="macro-name" className="text-sm font-medium text-muted-foreground">
-          Name
-        </label>
-        <div className="flex items-center gap-2">
-          <Input
-            id="macro-name"
-            ref={nameRef}
-            value={macro.name}
-            onChange={(e) => onChange({ name: e.target.value })}
-            placeholder="Review"
-            aria-invalid={problemField === "name"}
-            aria-describedby={problemField === "name" ? MACRO_PROBLEM_ID : undefined}
-            className={CONTROL_HEIGHT}
-          />
+      <FormGroup
+        layout="stacked"
+        control="single"
+        label="Name"
+        invalid={problemField === "name"}
+        describedBy={problemField === "name" ? MACRO_PROBLEM_ID : undefined}
+        after={
           <DropdownMenu>
             <EllipsisMenuTrigger placement="header" aria-label={`Actions for ${name}`} />
             <DropdownMenuContent
@@ -990,44 +978,56 @@ function MacroFields({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
-      </div>
+        }
+      >
+        {(field) => (
+          <Input
+            {...field}
+            ref={nameRef}
+            value={macro.name}
+            onChange={(e) => onChange({ name: e.target.value })}
+            placeholder="Review"
+            className={CONTROL_HEIGHT}
+          />
+        )}
+      </FormGroup>
 
-      <div className="flex flex-col gap-1.5">
-        <span id="macro-surface" className="text-sm font-medium text-muted-foreground">
-          Shown on
-        </span>
-        <SegmentedChoice
-          labelledBy="macro-surface"
-          describedBy="macro-surface-meaning"
-          value={macro.surface}
-          options={MACRO_SURFACE_OPTIONS}
-          onChange={(surface) => onChange({ surface })}
-          className={phone ? "w-full" : "w-fit"}
-        />
-        <p id="macro-surface-meaning" className="text-xs text-muted-foreground">
-          {MACRO_SURFACE_OPTIONS.find((option) => option.value === macro.surface)?.description}
-        </p>
-      </div>
+      <FormGroup
+        layout="stacked"
+        control="group"
+        label="Shown on"
+        notes={[{ words: MACRO_SURFACE_OPTIONS.find((option) => option.value === macro.surface)?.description }]}
+      >
+        {(field) => (
+          <SegmentedChoice
+            field={field}
+            value={macro.surface}
+            options={MACRO_SURFACE_OPTIONS}
+            onChange={(surface) => onChange({ surface })}
+            className={phone ? "w-full" : "w-fit"}
+          />
+        )}
+      </FormGroup>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-        <label htmlFor="macro-text" className="text-sm font-medium text-muted-foreground">
-          Text
-        </label>
-        <Textarea
-          id="macro-text"
-          value={macro.text}
-          onChange={(e) => onChange({ text: e.target.value })}
-          placeholder="review this code for bugs"
-          aria-invalid={problemField === "text"}
-          aria-describedby={problemField === "text" ? MACRO_PROBLEM_ID : undefined}
-          className="min-h-30 flex-1 resize-none font-mono field-sizing-fixed"
-        />
-        <p className="text-xs text-muted-foreground">
-          Each new line is sent as Alt+Enter, so the macro arrives as one
-          prompt; you press Enter to send it.
-        </p>
-      </div>
+      <FormGroup
+        layout="stacked"
+        height="fill"
+        control="single"
+        label="Text"
+        help="Each new line is sent as Alt+Enter, so the macro arrives as one prompt; you press Enter to send it."
+        invalid={problemField === "text"}
+        describedBy={problemField === "text" ? MACRO_PROBLEM_ID : undefined}
+      >
+        {(field) => (
+          <Textarea
+            {...field}
+            value={macro.text}
+            onChange={(e) => onChange({ text: e.target.value })}
+            placeholder="review this code for bugs"
+            className="min-h-30 flex-1 resize-none font-mono field-sizing-fixed"
+          />
+        )}
+      </FormGroup>
     </div>
   )
 }

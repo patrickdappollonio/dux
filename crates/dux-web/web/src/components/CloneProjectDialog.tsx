@@ -7,6 +7,7 @@ import {
 import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
+import { FormGroup } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
 import { INVALID_AGENT_NAME, isValidAgentName } from "@/lib/agentName"
@@ -108,55 +109,57 @@ function CloneProjectForm({ open, onClosed }: { open: boolean; onClosed: () => v
           {renderProse(prose`${chip(pr.offer.title)} from branch ${chip(pr.offer.head_branch)}`)}
         </p>
       )}
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="clone-address" className="text-sm font-medium">
-          Repository address
-        </label>
-        <Input
-          id="clone-address"
-          value={form.url}
-          onChange={(event) => setCloneProjectUrl(event.target.value)}
-          onKeyDown={handleEnter}
-          placeholder="owner/repo or a git URL"
-          readOnly={pr !== null}
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-        />
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="clone-destination" className="text-sm font-medium">
-          Destination folder
-        </label>
-        <Input
-          ref={destinationRef}
-          id="clone-destination"
-          value={form.path}
-          onChange={(event) => setCloneProjectPath(event.target.value)}
-          onKeyDown={handleEnter}
-          placeholder="/path/to/the/new/folder"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-        />
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <p className="text-sm font-medium">{pr ? "Agent" : "First agent"}</p>
-        <AgentNameInput
-          value={form.name}
-          onChange={setCloneProjectName}
-          onSubmit={handleSubmit}
-          placeholder={pr ? "Agent name" : "Agent name (optional)"}
-          ariaLabel="Agent name"
-          invalid={invalidName}
-          generating={form.namePending}
-          autoFocus={false}
-        />
-        <p className="text-xs text-muted-foreground">
-          Any name git accepts for a branch. This becomes the branch
-          name.
-        </p>
-      </div>
+      <FormGroup layout="stacked" control="single" label="Repository address">
+        {(field) => (
+          <Input
+            {...field}
+            value={form.url}
+            onChange={(event) => setCloneProjectUrl(event.target.value)}
+            onKeyDown={handleEnter}
+            placeholder="owner/repo or a git URL"
+            readOnly={pr !== null}
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        )}
+      </FormGroup>
+      <FormGroup layout="stacked" control="single" label="Destination folder">
+        {(field) => (
+          <Input
+            {...field}
+            ref={destinationRef}
+            value={form.path}
+            onChange={(event) => setCloneProjectPath(event.target.value)}
+            onKeyDown={handleEnter}
+            placeholder="/path/to/the/new/folder"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        )}
+      </FormGroup>
+      {/* The rules are a note rather than help, so they sit under the box as in the other agent-name fields. */}
+      <FormGroup
+        layout="stacked"
+        control="single"
+        label={pr ? "Agent name" : "First agent's name"}
+        optional={pr === null || undefined}
+        notes={[{ words: "Any name git accepts for a branch. This becomes the branch name." }]}
+        invalid={invalidName}
+      >
+        {(field) => (
+          <AgentNameInput
+            field={field}
+            value={form.name}
+            onChange={setCloneProjectName}
+            onSubmit={handleSubmit}
+            placeholder={pr ? "Agent name" : "Agent name (optional)"}
+            generating={form.namePending}
+            autoFocus={false}
+          />
+        )}
+      </FormGroup>
       {pr ? (
         <PullRequestReviewCopy pr={pr} name={name} />
       ) : (

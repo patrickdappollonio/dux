@@ -102,12 +102,12 @@ Three things can go wrong with a link:
 - **The agent you are watching is deleted out from under you.** dux moves you to the next
   active agent, or home when there is not one.
 - **The terminal has since closed.** You get a **Terminal not found** screen with a
-  **New terminal** button that opens a fresh one in the same place: in that agent's
-  worktree, at that project's root, or a new standalone terminal. It shows every time you
+  button that opens a fresh one in the same place: **New terminal tab** in that agent's
+  worktree, **New terminal** at that project's root, or a new standalone terminal. It shows every time you
   arrive at such a link, Back included, so close three terminals and walk back and you
   see it three times rather than landing somewhere the link never named.
 
-![The Terminal not found screen: a short explanation naming the terminal's id, a New terminal button, and Back to agents.](/screens/terminal-not-found.png)
+![The Terminal not found screen: a short explanation naming the terminal's id, a New terminal tab button, and Back to agents.](/screens/terminal-not-found.png)
 
 ## Adding projects
 
@@ -241,7 +241,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 
 **Where the button is.**
 
-- **On a computer** it is in the terminal's header, beside **Macros…** and the pane's own `⋯`.
+- **On a computer** it is in the terminal's header, beside **Macros…** and the pane's own `⋯`. When a long name needs the room, the header's buttons move into that `⋯` one at a time, **Theater** first, then **Macros…**, then **New tab…**, and come back as the room returns.
 - **On a phone** it is the first button in the flap that hangs off the band above the terminal. That band is the strip of the part on screen when the agent has two or more tabs or two or more terminals (its tab strip over the agent, the dock strip over a terminal) and the header itself otherwise, and the flap takes the colour of whichever one it is hanging from, so it always reads as part of it.
 
 **What happens when you go in.**
@@ -476,7 +476,7 @@ alike, on any terminal.
 There are three kinds of plain shell:
 
 - A **companion terminal** runs in an agent's worktree, for tests, git, or tailing a log while the agent works. It lives in the agent's **terminal dock**, under the agent, and has no row of its own in the sidebar: the agent's row stands for it. See [The terminal dock](#the-terminal-dock) below.
-  - Open one from the agent's `⋯` menu (**New terminal in the worktree**, or **in the folder** for a standalone agent), from the dock's **+**, from **New tab…** in the centre pane's header, or from **New terminal for an agent…** in the launcher's **▾** menu, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
+  - Open one from the agent's `⋯` menu (**New terminal tab in the worktree**, or **in the folder** for a standalone agent), from the dock's **+**, from **New tab…** in the centre pane's header, or from **New terminal for an agent…** in the launcher's **▾** menu, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
 - A **project terminal** opens at the project's repo root with no agent attached. It is a row of the sidebar's one list, sorted with your agents. It is the escape hatch when dux will not do something for you remotely, even over Tailscale with no local terminal in sight.
   - Spawn one from the project's `⋯` menu ("New terminal at the project root").
   - It shows up in the Task Manager and is destroyed on close.
@@ -502,7 +502,7 @@ When an agent has a terminal of its own, the center pane splits: the agent and i
 
 ![The same agent with the strips hidden: a thin line with a grip in its middle between the agent and its terminal, and the floating pill at the band's right end.](/screens/web-terminal-dock-hidden-strips.png#full)
 
-**On a phone** there is no room for both, so an agent's screen shows the agent or its terminals, never both, with only that part's strip. The **agent/terminals switch** in the action flap moves between them (see [The action flap](#the-action-flap)), and Back moves back. Tapping an agent in the list reopens it on whichever part you last left it on in that browser, and on the agent the first time; a reload, a bookmark or a link opens the part its address names. The part on screen shows its own strip (the tab strip over the agent, the dock strip over a terminal) once the agent has two or more tabs or two or more terminals, or while **Always show tab strip** is on. A lone tab beside a lone terminal shows no strip at all; make a second one from the flap's `⋯` with **New agent tab…** or **New terminal in the worktree** (**New terminal in the folder** for a standalone agent).
+**On a phone** there is no room for both, so an agent's screen shows the agent or its terminals, never both, with only that part's strip. The **agent/terminals switch** in the action flap moves between them (see [The action flap](#the-action-flap)), and Back moves back. Tapping an agent in the list reopens it on whichever part you last left it on in that browser, and on the agent the first time; a reload, a bookmark or a link opens the part its address names. The part on screen shows its own strip (the tab strip over the agent, the dock strip over a terminal) once the agent has two or more tabs or two or more terminals, or while **Always show tab strip** is on. A lone tab beside a lone terminal shows no strip at all; make a second one from the flap's `⋯` with **New agent tab…** or **New terminal tab in the worktree** (**New terminal tab in the folder** for a standalone agent).
 
 ![An agent's terminal on a phone: the dock strip with two terminal pills under the slim header, and the action flap carrying the agent switch beside the menu.](/screens/phone-terminal-view.png)
 
@@ -579,7 +579,7 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 
 dux picks the layout for you, and you can pick the other one from the app menu: **Use the computer layout** on the phone layout, **Use the phone layout** on the computer layout. A phone with a keyboard attached may have room for the computer layout, and a small window may read better as a phone. Your choice belongs to that browser at that dux address: every tab and window of it follows the choice at once, and nothing else does (not another browser, not another device). It survives rotating and reloading. While it is in force, **Choose the layout automatically** in the same menu hands the decision back to dux.
 
-On a screen narrower than a tablet, the computer layout keeps the sidebar at its icon rail so the page keeps its room and the cog stays on screen. Its expand button slides the whole sidebar out over the page instead, and picking something tucks it away again. The changes pane starts closed there too; its button beside the cog opens it, and opening or closing it at that width does not change your **Show the Changes pane** preference.
+On a screen narrower than a tablet, the computer layout keeps the sidebar at its icon rail so the page keeps its room and the cog stays on screen. Its expand button slides the whole sidebar out over the page instead, and picking something tucks it away again. The changes pane starts closed there too; its button just before the pane's `⋯` opens it, and opening or closing it at that width does not change your **Show the Changes pane** preference.
 
 ### The screens
 
@@ -604,7 +604,7 @@ It holds:
 - the changed-file count (agents only)
 - the terminal-keys button, which hides and shows the key row, while this device is typing into the terminal
 - the **agent/terminals switch**, on an agent with at least one terminal. Over the agent it shows the terminal icon and how many terminals there are; over a terminal, the agent icon. The icon tells you what the other part is doing: green and pulsing while it works, cyan and blinking when the agent needs you (needs-you wins), plain otherwise. Tap it to show that part and type into it.
-- the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal in the worktree**, or **in the folder** for a standalone agent, among them) and a **Settings** drill into the app menu
+- the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal tab in the worktree**, or **in the folder** for a standalone agent, among them) and a **Settings** drill into the app menu
 
 The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
 
