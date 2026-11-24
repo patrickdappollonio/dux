@@ -11,17 +11,22 @@ import { cn } from "@/lib/utils"
  * listbox, its keyboard movement.
  *
  * The shadow is the `[data-scroll-list-fade]` mask in index.css: the edge with
- * content past it dissolves rather than being cut flat, and the same depth is
- * the box's scroll padding, so a row scrolled into view lands clear of it.
+ * content past it dissolves rather than being cut flat. The mask spares what is
+ * not a row (a scrollbar the box shows, a focus ring the box draws), and the
+ * same depth is the box's scroll padding, so a row scrolled into view lands
+ * clear of it; `reveal="flush"` is for a list sized to whole rows, which must
+ * rest on a row boundary and not a shadow's depth above one.
  *
  * `scroll="own"` renders the box. `scroll="enclosing"` is for a list that
- * scrolls inside a box something else owns, a modal's body or a scroll area:
- * the list renders a plain block and puts the shadow on that box for as long
- * as it is mounted, so one modal body or one scroll area holds at most one
- * enclosing list. The box is the nearest scroll area viewport or modal body
- * above the list, and a modal body's own scroll area when it scrolls in one
- * (the same rule the modal uses to find its scroller). Outside both, the list
- * renders with no shadow.
+ * scrolls inside a box something else owns: the list renders a plain block and
+ * puts the shadow on the nearest ancestor that scrolls, for as long as it is
+ * mounted. That is a box of its own list kind (the list then does nothing, the
+ * box already has its shadow), a scroll area viewport, a modal's body (or the
+ * scroll area the body scrolls in, the rule the modal uses to find its
+ * scroller), or any other element whose `overflow-y` is `auto` or `scroll`.
+ * Several enclosing lists may share one box, which keeps its shadow until the
+ * last of them goes. A list with no scrolling ancestor has nothing to shadow,
+ * says so in the console and renders without one.
  */
 export type ScrollListProps = { children?: React.ReactNode } & (
   | {
@@ -36,20 +41,34 @@ export type ScrollListProps = { children?: React.ReactNode } & (
       /** `pane` insets the rows from a pane's edges, with room above the first
        * one for a focus ring. */
       inset?: "pane"
+      /** `flush` drops the scroll padding, for a box a whole number of rows
+       * tall that must come to rest on a row. */
+      reveal?: "clear" | "flush"
       scrollerRef?: (node: HTMLDivElement | null) => void
     }
   | { scroll: "enclosing" }
 )
 
 const FADE = "data-scroll-list-fade"
+const OWN_BOX = "data-scroll-list-box"
 const MORE_ABOVE = "data-more-above"
 const MORE_BELOW = "data-more-below"
+const SCROLLBAR_VAR = "--dux-list-fade-bar"
+
+/** The `peek` height: a cap of three and a half project shortcut rows, and the
+ * room the same rows are held while they load. A shortcut row is 2.25rem with a
+ * fine pointer and 2.75rem (its 44px floor) on a phone or under a finger;
+ * `--rows` is how many rows are coming. */
+export const PEEK = {
+  cap: "max-h-[8.75rem] max-md:max-h-[9.625rem] pointer-coarse:max-h-[9.625rem]",
+  held: "h-[8.75rem] max-md:h-[9.625rem] pointer-coarse:h-[9.625rem]",
+  heldForCount:
+    "h-[min(calc(var(--rows)*2.25rem),8.75rem)] max-md:h-[min(calc(var(--rows)*2.75rem),9.625rem)] pointer-coarse:h-[min(calc(var(--rows)*2.75rem),9.625rem)]",
+} as const
 
 const HEIGHT = {
   fill: "min-h-0 flex-1",
-  // A shortcut row is 2.25rem with a fine pointer and 2.75rem (its 44px floor)
-  // on a phone or under a finger.
-  peek: "flex flex-col max-h-[8.75rem] max-md:max-h-[9.625rem] pointer-coarse:max-h-[9.625rem]",
+  peek: `flex flex-col ${PEEK.cap}`,
   px: "flex min-h-0 flex-col",
 } as const
 
@@ -67,11 +86,12 @@ function OwnBox({
   height,
   scrollbar,
   inset,
+  reveal,
   scrollerRef,
   children,
 }: Extract<ScrollListProps, { scroll: "own" }>) {
   const [node, setNode] = React.useState<HTMLDivElement | null>(null)
-  const { moreAbove, moreBelow } = useScrollEdgesOf(node)
+  const { moreAbove, moreBelow, scrollbar: bar } = useScrollEdgesOf(node)
   const ref = React.useCallback(
     (next: HTMLDivElement | null) => {
       setNode(next)
@@ -83,10 +103,16 @@ function OwnBox({
   return (
     <div
       ref={ref}
-      {...{ [FADE]: "" }}
+      {...{ [FADE]: "", [OWN_BOX]: "" }}
+      data-scroll-list-flush={reveal === "flush" ? "" : undefined}
       data-more-above={moreAbove ? "" : undefined}
       data-more-below={moreBelow ? "" : undefined}
-      style={measured ? { height: height.px } : undefined}
+      style={
+        {
+          [SCROLLBAR_VAR]: `${bar}px`,
+          ...(measured ? { height: height.px } : null),
+        } as React.CSSProperties
+      }
       className={cn(
         "overflow-y-auto",
         HEIGHT[measured ? "px" : height],
@@ -99,40 +125,75 @@ function OwnBox({
   )
 }
 
-// The box an enclosed list scrolls in, found the way the modal finds its own.
-function enclosingScroller(list: HTMLElement): HTMLElement | null {
-  const near = list.parentElement?.closest<HTMLElement>(
-    '[data-slot="scroll-area-viewport"], [data-slot="modal-body"]',
-  )
-  if (!near) return null
-  if (near.dataset.slot === "modal-body") {
-    return near.closest<HTMLElement>('[data-slot="scroll-area-viewport"]') ?? near
+type Scroller = HTMLElement | "own" | null
+
+// The box an enclosed list scrolls in: the nearest ancestor that is one, the
+// way a browser would scroll it. A modal's body is found by its slot rather
+// than its styles, and a modal's scroller is the scroll area around the body
+// when it has one.
+function enclosingScroller(list: HTMLElement): Scroller {
+  for (let el = list.parentElement; el !== null; el = el.parentElement) {
+    if (el.hasAttribute(OWN_BOX)) return "own"
+    if (el.dataset.slot === "scroll-area-viewport") return el
+    if (el.dataset.slot === "modal-body") {
+      return el.closest<HTMLElement>('[data-slot="scroll-area-viewport"]') ?? el
+    }
+    const overflow = getComputedStyle(el).overflowY
+    if (overflow === "auto" || overflow === "scroll") return el
   }
-  return near
+  return null
+}
+
+// A box several enclosing lists share keeps its marks until the last one goes.
+const marked = new WeakMap<HTMLElement, number>()
+
+function mark(box: HTMLElement) {
+  marked.set(box, (marked.get(box) ?? 0) + 1)
+  box.setAttribute(FADE, "")
+}
+
+function unmark(box: HTMLElement) {
+  const left = (marked.get(box) ?? 1) - 1
+  if (left > 0) {
+    marked.set(box, left)
+    return
+  }
+  marked.delete(box)
+  box.removeAttribute(FADE)
+  box.removeAttribute(MORE_ABOVE)
+  box.removeAttribute(MORE_BELOW)
+  box.style.removeProperty(SCROLLBAR_VAR)
 }
 
 function EnclosedList({ children }: { children?: React.ReactNode }) {
   const [list, setList] = React.useState<HTMLDivElement | null>(null)
-  const scroller = React.useMemo(() => (list === null ? null : enclosingScroller(list)), [list])
-  const { moreAbove, moreBelow } = useScrollEdgesOf(scroller)
+  const found = React.useMemo(() => (list === null ? undefined : enclosingScroller(list)), [list])
+  const scroller = typeof found === "object" && found !== null ? found : null
+  const { moreAbove, moreBelow, scrollbar } = useScrollEdgesOf(scroller)
 
-  // Attributes and never a class: the box's owner re-renders its own class
-  // names (a modal's body changes them between card and cover) and would drop
-  // one added here, while attributes it never set are left alone.
+  React.useEffect(() => {
+    if (found === null) {
+      console.error(
+        'ScrollList scroll="enclosing" has no scrolling ancestor (a scroll area, a modal body, or an element with overflow-y auto or scroll), so it shows no shadow.',
+      )
+    }
+  }, [found])
+
+  // Attributes and a custom property and never a class: the box's owner
+  // re-renders its own class names (a modal's body changes them between card
+  // and cover) and would drop one added here, while what it never set is left
+  // alone.
   React.useLayoutEffect(() => {
     if (scroller === null) return
-    scroller.setAttribute(FADE, "")
-    return () => {
-      scroller.removeAttribute(FADE)
-      scroller.removeAttribute(MORE_ABOVE)
-      scroller.removeAttribute(MORE_BELOW)
-    }
+    mark(scroller)
+    return () => unmark(scroller)
   }, [scroller])
   React.useLayoutEffect(() => {
     if (scroller === null) return
     scroller.toggleAttribute(MORE_ABOVE, moreAbove)
     scroller.toggleAttribute(MORE_BELOW, moreBelow)
-  }, [scroller, moreAbove, moreBelow])
+    scroller.style.setProperty(SCROLLBAR_VAR, `${scrollbar}px`)
+  }, [scroller, moreAbove, moreBelow, scrollbar])
 
   return <div ref={setList}>{children}</div>
 }

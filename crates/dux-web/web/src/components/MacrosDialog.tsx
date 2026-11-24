@@ -606,7 +606,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
               {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
                   into the column gap so the rows still line up with the search. */}
               <div ref={setListRoom} className="flex min-h-0 flex-1 flex-col">
-                <ScrollList scroll="own" height={{ px: listHeight }} scrollbar="gutter">
+                <ScrollList scroll="own" height={{ px: listHeight }} scrollbar="gutter" reveal="flush">
                   {list}
                 </ScrollList>
               </div>

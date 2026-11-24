@@ -7,10 +7,12 @@ export interface ScrollMetrics {
   clientHeight: number
 }
 
-/** Which edges of a scroll container have content hidden past them. */
+/** Which edges of a scroll container have content hidden past them, and how
+ * wide a scrollbar it shows (0 for none, or one that floats over the content). */
 export interface ScrollEdges {
   moreAbove: boolean
   moreBelow: boolean
+  scrollbar: number
 }
 
 /**
@@ -32,23 +34,31 @@ export function hasMoreBelow(m: ScrollMetrics): boolean {
   return m.scrollHeight - m.clientHeight - m.scrollTop > 1
 }
 
-const NO_EDGES: ScrollEdges = { moreAbove: false, moreBelow: false }
+const NO_EDGES: ScrollEdges = { moreAbove: false, moreBelow: false, scrollbar: 0 }
 
-function readEdges(m: ScrollMetrics): ScrollEdges {
-  return { moreAbove: hasMoreAbove(m), moreBelow: hasMoreBelow(m) }
+// What the box gives up to a scrollbar is what its border box has beyond its
+// padding box and borders; a scrollbar that floats takes nothing.
+function readEdges(el: HTMLElement): ScrollEdges {
+  return {
+    moreAbove: hasMoreAbove(el),
+    moreBelow: hasMoreBelow(el),
+    scrollbar: Math.max(0, Math.round(el.offsetWidth - el.clientWidth - el.clientLeft * 2)),
+  }
 }
 
 // Keeps the previous object while nothing changed, so a scroll that leaves both
 // answers as they were does not re-render the list.
 function keepIfSame(prev: ScrollEdges, next: ScrollEdges): ScrollEdges {
-  return prev.moreAbove === next.moreAbove && prev.moreBelow === next.moreBelow
+  return prev.moreAbove === next.moreAbove &&
+    prev.moreBelow === next.moreBelow &&
+    prev.scrollbar === next.scrollbar
     ? prev
     : next
 }
 
 /**
  * Tracks whether `node`, a scroll container, has content hidden above and
- * below it.
+ * below it, and the width of the scrollbar it shows.
  *
  * The answer is read before the first paint with `node` in place, and
  * re-measured on a scroll, on the container changing size, and on any of its
@@ -89,13 +99,4 @@ export function useScrollEdgesOf(node: HTMLElement | null): ScrollEdges {
   }, [node])
 
   return node === null ? NO_EDGES : edges
-}
-
-/** `useScrollEdgesOf` for a container this component renders: the callback
- * ref goes on the scroll container. */
-export function useScrollEdges<T extends HTMLElement = HTMLElement>(): ScrollEdges & {
-  ref: (node: T | null) => void
-} {
-  const [node, setNode] = React.useState<T | null>(null)
-  return { ref: setNode, ...useScrollEdgesOf(node) }
 }

@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -113,6 +115,107 @@ describe("ScrollList inside a scrolling box it does not own", () => {
     scrollTo(own, 0)
     expect(edges(own)).toEqual({ fades: true, above: false, below: true })
     expect(edges(screen.getByTestId("body")).fades).toBe(false)
+  })
+})
+
+describe("ScrollList enclosing, where the box is and who shares it", () => {
+  it("keeps a shared box's shadow until the last list on it goes", () => {
+    function Box({ first, second }: { first: boolean; second: boolean }) {
+      return (
+        <div data-slot="modal-body" data-testid="body">
+          {first ? <ScrollList scroll="enclosing">one</ScrollList> : null}
+          {second ? <ScrollList scroll="enclosing">two</ScrollList> : null}
+        </div>
+      )
+    }
+    const { rerender } = render(<Box first second />)
+    const body = screen.getByTestId("body")
+    scrollTo(body, 300)
+    rerender(<Box first={false} second />)
+    expect(edges(body)).toEqual({ fades: true, above: true, below: true })
+    rerender(<Box first={false} second={false} />)
+    expect(edges(body)).toEqual({ fades: false, above: false, below: false })
+  })
+
+  it("leaves a modal body alone when the list sits in a list box that scrolls", () => {
+    render(
+      <div data-slot="modal-body" data-testid="body">
+        <ScrollList scroll="own" height="fill" scrollbar="native">
+          <ScrollList scroll="enclosing">row</ScrollList>
+        </ScrollList>
+      </div>,
+    )
+    expect(edges(screen.getByTestId("body")).fades).toBe(false)
+  })
+
+  it("shadows any other box that scrolls, in the way", () => {
+    render(
+      <div data-slot="modal-body" data-testid="body">
+        <div style={{ overflowY: "auto" }} data-testid="other">
+          <ScrollList scroll="enclosing">row</ScrollList>
+        </div>
+      </div>,
+    )
+    const other = screen.getByTestId("other")
+    scrollTo(other, 600)
+    expect(edges(other)).toEqual({ fades: true, above: true, below: false })
+    expect(edges(screen.getByTestId("body")).fades).toBe(false)
+  })
+
+  it("says so when nothing around it scrolls", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    render(<ScrollList scroll="enclosing">row</ScrollList>)
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("no scrolling ancestor"))
+    error.mockRestore()
+  })
+})
+
+describe("the shadow leaves a scrollbar whole", () => {
+  const withScrollbar = (el: HTMLElement) => {
+    Object.defineProperty(el, "offsetWidth", { configurable: true, value: 215 })
+    Object.defineProperty(el, "clientWidth", { configurable: true, value: 200 })
+    scrollTo(el, 0)
+  }
+
+  it("tells the stylesheet how wide the scrollbar of the box is, own or enclosing", () => {
+    const { container } = render(
+      <ScrollList scroll="own" height="fill" scrollbar="native">
+        row
+      </ScrollList>,
+    )
+    const own = container.firstElementChild as HTMLElement
+    expect(own.style.getPropertyValue("--dux-list-fade-bar")).toBe("0px")
+    withScrollbar(own)
+    expect(own.style.getPropertyValue("--dux-list-fade-bar")).toBe("15px")
+    cleanup()
+
+    render(
+      <div data-slot="modal-body" data-testid="body">
+        <ScrollList scroll="enclosing">row</ScrollList>
+      </div>,
+    )
+    const body = screen.getByTestId("body")
+    withScrollbar(body)
+    expect(body.style.getPropertyValue("--dux-list-fade-bar")).toBe("15px")
+  })
+
+  it("adds the strip and a focus ring's edges back opaque, and keeps the viewport's own transition", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8")
+    const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`)).split("}")[0]
+    expect(rule("[data-scroll-list-fade]")).toMatch(/mask-size:\s*calc\(100% - var\(--dux-list-fade-bar\)\) 100%/)
+    expect(rule("[data-scroll-list-fade]:focus-visible")).toContain("--dux-list-fade-ring: 3px")
+    expect(rule('[data-scroll-list-fade][data-slot="scroll-area-viewport"]')).toMatch(/box-shadow/)
+  })
+})
+
+describe("ScrollList reveal", () => {
+  it("drops the scroll padding of a box that must rest on whole rows", () => {
+    const { container } = render(
+      <ScrollList scroll="own" height="fill" scrollbar="gutter" reveal="flush">
+        row
+      </ScrollList>,
+    )
+    expect((container.firstElementChild as HTMLElement).hasAttribute("data-scroll-list-flush")).toBe(true)
   })
 })
 

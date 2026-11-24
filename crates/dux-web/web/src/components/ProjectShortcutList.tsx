@@ -3,7 +3,7 @@ import type { CSSProperties } from "react"
 
 import { Spinner } from "@/components/Spinner"
 import { ModalGroupHeading } from "@/components/modal"
-import { ScrollList } from "@/components/ui/scroll-list"
+import { PEEK, ScrollList } from "@/components/ui/scroll-list"
 import { INSET_FOCUS_RING } from "@/lib/focusRing"
 import type {
   ProjectShortcutListView,
@@ -33,13 +33,6 @@ import type {
  * one row per project the app already knows of, up to the cap, or the whole
  * cap while it knows of none yet.
  */
-// The room the rows are given while they load: the cap of the list's `peek`
-// height. A row is 2.25rem with a fine pointer and 2.75rem (its 44px floor) on
-// a phone or under a finger.
-const ROWS_HEIGHT = "h-[8.75rem] max-md:h-[9.625rem] pointer-coarse:h-[9.625rem]"
-const ROWS_HEIGHT_FOR_COUNT =
-  "h-[min(calc(var(--rows)*2.25rem),8.75rem)] max-md:h-[min(calc(var(--rows)*2.75rem),9.625rem)] pointer-coarse:h-[min(calc(var(--rows)*2.75rem),9.625rem)]"
-
 export function ProjectShortcutList({
   list,
   expectedRows = null,
@@ -60,7 +53,7 @@ export function ProjectShortcutList({
         <div className="flex flex-col overflow-hidden rounded-md border">
           <ModalGroupHeading inset>Your projects</ModalGroupHeading>
           <div
-            className={`flex items-center justify-center ${expectedRows === null ? ROWS_HEIGHT : ROWS_HEIGHT_FOR_COUNT}`}
+            className={`flex items-center justify-center ${expectedRows === null ? PEEK.held : PEEK.heldForCount}`}
             style={expectedRows === null ? undefined : ({ "--rows": expectedRows } as CSSProperties)}
           >
             <Spinner kind="glyph" size="text" tone="muted" />
