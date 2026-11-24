@@ -7,12 +7,14 @@ interface Box {
   bottom: number
 }
 
-// A row dragged by its own transform extends the scrollable overflow of the
-// list it sits in, so dnd-kit's autoscroll, which follows the dragged box, never
-// reaches an end: the list scrolls away for as long as the pointer is held
-// outside it. Keeping the dragged box inside the scroller's own box leaves the
-// content's real extent as the only thing to scroll to, while a drag near an
-// edge still autoscrolls to the end.
+// dnd-kit's autoscroll follows the pointer: it scrolls while the pointer is
+// near an edge of the scroller, and stops only when the scroller itself reports
+// that it is at its end. A row dragged by its own transform extends the
+// scroller's scrollable overflow, so each scroll step moves that end further
+// away and it is never reached: the list scrolls away for as long as the pointer
+// is held outside it. Keeping the dragged box inside the scroller's own box
+// leaves the content's real extent as the only end there is, so a drag near an
+// edge still autoscrolls until the list's real end.
 
 function clampAxis(delta: number, start: number, end: number, low: number, high: number): number {
   const min = low - start
