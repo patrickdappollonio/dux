@@ -23,6 +23,8 @@ import {
   Variable,
 } from "lucide-react"
 
+import { MenuReasonsHead } from "@/components/MenuReason"
+import { useMenuReason, type MenuReasonHandle } from "@/hooks/use-menu-reason"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import {
   DropdownMenuGroup,
@@ -104,11 +106,14 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // a standalone agent has none whatever its folder contains.
   const branchGit = supportsBranchGit(session.workspace)
   // While this device does not drive the agent's row, the mutating entries
-  // disable, with the reason as an inline label: a disabled item takes no
-  // pointer events and touch has no hover.
+  // disable, each naming the one reason said at the head of the menu.
   const block = useAgentChangeBlock(session)
   const device = useRowDriverLabel({ sessionId: session.id })
+  const changeReason = useMenuReason(
+    block === null ? null : agentChangeBlockReason(block, device),
+  )
   const changesBlocked = block !== null
+  const describedBy = changeReason.describedBy
   // Whether there is a process to ask to shut down at all. The SERVER's answer,
   // from the same oracle the engine's teardown and the terminal UI's palette
   // gate ask, rather than a scan of the tab rows here.
@@ -117,14 +122,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
 
   return (
     <>
-      {block !== null ? (
-        <DropdownMenuGroup>
-          <DropdownMenuLabel className="max-w-60 whitespace-normal">
-            {agentChangeBlockReason(block, device)}
-          </DropdownMenuLabel>
-          <DropdownMenuSeparator />
-        </DropdownMenuGroup>
-      ) : null}
+      <MenuReasonsHead reasons={[changeReason]} />
       {/* The changed-file row and the shared input-menu items belong to
         * `PaneMenu`, the one menu every surface opens, which renders this body
         * as its agent group with the pane's input group above it. */}
@@ -136,7 +134,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           defaultProvider={defaultProvider}
           atTabCap={atTabCap}
           addingTab={addingTab}
-          changesBlocked={changesBlocked}
+          changeReason={changeReason}
         />
         <AgentProjectSubmenu projectId={projectId} projectName={projectName} />
       </DropdownMenuGroup>
@@ -145,6 +143,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <DropdownMenuLabel>{MENU_GROUP_LABELS.running}</DropdownMenuLabel>
         <DropdownMenuItem
           disabled={changesBlocked}
+          aria-describedby={describedBy}
           onClick={() => openForceReconnect(session.id)}
         >
           <RotateCcw />
@@ -157,6 +156,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         {copyMissing ? (
           <DropdownMenuItem
             disabled={changesBlocked}
+            aria-describedby={describedBy}
             onClick={() => openRecreateWorkingCopy(session.id)}
           >
             <FolderSync />
@@ -170,6 +170,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         {liveProcess ? (
           <DropdownMenuItem
             disabled={changesBlocked}
+            aria-describedby={describedBy}
             onClick={() => openStopAgent(session.id)}
           >
             <Unplug />
@@ -178,6 +179,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         ) : null}
         <DropdownMenuItem
           disabled={changesBlocked}
+          aria-describedby={describedBy}
           onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}
         >
           <RefreshCw />
@@ -191,6 +193,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <DropdownMenuLabel>{MENU_GROUP_LABELS.agent}</DropdownMenuLabel>
         <DropdownMenuItem
           disabled={changesBlocked}
+          aria-describedby={describedBy}
           onClick={() => openRename(session.id)}
         >
           <Pencil />
@@ -199,13 +202,13 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <AgentIdentityItems
           sessionId={session.id}
           branchGit={branchGit}
-          changesBlocked={changesBlocked}
+          changeReason={changeReason}
         />
       </DropdownMenuGroup>
       {branchGit ? (
         <>
           <DropdownMenuSeparator />
-          <AgentStartupItems sessionId={session.id} changesBlocked={changesBlocked} />
+          <AgentStartupItems sessionId={session.id} changeReason={changeReason} />
         </>
       ) : null}
       <DropdownMenuSeparator />
@@ -241,6 +244,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           * folder and no worktree. */}
         <DropdownMenuItem
           disabled={changesBlocked}
+          aria-describedby={describedBy}
           onClick={() => createTerminal(session.id)}
         >
           <SquareTerminal />
@@ -262,6 +266,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           variant="destructive"
           className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
           disabled={changesBlocked}
+          aria-describedby={describedBy}
           onClick={() => openDelete(session.id)}
         >
           <Trash2 />
@@ -278,19 +283,20 @@ function AgentTabSubmenu({
   defaultProvider,
   atTabCap,
   addingTab,
-  changesBlocked,
+  changeReason,
 }: {
   sessionId: string
   providers: string[]
   defaultProvider: string
   atTabCap: boolean
   addingTab: boolean
-  changesBlocked: boolean
+  changeReason: MenuReasonHandle
 }) {
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger
-        disabled={atTabCap || addingTab || changesBlocked}
+        disabled={atTabCap || addingTab || changeReason.text !== null}
+        aria-describedby={changeReason.describedBy}
       >
         <Plus />
         <span className="min-w-0 truncate">New agent tab…</span>
@@ -344,11 +350,11 @@ function AgentProjectSubmenu({
 function AgentIdentityItems({
   sessionId,
   branchGit,
-  changesBlocked,
+  changeReason,
 }: {
   sessionId: string
   branchGit: boolean
-  changesBlocked: boolean
+  changeReason: MenuReasonHandle
 }) {
   return (
     <>
@@ -359,7 +365,8 @@ function AgentIdentityItems({
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuItem
-        disabled={changesBlocked}
+        disabled={changeReason.text !== null}
+        aria-describedby={changeReason.describedBy}
         onClick={() => openChangeProvider(sessionId)}
       >
         <Cpu />
@@ -387,10 +394,10 @@ function AgentIdentityItems({
 // agent has no startup command, and a heading over nothing says nothing.
 function AgentStartupItems({
   sessionId,
-  changesBlocked,
+  changeReason,
 }: {
   sessionId: string
-  changesBlocked: boolean
+  changeReason: MenuReasonHandle
 }) {
   return (
     <DropdownMenuGroup>
@@ -405,7 +412,8 @@ function AgentStartupItems({
       </DropdownMenuItem>
       {/* Runs a command in the agent's working copy, so it is a change. */}
       <DropdownMenuItem
-        disabled={changesBlocked}
+        disabled={changeReason.text !== null}
+        aria-describedby={changeReason.describedBy}
         onClick={() => rerunStartupCommand(sessionId)}
       >
         <Play />

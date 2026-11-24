@@ -3,6 +3,12 @@ import { ContextMenu as ContextMenuPrimitive } from "@base-ui/react/context-menu
 
 import { cn } from "@/lib/utils"
 import { useBackDismiss } from "@/hooks/use-back-dismiss"
+import { useIsMobile } from "@/hooks/use-mobile"
+import {
+  SHEET_BACKDROP_CLASS,
+  SHEET_POPUP_CLASS,
+  SHEET_POSITIONER_STYLE,
+} from "@/components/ui/popupSheet"
 import { ChevronRightIcon, CheckIcon } from "lucide-react"
 
 // An open context menu closes on the browser's Back, the way Escape closes it
@@ -44,6 +50,37 @@ function ContextMenuContent({
     ContextMenuPrimitive.Positioner.Props,
     "align" | "alignOffset" | "side" | "sideOffset" | "anchor"
   >) {
+  const isMobile = useIsMobile()
+  if (isMobile) {
+    // On a phone a long press opens the menu as the same bottom sheet every
+    // dropdown becomes there (ui/popupSheet.ts), rather than a popup floating
+    // where the finger was. Only the geometry differs: the root is modal on
+    // every device already, so the backdrop is where a tap outside lands, as
+    // the invisible one was before, and focus and Back are unchanged.
+    return (
+      <ContextMenuPrimitive.Portal>
+        <ContextMenuPrimitive.Backdrop
+          data-slot="context-menu-backdrop"
+          className={SHEET_BACKDROP_CLASS}
+        />
+        <ContextMenuPrimitive.Positioner
+          className="isolate z-50 outline-none"
+          style={SHEET_POSITIONER_STYLE}
+          align={align}
+          alignOffset={alignOffset}
+          side={side}
+          sideOffset={sideOffset}
+          anchor={anchor}
+        >
+          <ContextMenuPrimitive.Popup
+            data-slot="context-menu-content"
+            className={cn(SHEET_POPUP_CLASS, className)}
+            {...props}
+          />
+        </ContextMenuPrimitive.Positioner>
+      </ContextMenuPrimitive.Portal>
+    )
+  }
   return (
     <ContextMenuPrimitive.Portal>
       <ContextMenuPrimitive.Positioner

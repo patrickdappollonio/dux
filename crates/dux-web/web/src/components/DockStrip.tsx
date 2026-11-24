@@ -1,6 +1,8 @@
 import { Plus, SquareTerminal, X } from "lucide-react"
 
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { MenuReasonsHead } from "@/components/MenuReason"
+import { useMenuReason } from "@/hooks/use-menu-reason"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
 import {
@@ -12,10 +14,7 @@ import {
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import {
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
 import {
   addToAgentBlockHint,
@@ -175,6 +174,9 @@ function DockPill({
   const sort = usePillSort(terminal.id)
   const select = () => selectTerminal(terminal.id, { kind: "session", sessionId })
   const device = useRowDriverLabel({ sessionId })
+  const changeReason = useMenuReason(
+    block === null ? null : agentChangeBlockReason(block, device),
+  )
   return (
     <TabPill
       data-cue-key={terminal.id}
@@ -200,16 +202,10 @@ function DockPill({
                   {/* This terminal's own actions only: the input rows and the editor
                       live in the pane's top menu. Neutral, like every destructive
                       item; the confirm is the danger signal. */}
-                  {block !== null ? (
-                    <DropdownMenuGroup>
-                      <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                        {agentChangeBlockReason(block, device)}
-                      </DropdownMenuLabel>
-                      <DropdownMenuSeparator />
-                    </DropdownMenuGroup>
-                  ) : null}
+                  <MenuReasonsHead reasons={[changeReason]} />
                   <DropdownMenuItem
                     disabled={block !== null}
+                    aria-describedby={changeReason.describedBy}
                     onClick={() => openDeleteTerminal(terminal.id)}
                   >
                     <X />

@@ -42,6 +42,8 @@ import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { MenuItemReason, MenuReasonsHead } from "@/components/MenuReason"
+import { useMenuReason } from "@/hooks/use-menu-reason"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { matchCharRanges } from "@/lib/searchMatch"
@@ -60,9 +62,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -450,7 +450,6 @@ const FileRow = memo(function FileRow({
   writeBlocked,
 }: FileRowProps) {
   const grid: GridRowProps = { rowIndex, active }
-  const writeReasonId = useId()
   const inTabOrder = active
   const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
@@ -502,6 +501,9 @@ const FileRow = memo(function FileRow({
   const showStageAction = action === "unstage" || stageActsOn(file)
   const showDiscard = action === "stage" && discardActsOn(file)
   const hasMenuItems = showEdit || showStageAction || showDiscard
+  const writeReason = useMenuReason(
+    showStageAction || showDiscard ? writeBlocked : null,
+  )
   const displayPath = folderCount === null ? file.path : `${file.path}/`
 
   return (
@@ -654,6 +656,10 @@ const FileRow = memo(function FileRow({
           />
           {menuMounted ? (
             <DropdownMenuContent side="bottom" align="end">
+              {/* Said once, at the top, for the writes it greys out, which
+                * name it as their description. Edit stays: the editor opens
+                * read-only. */}
+              <MenuReasonsHead reasons={[writeReason]} />
               {/* Open in the editor. Skipped for deleted files (nothing on
                   disk to edit) and for a folded folder (a directory is not a
                   file to edit). */}
@@ -663,43 +669,32 @@ const FileRow = memo(function FileRow({
                   Edit
                 </DropdownMenuItem>
               )}
-              {/* A real group, because the primitive's label part reads its
-                * group from context. The label is said once above the writes
-                * it greys out, which name it as their description. Edit
-                * stays: the editor opens read-only. */}
-              <DropdownMenuGroup>
-                {writeBlocked !== null && (showStageAction || showDiscard) && (
-                  <DropdownMenuLabel id={writeReasonId} className="max-w-64">
-                    {writeBlocked}
-                  </DropdownMenuLabel>
-                )}
-                {showStageAction && (
+              {showStageAction && (
+                <DropdownMenuItem
+                  disabled={writeBlocked !== null}
+                  aria-describedby={writeReason.describedBy}
+                  onClick={() => void runAction()}
+                >
+                  {action === "stage" ? <Plus /> : <Minus />}
+                  {action === "stage" ? "Stage" : "Unstage"}
+                </DropdownMenuItem>
+              )}
+              {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
+                * and the confirm dialog carry the danger and the item itself
+                * stays neutral. */}
+              {showDiscard && (
+                <>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem
                     disabled={writeBlocked !== null}
-                    aria-describedby={writeBlocked !== null ? writeReasonId : undefined}
-                    onClick={() => void runAction()}
+                    aria-describedby={writeReason.describedBy}
+                    onClick={runDiscard}
                   >
-                    {action === "stage" ? <Plus /> : <Minus />}
-                    {action === "stage" ? "Stage" : "Unstage"}
+                    <Undo2 />
+                    Discard…
                   </DropdownMenuItem>
-                )}
-                {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
-                  * and the confirm dialog carry the danger and the item itself
-                  * stays neutral. */}
-                {showDiscard && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      disabled={writeBlocked !== null}
-                      aria-describedby={writeBlocked !== null ? writeReasonId : undefined}
-                      onClick={runDiscard}
-                    >
-                      <Undo2 />
-                      Discard…
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuGroup>
+                </>
+              )}
             </DropdownMenuContent>
           ) : null}
         </DropdownMenu>
@@ -1000,9 +995,6 @@ function ChangesHeader({
   editorBlocked,
   changeBlock,
 }: ChangesHeaderProps) {
-  const reasonId = useId()
-  const editorReasonId = useId()
-  const terminalReasonId = useId()
   const { folded, headerRef, titleRef, recapRef, triggerRef } = useChangesHeaderFold()
   // While this device does not drive the agent, a terminal opened here would
   // join a row it does not drive, so New terminal is disabled with that
@@ -1022,16 +1014,20 @@ function ChangesHeader({
   const blocked = writeBlocked !== null
   // Folded, the editor and terminal items carry their own reason the same way.
   // A gone directory greys both kinds of item with one sentence, which the
-  // menu then says once, above the editor items, for all of them.
+  // menu then says once, at its head, for all of them.
   const editorReason = folded ? editorBlocked : null
   const terminalReason = folded ? terminalBlocked : null
-  // Said once, above the editor items, when it is the editor's reason too.
+  // Said once, at the head, when it is the editor's reason too; otherwise it
+  // is New terminal's alone and said beneath it.
   const terminalReasonOwn = terminalReason !== null && terminalReason !== editorReason
   const gitReasonShared = editorReason !== null && writeBlocked === editorReason
+  const editorLine = useMenuReason(editorReason)
+  const terminalLine = useMenuReason(terminalReasonOwn ? terminalReason : null)
+  const gitLine = useMenuReason(blocked && !gitReasonShared ? writeBlocked : null)
   const describedBy = blocked
     ? gitReasonShared
-      ? editorReasonId
-      : reasonId
+      ? editorLine.describedBy
+      : gitLine.describedBy
     : undefined
   const runGit = (operation: "push" | "pull") => {
     git[operation](sessionId).catch((error) =>
@@ -1084,134 +1080,110 @@ function ChangesHeader({
             aria-label="Changes actions"
           />
           <DropdownMenuContent align="end">
+            <MenuReasonsHead reasons={[editorLine, gitLine]} />
             {folded ? (
               <>
                 {/* The header's two buttons, doing what they do there: the
                   * in-page editor on a computer, the standalone editor's
                   * address on a phone, and neither for a directory that is
                   * gone. */}
-                <DropdownMenuGroup>
-                  {editorReason !== null ? (
-                    <DropdownMenuLabel id={editorReasonId} className="max-w-64">
-                      {editorReason}
-                    </DropdownMenuLabel>
-                  ) : null}
-                  <DropdownMenuItem
-                    disabled={editorReason !== null}
-                    aria-describedby={editorReason !== null ? editorReasonId : undefined}
-                    {...(isMobile && editorReason === null
-                      ? {
-                          render: (
-                            <a
-                              href={standaloneEditorHash(root)}
-                              target="_blank"
-                              rel={EDITOR_TAB_REL}
-                            />
-                          ),
-                        }
-                      : { onClick: () => openEditor(root) })}
-                  >
-                    <FileCode2 />
-                    Open editor
-                  </DropdownMenuItem>
-                  {/* A group of its own, because the primitive's label part
-                    * names its group, for a reason only this item has. */}
-                  <DropdownMenuGroup>
-                    {terminalReasonOwn ? (
-                      <DropdownMenuLabel id={terminalReasonId} className="max-w-64">
-                        {terminalReason}
-                      </DropdownMenuLabel>
-                    ) : null}
-                    <DropdownMenuItem
-                      disabled={terminalReason !== null}
-                      aria-describedby={
-                        terminalReason === null
-                          ? undefined
-                          : terminalReasonOwn
-                            ? terminalReasonId
-                            : editorReasonId
+                <DropdownMenuItem
+                  disabled={editorReason !== null}
+                  aria-describedby={editorLine.describedBy}
+                  {...(isMobile && editorReason === null
+                    ? {
+                        render: (
+                          <a
+                            href={standaloneEditorHash(root)}
+                            target="_blank"
+                            rel={EDITOR_TAB_REL}
+                          />
+                        ),
                       }
-                      onClick={() => createTerminal(sessionId)}
-                    >
-                      <SquareTerminal />
-                      New terminal
-                    </DropdownMenuItem>
-                  </DropdownMenuGroup>
-                </DropdownMenuGroup>
+                    : { onClick: () => openEditor(root) })}
+                >
+                  <FileCode2 />
+                  Open editor
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={terminalReason !== null}
+                  aria-describedby={
+                    terminalReason === null
+                      ? undefined
+                      : terminalReasonOwn
+                        ? terminalLine.describedBy
+                        : editorLine.describedBy
+                  }
+                  onClick={() => createTerminal(sessionId)}
+                >
+                  <SquareTerminal />
+                  New terminal
+                </DropdownMenuItem>
+                <MenuItemReason reason={terminalLine} />
                 <DropdownMenuSeparator />
               </>
             ) : null}
-            {/* A real group, because the primitive's label part reads its
-              * group from context. The label is the reason, shown once, and
-              * every git item names it as its description. */}
-            <DropdownMenuGroup>
-              {blocked && !gitReasonShared ? (
-                <DropdownMenuLabel id={reasonId} className="max-w-64">
-                  {writeBlocked}
-                </DropdownMenuLabel>
-              ) : null}
-              {/* Greyed out rather than absent while the pane is quiet: these
-                * are the pane's own git operations on the agent's directory,
-                * and they come back the moment it holds a repository again (a
-                * `git init`, a folder restored), so a disabled row is the
-                * truth. That is a different thing from the branch-identity
-                * features (push, pull, fork, pull requests, provenance), which
-                * a standalone agent never has whatever its folder holds and
-                * which therefore stay ABSENT for it rather than disabled, here
-                * and in every other menu.
-                *
-                * Refresh is greyed too, as the user asked, and nothing waits on
-                * it: the server refuses a refresh of a quiet pane anyway, and
-                * the folder is looked at again without one. While an agent is
-                * selected the web's changes service polls it (every 2s while
-                * anything runs, 10s otherwise) and every poll re-probes the
-                * folder, so a fixed install or a new repository brings the
-                * pane back on its own within that cadence. Reopening the pane
-                * or reselecting the agent asks too, which is what the quiet
-                * sentences' "reopen this panel" promises. */}
-              <DropdownMenuItem
-                onClick={() => openCommit(sessionId)}
-                disabled={blocked || stagedCount === 0}
-                aria-describedby={describedBy}
-              >
-                <GitCommitVertical />
-                Commit…
-              </DropdownMenuItem>
-              {branchGit ? (
-                <>
-                  <DropdownMenuItem
-                    onClick={() => runGit("push")}
-                    disabled={blocked}
-                    aria-describedby={describedBy}
-                  >
-                    <ArrowUpFromLine />
-                    Push
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={() => runGit("pull")}
-                    disabled={blocked}
-                    aria-describedby={describedBy}
-                  >
-                    <ArrowDownToLine />
-                    Pull
-                  </DropdownMenuItem>
-                </>
-              ) : null}
-              <DropdownMenuItem
-                disabled={gitBlocked !== null}
-                aria-describedby={gitBlocked !== null ? describedBy : undefined}
-                onClick={() => {
-                  void forceRefreshChanges().catch((error) =>
-                    notifyError(
-                      error instanceof Error ? error.message : "refresh failed",
-                    ),
-                  )
-                }}
-              >
-                <RefreshCw />
-                Refresh changes
-              </DropdownMenuItem>
-            </DropdownMenuGroup>
+            {/* Greyed out rather than absent while the pane is quiet: these
+              * are the pane's own git operations on the agent's directory,
+              * and they come back the moment it holds a repository again (a
+              * `git init`, a folder restored), so a disabled row is the
+              * truth. That is a different thing from the branch-identity
+              * features (push, pull, fork, pull requests, provenance), which
+              * a standalone agent never has whatever its folder holds and
+              * which therefore stay ABSENT for it rather than disabled, here
+              * and in every other menu.
+              *
+              * Refresh is greyed too, as the user asked, and nothing waits on
+              * it: the server refuses a refresh of a quiet pane anyway, and
+              * the folder is looked at again without one. While an agent is
+              * selected the web's changes service polls it (every 2s while
+              * anything runs, 10s otherwise) and every poll re-probes the
+              * folder, so a fixed install or a new repository brings the
+              * pane back on its own within that cadence. Reopening the pane
+              * or reselecting the agent asks too, which is what the quiet
+              * sentences' "reopen this panel" promises. */}
+            <DropdownMenuItem
+              onClick={() => openCommit(sessionId)}
+              disabled={blocked || stagedCount === 0}
+              aria-describedby={describedBy}
+            >
+              <GitCommitVertical />
+              Commit…
+            </DropdownMenuItem>
+            {branchGit ? (
+              <>
+                <DropdownMenuItem
+                  onClick={() => runGit("push")}
+                  disabled={blocked}
+                  aria-describedby={describedBy}
+                >
+                  <ArrowUpFromLine />
+                  Push
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => runGit("pull")}
+                  disabled={blocked}
+                  aria-describedby={describedBy}
+                >
+                  <ArrowDownToLine />
+                  Pull
+                </DropdownMenuItem>
+              </>
+            ) : null}
+            <DropdownMenuItem
+              disabled={gitBlocked !== null}
+              aria-describedby={gitBlocked !== null ? describedBy : undefined}
+              onClick={() => {
+                void forceRefreshChanges().catch((error) =>
+                  notifyError(
+                    error instanceof Error ? error.message : "refresh failed",
+                  ),
+                )
+              }}
+            >
+              <RefreshCw />
+              Refresh changes
+            </DropdownMenuItem>
             {!isMobile ? (
               <>
                 <DropdownMenuSeparator />
@@ -1267,15 +1239,15 @@ function BulkToolbar({
   onClear,
   writeBlocked,
 }: BulkToolbarProps) {
-  const stageReasonId = useId()
-  const discardReasonId = useId()
-  const writeReasonId = useId()
   const blocked = writeBlocked !== null
   // A blocked verb names the one reason at the head of the menu, and the
   // narrower "nothing to" reasons stand down so it is said once.
   const stageNothing = !blocked && counts.unstaged === 0
   const discardNothing = !blocked && counts.discard === 0
   const showStage = selected.unstaged.size > 0
+  const writeReason = useMenuReason(writeBlocked)
+  const stageReason = useMenuReason(showStage && stageNothing ? NOTHING_TO_STAGE : null)
+  const discardReason = useMenuReason(showStage && discardNothing ? NOTHING_TO_DISCARD : null)
   const showUnstage = selected.staged.size > 0
   const ticked = selected.staged.size + selected.unstaged.size
   return (
@@ -1303,67 +1275,49 @@ function BulkToolbar({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
           {/* A verb whose rows are all ones it would leave out is disabled
-            * rather than a click that silently does nothing, and the label
-            * above it, which it names as its description, says why. */}
-          <DropdownMenuGroup>
-            {blocked ? (
-              <DropdownMenuLabel id={writeReasonId} className="max-w-64">
-                {writeBlocked}
-              </DropdownMenuLabel>
-            ) : null}
-            {showStage && stageNothing ? (
-              <DropdownMenuLabel id={stageReasonId} className="max-w-64">
-                {NOTHING_TO_STAGE}
-              </DropdownMenuLabel>
-            ) : null}
-            {showStage ? (
+            * rather than a click that silently does nothing, and the reason
+            * beneath it, which it names as its description, says why. */}
+          <MenuReasonsHead reasons={[writeReason]} />
+          {showStage ? (
+            <>
               <DropdownMenuItem
                 disabled={blocked || busy !== null || counts.unstaged === 0}
                 aria-busy={busy === "stage"}
-                aria-describedby={
-                  blocked ? writeReasonId : stageNothing ? stageReasonId : undefined
-                }
+                aria-describedby={writeReason.describedBy ?? stageReason.describedBy}
                 onClick={() => onRunBulk("stage")}
               >
                 {busy === "stage" ? <Spinner kind="ring" size="md" /> : <Plus />}
                 Stage {groupDigits(counts.unstaged)}
               </DropdownMenuItem>
-            ) : null}
-            {showUnstage ? (
-              <DropdownMenuItem
-                disabled={blocked || busy !== null}
-                aria-busy={busy === "unstage"}
-                aria-describedby={blocked ? writeReasonId : undefined}
-                onClick={() => onRunBulk("unstage")}
-              >
-                {busy === "unstage" ? <Spinner kind="ring" size="md" /> : <Minus />}
-                Unstage {groupDigits(counts.staged)}
-              </DropdownMenuItem>
-            ) : null}
-          </DropdownMenuGroup>
+              <MenuItemReason reason={stageReason} />
+            </>
+          ) : null}
+          {showUnstage ? (
+            <DropdownMenuItem
+              disabled={blocked || busy !== null}
+              aria-busy={busy === "unstage"}
+              aria-describedby={writeReason.describedBy}
+              onClick={() => onRunBulk("unstage")}
+            >
+              {busy === "unstage" ? <Spinner kind="ring" size="md" /> : <Minus />}
+              Unstage {groupDigits(counts.staged)}
+            </DropdownMenuItem>
+          ) : null}
           {/* Destructive, so the trailing "…" and the confirm dialog carry the
             * danger and the item itself stays neutral. */}
           {showStage ? (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuGroup>
-                {discardNothing ? (
-                  <DropdownMenuLabel id={discardReasonId} className="max-w-64">
-                    {NOTHING_TO_DISCARD}
-                  </DropdownMenuLabel>
-                ) : null}
-                <DropdownMenuItem
-                  disabled={blocked || busy !== null || counts.discard === 0}
-                  aria-busy={busy === "discard"}
-                  aria-describedby={
-                    blocked ? writeReasonId : discardNothing ? discardReasonId : undefined
-                  }
-                  onClick={onDiscard}
-                >
-                  {busy === "discard" ? <Spinner kind="ring" size="md" /> : <Undo2 />}
-                  Discard {groupDigits(counts.discard)}…
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
+              <DropdownMenuItem
+                disabled={blocked || busy !== null || counts.discard === 0}
+                aria-busy={busy === "discard"}
+                aria-describedby={writeReason.describedBy ?? discardReason.describedBy}
+                onClick={onDiscard}
+              >
+                {busy === "discard" ? <Spinner kind="ring" size="md" /> : <Undo2 />}
+                Discard {groupDigits(counts.discard)}…
+              </DropdownMenuItem>
+              <MenuItemReason reason={discardReason} />
             </>
           ) : null}
           {/* Over the rows the filter shows, and live while a verb is in

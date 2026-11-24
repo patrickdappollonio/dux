@@ -1,9 +1,10 @@
 import type * as React from "react"
 
 // The phone presentation for every anchored popup: on a small viewport a
-// dropdown or popover renders as a full-width bottom sheet, because an anchored
-// popup clips against the small viewport and hides the row it came from. Shared
-// by ui/dropdown-menu.tsx and ui/popover.tsx so the two cannot drift; a new
+// dropdown, context menu or popover renders as a full-width bottom sheet,
+// because an anchored popup clips against the small viewport and hides the row
+// it came from. Shared by ui/dropdown-menu.tsx, ui/context-menu.tsx and
+// ui/popover.tsx so they cannot drift; a new
 // popup primitive with a mobile branch consumes these rather than re-authoring
 // the geometry.
 //

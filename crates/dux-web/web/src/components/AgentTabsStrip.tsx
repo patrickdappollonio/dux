@@ -10,6 +10,8 @@ import {
 } from "lucide-react"
 
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { MenuItemReason, MenuReasonsHead } from "@/components/MenuReason"
+import { useMenuReason } from "@/hooks/use-menu-reason"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
 import {
@@ -22,9 +24,7 @@ import { AttentionDot } from "@/components/AttentionDot"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -242,12 +242,16 @@ function AgentTabPill({
 }) {
   const changesBlocked = block !== null
   const device = useRowDriverLabel({ sessionId: session.id })
+  const changeReason = useMenuReason(
+    block === null ? null : agentChangeBlockReason(block, device),
+  )
   const sort = usePillSort(tab.id)
   // No successor means no slot to hand on, which is the one close the server
   // refuses. Answered from the tab list rather than from slot-ness, because
   // "this is the first tab" and "this is the only tab" are different facts and
   // only the second one refuses.
   const soleTab = session.tabs.length <= 1
+  const soleTabReason = useMenuReason(soleTab ? ONLY_TAB_CLOSE_REFUSAL : null)
 
   function select() {
     clickTab(session.id, tab.id)
@@ -286,16 +290,12 @@ function AgentTabPill({
         label: "Tab actions",
         content: (
           <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
-            {block !== null ? (
-              <DropdownMenuGroup>
-                <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                  {agentChangeBlockReason(block, device)}
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-              </DropdownMenuGroup>
-            ) : null}
+            <MenuReasonsHead reasons={[changeReason]} />
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={changesBlocked}>
+              <DropdownMenuSubTrigger
+                disabled={changesBlocked}
+                aria-describedby={changeReason.describedBy}
+              >
                 <Replace />
                 Change provider…
               </DropdownMenuSubTrigger>
@@ -321,6 +321,7 @@ function AgentTabPill({
             {tab.has_live_process ? (
               <DropdownMenuItem
                 disabled={changesBlocked}
+                aria-describedby={changeReason.describedBy}
                 onClick={() => openStopTab(session.id, tab.id)}
               >
                 <CircleStop />
@@ -339,29 +340,25 @@ function AgentTabPill({
                 confirmation into a 400 promises a detach that was never going
                 to happen. The item stays and renders disabled (a missing item
                 reads as a bug, a dimmed one reads as a rule), with the reason
-                as a menu label above it: a disabled item is
-                `pointer-events-none`, so a tooltip hung on it could never be
-                opened, by a pointer or by anything else. This is the idiom the
-                agent row's active-elsewhere menu already uses.
+                said beneath it: a disabled item is `pointer-events-none`, so a
+                tooltip hung on it could never be opened, by a pointer or by
+                anything else.
 
                 Reachable at all only because `ui.always_show_tab_strip` renders
                 the strip for a single-tab agent; without it there is no pill to
                 open a menu on. */}
             {soleTab ? (
-              // The group is required, not decorative: a menu label outside one
-              // throws in base-ui.
-              <DropdownMenuGroup>
-                <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                  {ONLY_TAB_CLOSE_REFUSAL}
-                </DropdownMenuLabel>
-                <DropdownMenuItem disabled>
+              <>
+                <DropdownMenuItem disabled aria-describedby={soleTabReason.describedBy}>
                   <X />
                   Close tab…
                 </DropdownMenuItem>
-              </DropdownMenuGroup>
+                <MenuItemReason reason={soleTabReason} />
+              </>
             ) : (
               <DropdownMenuItem
                 disabled={changesBlocked}
+                aria-describedby={changeReason.describedBy}
                 onClick={() => openCloseTab(session.id, tab.id)}
               >
                 <X />

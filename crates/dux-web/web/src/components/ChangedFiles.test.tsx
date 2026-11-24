@@ -558,13 +558,13 @@ describe("the Changes pane header in a quiet state", () => {
     })
   }
 
-  // The reason line is the menu primitive's own label, inside a real group.
-  it("puts the reason in the menu's label part", async () => {
+  // The reason line is the shared menu reason, which the git items name.
+  it("says the reason through the shared menu reason", async () => {
     mockState = folderAt("no_repo", folderStates[0]!.sentence)
     render(<ChangedFiles />)
     const menu = await openMenu()
     const reason = menu.getByText("This folder has no git repository.")
-    expect(reason.getAttribute("data-slot")).toBe("dropdown-menu-label")
+    expect(reason.getAttribute("data-slot")).toBe("menu-reason")
     expect(itemOf(menu, "Commit…").getAttribute("aria-describedby")).toBe(reason.id)
   })
 

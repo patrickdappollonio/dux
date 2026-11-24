@@ -1,6 +1,7 @@
-import { useId } from "react"
 import { ExternalLink, FileCode2, X } from "lucide-react"
 
+import { MenuItemReason } from "@/components/MenuReason"
+import { useMenuReason } from "@/hooks/use-menu-reason"
 import {
   DropdownMenuGroup,
   DropdownMenuItem,
@@ -46,11 +47,13 @@ export function TerminalActionsMenu({
   // its close confirm has nothing to confirm until then, so Close… waits.
   const listed = spineListsTerminal(useDux().spine?.terminals, terminalId)
   // Closing changes the row the terminal belongs to: its agent's, or its own.
-  const reasonId = useId()
   const sessionId = ownerSessionId(owner)
   const changeReason = usePartChangeReason()(
     sessionId !== null ? { sessionId } : { terminalId },
   )
+  // Said only for a terminal that is a row of its own: an agent's terminal sits
+  // under the agent's menu, which says it at its head.
+  const closeReason = useMenuReason(sessionId === null ? changeReason : null)
   return (
     <DropdownMenuGroup>
       {/* Inside the group rather than above it: the primitive's label part reads
@@ -88,26 +91,17 @@ export function TerminalActionsMenu({
       {/* Neutral color per the destructive convention: the `…` plus
           ConfirmDeleteTerminalDialog are the danger signal. */}
       {listed ? (
-        // A group of its own, because the primitive's label part names its
-        // group. The reason is a label rather than a tooltip, because a
-        // disabled item takes no pointer events and touch has no hover; it is
-        // shown only for a terminal that is a row of its own, since an agent's
-        // terminal sits under the agent's menu, which says it at its head.
-        <DropdownMenuGroup>
-          {changeReason !== null && sessionId === null ? (
-            <DropdownMenuLabel id={reasonId} className="max-w-60 whitespace-normal">
-              {changeReason}
-            </DropdownMenuLabel>
-          ) : null}
+        <>
           <DropdownMenuItem
             disabled={changeReason !== null}
-            aria-describedby={changeReason !== null && sessionId === null ? reasonId : undefined}
+            aria-describedby={closeReason.describedBy}
             onClick={() => openDeleteTerminal(terminalId)}
           >
             <X />
             Close…
           </DropdownMenuItem>
-        </DropdownMenuGroup>
+          <MenuItemReason reason={closeReason} />
+        </>
       ) : null}
     </DropdownMenuGroup>
   )
