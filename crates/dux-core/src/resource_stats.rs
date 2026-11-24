@@ -9,6 +9,11 @@
 //! process walk per sample), and self-baselines when it has no usable previous
 //! refresh.
 //!
+//! Every CPU figure is a share of the whole machine, in the cores dux can use:
+//! 100% means all of them fully busy. `sysinfo` reports percent of one core, so
+//! the collector divides by the core count once, per process, and every row,
+//! child and the total scale together.
+//!
 //! Callers must sample from a background thread: a self-baselining sample sleeps
 //! for [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`]. The TUI samples from its
 //! resource-stats worker thread; the web samples inside `spawn_blocking`.
@@ -33,6 +38,29 @@ pub struct ResourceCollector {
     /// When the last refresh happened, or `None` before the first sample. Drives
     /// the self-baselining decision (see [`STALE_BASELINE`]).
     last_refresh: Option<Instant>,
+    /// How many cores the figures are a share of: what the standard library's
+    /// available parallelism reports, so under a CPU limit they are shares of
+    /// what dux was given.
+    cores: usize,
+}
+
+/// A process's CPU as a share of the whole machine, from `sysinfo`'s percent of
+/// one core: one fully busy core on `cores` cores is `100 / cores`.
+fn machine_share(percent_of_one_core: f32, cores: usize) -> f32 {
+    let cores = f32::from(u16::try_from(cores).unwrap_or(u16::MAX).max(1));
+    percent_of_one_core / cores
+}
+
+/// A CPU figure as one decimal and a percent sign. A figure above zero that
+/// would round to `0.0` prints as `<0.1%`, so a small load never reads as none;
+/// exactly zero prints `0.0%`. The browser's `formatCpu` keeps the same cases.
+pub fn format_cpu_percent(percent: f32) -> String {
+    let text = format!("{percent:.1}");
+    if percent > 0.0 && text == "0.0" {
+        "<0.1%".to_string()
+    } else {
+        format!("{text}%")
+    }
 }
 
 impl Default for ResourceCollector {
@@ -61,6 +89,7 @@ impl ResourceCollector {
         Self {
             sys: sysinfo::System::new(),
             last_refresh: None,
+            cores: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         }
     }
 
@@ -116,7 +145,7 @@ impl ResourceCollector {
                 kind: ResourceKind::Dux,
                 label: "dux (this process)".into(),
                 pid: Some(std::process::id()),
-                cpu_percent: proc_info.cpu_usage(),
+                cpu_percent: machine_share(proc_info.cpu_usage(), self.cores),
                 rss_bytes: proc_info.memory(),
                 process_count: 1,
                 children: Vec::new(),
@@ -126,7 +155,7 @@ impl ResourceCollector {
         // Rows: each labeled target (agent tabs and companion terminals). The
         // target's identity is carried through verbatim so the caller can join
         // the row back to its spine entity by id.
-        let nodes = proc_nodes(sys);
+        let nodes = proc_nodes(sys, self.cores);
         for target in targets {
             let (cpu, rss, count, children) = aggregate_proc_tree(&nodes, target.pid);
             rows.push(ResourceStats {
@@ -141,8 +170,8 @@ impl ResourceCollector {
             });
         }
 
-        // Total row. CPU legitimately exceeds 100% for a multi-threaded tree
-        // spread across cores, so this sum is deliberately not clamped.
+        // Total row: the sum of the rows, in the same share of the machine. Not
+        // clamped, so a sampling-noise overshoot shows as it is.
         let total_cpu: f32 = rows.iter().map(|r| r.cpu_percent).sum();
         let total_rss: u64 = rows.iter().map(|r| r.rss_bytes).sum();
         let total_procs: usize = rows.iter().map(|r| r.process_count).sum();
@@ -235,14 +264,14 @@ fn aggregate_proc_tree(nodes: &[ProcNode], root: u32) -> (f32, u64, usize, Vec<P
 /// The fields [`aggregate_proc_tree`] needs, snapshotted once per sample out
 /// of the live `sysinfo` table. The `sysinfo` side is the only
 /// nondeterministic part and carries no logic of its own.
-fn proc_nodes(sys: &sysinfo::System) -> Vec<ProcNode> {
+fn proc_nodes(sys: &sysinfo::System, cores: usize) -> Vec<ProcNode> {
     sys.processes()
         .iter()
         .map(|(pid, proc_info)| ProcNode {
             pid: pid.as_u32(),
             parent: proc_info.parent().map(sysinfo::Pid::as_u32),
             is_thread: proc_info.thread_kind().is_some(),
-            cpu_percent: proc_info.cpu_usage(),
+            cpu_percent: machine_share(proc_info.cpu_usage(), cores),
             rss_bytes: proc_info.memory(),
             name: proc_info.name().to_string_lossy().into_owned(),
         })
@@ -261,7 +290,9 @@ mod tests {
         sys: &sysinfo::System,
         root: sysinfo::Pid,
     ) -> (f32, u64, usize, Vec<ProcessInfo>) {
-        aggregate_proc_tree(&proc_nodes(sys), root.as_u32())
+        // One core's worth per core, so the directional tests below keep reading
+        // `sysinfo`'s own percent of one core.
+        aggregate_proc_tree(&proc_nodes(sys, 1), root.as_u32())
     }
 
     /// Spin a thread burning CPU until the returned flag is set. The join handle
@@ -357,13 +388,12 @@ mod tests {
         );
     }
 
-    /// A busy multi-threaded tree legitimately exceeds 100% across cores, so
-    /// nothing in the collector may clamp the value.
+    /// The dux row is a share of the whole machine: three burning threads on a
+    /// box of `cores` cores read about `300 / cores`, far under the 300 a
+    /// percent-of-one-core figure would show, and the total row is the sum of the
+    /// rows in that same unit, unclamped.
     #[test]
-    fn collector_does_not_clamp_cpu_at_one_hundred_percent() {
-        // Two burners plus the test thread; on any multi-core box this exceeds
-        // 100% for the process. Skip the assertion on a single-core machine
-        // rather than fail it spuriously.
+    fn collector_reports_burning_threads_as_a_share_of_all_cores() {
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         if cores < 4 {
             return;
@@ -374,22 +404,61 @@ mod tests {
         let _ = collector.sample(&Vec::new());
         std::thread::sleep(Duration::from_millis(400));
         let (rows, _) = collector.sample(&Vec::new());
-        let cpu = rows
-            .iter()
-            .find(|r| r.label == "dux (this process)")
-            .expect("the dux row is always present")
-            .cpu_percent;
 
         for (stop, handle) in burners {
             stop.store(true, Ordering::Relaxed);
             handle.join().unwrap();
         }
 
+        let cpu = rows
+            .iter()
+            .find(|r| r.label == "dux (this process)")
+            .expect("the dux row is always present")
+            .cpu_percent;
+        let one_core = machine_share(100.0, cores);
         assert!(
-            cpu > 100.0,
-            "three busy threads should read above 100% on a {cores}-core box; \
-             got {cpu} (a clamp would pin this at exactly 100)"
+            cpu > one_core && cpu < 100.0,
+            "three busy threads on {cores} cores should read between one core's share \
+             ({one_core}) and 100, got {cpu}"
         );
+        let total = rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::Total)
+            .expect("the total row is always present")
+            .cpu_percent;
+        let sum: f32 = rows
+            .iter()
+            .filter(|r| r.kind != ResourceKind::Total)
+            .map(|r| r.cpu_percent)
+            .sum();
+        assert!(
+            (total - sum).abs() < 1e-3,
+            "the total must be the sum of the rows: {total} vs {sum}"
+        );
+    }
+
+    /// One full core on a machine of N cores is 100/N of the machine.
+    #[test]
+    fn one_busy_core_is_a_hundredth_over_cores_of_the_machine() {
+        assert!((machine_share(100.0, 20) - 5.0).abs() < 1e-6);
+        assert!((machine_share(100.0, 1) - 100.0).abs() < 1e-6);
+        assert!((machine_share(400.0, 4) - 100.0).abs() < 1e-6);
+        assert!(
+            machine_share(50.0, 0).is_finite(),
+            "zero cores must not divide by zero"
+        );
+    }
+
+    /// A load above zero never reads as none; exactly zero reads as zero. The
+    /// browser's `formatCpu` test pins the same cases.
+    #[test]
+    fn small_cpu_prints_as_less_than_a_tenth_and_only_zero_prints_zero() {
+        assert_eq!(format_cpu_percent(0.0), "0.0%");
+        assert_eq!(format_cpu_percent(0.04), "<0.1%");
+        assert_eq!(format_cpu_percent(0.0001), "<0.1%");
+        assert_eq!(format_cpu_percent(0.05), "0.1%");
+        assert_eq!(format_cpu_percent(1.84), "1.8%");
+        assert_eq!(format_cpu_percent(100.0), "100.0%");
     }
 
     /// A back-to-back sample (a small gap) must NOT re-establish the CPU

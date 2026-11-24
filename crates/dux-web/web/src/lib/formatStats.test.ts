@@ -42,9 +42,19 @@ describe("formatCpu", () => {
     expect(formatCpu(12.15)).toBe("12.2%")
   })
 
+  it("prints_a_small_load_as_less_than_a_tenth_and_only_zero_as_zero", () => {
+    // The same cases as `small_cpu_prints_as_less_than_a_tenth_and_only_zero_prints_zero`
+    // in dux-core, so the two surfaces cannot drift.
+    expect(formatCpu(0)).toBe("0.0%")
+    expect(formatCpu(0.04)).toBe("<0.1%")
+    expect(formatCpu(0.0001)).toBe("<0.1%")
+    expect(formatCpu(0.05)).toBe("0.1%")
+    expect(formatCpu(1.84)).toBe("1.8%")
+    expect(formatCpu(100)).toBe("100.0%")
+  })
+
   it("formats_cpu_above_one_hundred_percent", () => {
-    // A multi-threaded tree spread across cores legitimately exceeds 100%.
-    // Nothing may clamp it.
+    // Sampling noise can nudge a figure past 100%. Nothing may clamp it.
     expect(formatCpu(129.52382)).toBe("129.5%")
     expect(formatCpu(780)).toBe("780.0%")
   })

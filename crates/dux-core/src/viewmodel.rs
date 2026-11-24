@@ -1297,7 +1297,7 @@ pub struct ProcessInfoView {
     pub name: String,
     /// The process id.
     pub pid: u32,
-    /// Its CPU use, as a percentage of one core.
+    /// Its CPU use, as a percentage of the whole machine (100 is every core fully busy).
     pub cpu_percent: f32,
     /// Its resident memory, in bytes.
     pub rss_bytes: u64,
@@ -1324,8 +1324,9 @@ pub struct ResourceStatsView {
     pub label: String,
     /// The root process's id, when the row has one.
     pub pid: Option<u32>,
-    /// May exceed 100: a multi-threaded tree spread across cores legitimately
-    /// does, so no surface may clamp it.
+    /// A percentage of the whole machine, in the cores dux can use: 100 is
+    /// every core fully busy. Sampling noise can nudge it past 100, so no
+    /// surface may clamp it.
     pub cpu_percent: f32,
     /// The resident memory of the whole tree, in bytes.
     pub rss_bytes: u64,

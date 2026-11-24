@@ -298,7 +298,7 @@ pub struct ProcessInfo {
     pub name: String,
     /// The process id.
     pub pid: u32,
-    /// CPU use over the sample window, as a percentage of one core.
+    /// CPU use over the sample window, as a percentage of the whole machine (100 is every core fully busy).
     pub cpu_percent: f32,
     /// Resident memory, in bytes.
     pub rss_bytes: u64,
@@ -354,7 +354,7 @@ pub struct ResourceStats {
     pub label: String,
     /// The root process id, or `None` for a row with no single process.
     pub pid: Option<u32>,
-    /// CPU use of the whole tree, as a percentage of one core.
+    /// CPU use of the whole tree, as a percentage of the whole machine (100 is every core fully busy).
     pub cpu_percent: f32,
     /// Resident memory of the whole tree, in bytes.
     pub rss_bytes: u64,
