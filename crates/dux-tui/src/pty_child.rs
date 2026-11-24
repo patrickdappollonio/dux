@@ -95,3 +95,16 @@ pub(crate) fn wait_until(limit: Duration, what: &str, mut ready: impl FnMut() ->
 pub(crate) fn wait_for_file(path: &Path, limit: Duration) {
     wait_until(limit, &path.display().to_string(), || path.exists());
 }
+
+/// Whether crossterm's own event reader holds input, a resize aside: polled
+/// last in a child, it finds whatever it read and kept on dux's behalf, and
+/// otherwise reads nothing, because nothing more is typed.
+pub(crate) fn crossterm_kept_input() -> bool {
+    while crossterm::event::poll(Duration::ZERO).expect("poll crossterm's reader") {
+        let event = crossterm::event::read().expect("read crossterm's reader");
+        if !matches!(event, crossterm::event::Event::Resize(..)) {
+            return true;
+        }
+    }
+    false
+}

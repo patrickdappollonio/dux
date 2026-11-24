@@ -150,8 +150,9 @@ fn source_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
 /// Whether `source` reaches crossterm's event reader, as far as its text shows:
 /// a qualified `crossterm::event::poll` or `read` (through ratatui's re-export
 /// too), `read` or `poll` named in a `use crossterm::event::{…}` list, an
-/// `EventStream`, or `event::poll(` or `event::read(` in a file that imports
-/// crossterm's `event` module.
+/// `EventStream`, `event::poll(` or `event::read(` in a file that imports
+/// crossterm's `event` module, or one of crossterm's functions that read the
+/// terminal for an answer to a question they write.
 fn reaches_crossterm_s_reader(source: &str) -> bool {
     let imports_module = source.contains("use crossterm::event;")
         || source.contains("use crossterm::event::{self")
@@ -171,66 +172,109 @@ fn reaches_crossterm_s_reader(source: &str) -> bool {
         || source.contains("EventStream")
         || imports_reader
         || (imports_module && (source.contains("event::poll(") || source.contains("event::read(")))
+        || source.contains("cursor::position(")
+        || source.contains("supports_keyboard_enhancement")
+}
+
+/// The source files of the terminal UI and of the binary that runs it, except
+/// those named in `allowed`, whose text `names` matches.
+fn files_naming(allowed: &[&str], names: impl Fn(&str) -> bool) -> Vec<std::path::PathBuf> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    source_files(&manifest.join("src"), &mut files);
+    source_files(&manifest.join("../dux/src"), &mut files);
+    files
+        .into_iter()
+        .filter(|path| {
+            !allowed
+                .iter()
+                .any(|name| path.file_name().is_some_and(|file| file == *name))
+        })
+        .filter(|path| names(&std::fs::read_to_string(path).expect("read a source file")))
+        .collect()
 }
 
 /// crossterm's event reader, once polled, reads the terminal into a queue of
 /// its own that no other reader sees, so a byte it took would never reach the
 /// buffer every reader of the terminal UI shares. `dux config` runs as its own
-/// command, and this file's differential test drives crossterm in a child.
+/// command; this file's differential test and the pseudo-terminal children's
+/// check for stranded keys drive crossterm's reader on purpose.
 #[test]
 fn nothing_in_the_terminal_ui_reads_through_crossterm_s_event_reader() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    source_files(&src, &mut files);
-    let allowed = ["config_cli.rs", "terminal_input_tests.rs"];
-    let readers: Vec<_> = files
-        .iter()
-        .filter(|path| {
-            !allowed
-                .iter()
-                .any(|name| path.file_name().is_some_and(|file| file == *name))
-        })
-        .filter(|path| {
-            reaches_crossterm_s_reader(&std::fs::read_to_string(path).expect("read a source file"))
-        })
-        .collect();
+    let readers = files_naming(
+        &["config_cli.rs", "terminal_input_tests.rs", "pty_child.rs"],
+        reaches_crossterm_s_reader,
+    );
     assert!(readers.is_empty(), "reads through crossterm: {readers:#?}");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for allowed in ["config_cli.rs", "pty_child.rs"] {
+        assert!(
+            reaches_crossterm_s_reader(
+                &std::fs::read_to_string(src.join(allowed)).expect("read an allowed reader")
+            ),
+            "the guard no longer sees {allowed}, a reader it allows"
+        );
+    }
+    for route in [
+        "use crossterm::cursor;\nlet _ = cursor::position();",
+        "crossterm::terminal::supports_keyboard_enhancement()",
+    ] {
+        assert!(reaches_crossterm_s_reader(route), "{route}");
+    }
+}
+
+/// ratatui asks its backend where the cursor is to clear the screen, to
+/// insert lines above an inline viewport and to place one, and crossterm's
+/// backend answers through crossterm's reader. Every terminal on the real
+/// screen draws through [`crate::screen_backend::ScreenBackend`], which
+/// refuses: crossterm's backend and ratatui's own constructors for it appear
+/// nowhere else.
+#[test]
+fn every_screen_draws_through_the_backend_that_never_asks_where_the_cursor_is() {
+    let routes = [
+        "CrosstermBackend",
+        "DefaultTerminal",
+        "ratatui::init",
+        "ratatui::try_init",
+        "ratatui::run",
+        "init_with_options",
+        "Viewport::Inline",
+    ];
+    let named = files_naming(
+        &["screen_backend.rs", "terminal_input_tests.rs"],
+        |source| routes.iter().any(|route| source.contains(route)),
+    );
     assert!(
-        reaches_crossterm_s_reader(
-            &std::fs::read_to_string(src.join("config_cli.rs")).expect("read config_cli.rs")
-        ),
-        "the guard no longer sees the one reader it allows"
+        named.is_empty(),
+        "builds a terminal another way: {named:#?}"
     );
 }
 
 /// Every reader of dux's keys reads [`terminal`], which is what crossterm
 /// reads: a reader that named standard input would read nothing when it is
-/// redirected. `dux config` reads its own input; `host_keys.rs` asks the host
-/// about Kitty keys on standard input and names its tty there.
+/// redirected. `dux config` and the command line's prompts read their own
+/// input; `host_keys.rs` asks the host about Kitty keys on standard input and
+/// names its tty there. The pseudo-terminal cases with standard input on
+/// `/dev/null` and on a closed pipe check the run loop itself.
 #[test]
 fn every_reader_of_keys_reads_the_terminal_crossterm_reads() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    source_files(&src, &mut files);
-    let allowed = [
-        "config_cli.rs",
-        "host_keys.rs",
-        "terminal_input.rs",
-        "terminal_input_tests.rs",
+    let routes = [
+        "stdin()",
+        "STDIN_FILENO",
+        "/dev/tty",
+        "borrow_raw(0)",
+        "from_raw_fd(0)",
     ];
-    let named: Vec<_> = files
-        .iter()
-        .filter(|path| {
-            !allowed
-                .iter()
-                .any(|name| path.file_name().is_some_and(|file| file == *name))
-        })
-        .filter(|path| {
-            std::fs::read_to_string(path)
-                .expect("read a source file")
-                .contains("stdin()")
-        })
-        .collect();
+    let named = files_naming(
+        &[
+            "config_cli.rs",
+            "client_commands.rs",
+            "host_keys.rs",
+            "terminal_input.rs",
+            "terminal_input_tests.rs",
+        ],
+        |source| routes.iter().any(|route| source.contains(route)),
+    );
     assert!(named.is_empty(), "names standard input: {named:#?}");
 }
 

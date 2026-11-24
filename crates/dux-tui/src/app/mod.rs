@@ -9990,7 +9990,7 @@ pub(crate) fn runtime_project_to_config(
 }
 
 /// Enter raw mode and the alternate screen and build the terminal on them:
-/// what `ratatui::init` does, without the panic hook it installs, which
+/// what ratatui's `init` does, without the panic hook it installs, which
 /// restores the host terminal on a panic on ANY thread, including a worker
 /// panic dux catches and keeps running after. A partial failure is undone by
 /// the unconditional teardown in [`App::run`].

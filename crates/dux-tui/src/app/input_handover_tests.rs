@@ -1176,7 +1176,7 @@ mod input_debugger {
 /// into and resizes.
 mod real_terminal {
     use super::*;
-    use crate::pty_child::{ChildStdin, PtyChild, child_dir, wait_until};
+    use crate::pty_child::{ChildStdin, PtyChild, child_dir, crossterm_kept_input, wait_until};
 
     const CHILD: &str = "app::input_handover_tests::real_terminal::child_runs_the_run_loop_s_input";
 
@@ -1211,9 +1211,11 @@ mod real_terminal {
         if app.sigwinch_flag.swap(false, Ordering::Relaxed) {
             resizes += 1;
         }
+        let kept = crossterm_kept_input();
         let _ = crossterm::terminal::disable_raw_mode();
         let report = format!(
-            "resized {}\ntarget {:?}\nfullscreen {:?}\npolls {polls} in {} ms",
+            "crossterm kept input {kept}\nresized {}\ntarget {:?}\nfullscreen {:?}\npolls {polls} \
+             in {} ms",
             resizes > 0,
             app.input_target,
             app.fullscreen_overlay,
@@ -1239,7 +1241,7 @@ mod real_terminal {
         let report = child.finish();
         let (ended, polls) = report.rsplit_once('\n').expect("a polls line");
         assert_eq!(
-            ended, "resized true\ntarget Agent\nfullscreen Agent",
+            ended, "crossterm kept input false\nresized true\ntarget Agent\nfullscreen Agent",
             "{report}"
         );
         let counts: Vec<u128> = polls
@@ -1295,8 +1297,10 @@ mod real_terminal {
             app.draw_run_frame(&mut screen);
             assert!(!app.poll_run_input(), "the app asked to exit");
         }
+        let kept = crossterm_kept_input();
         ratatui::restore();
-        std::fs::write(dir.join("result.tmp"), b"done").expect("result file");
+        let report = format!("crossterm kept input {kept}");
+        std::fs::write(dir.join("result.tmp"), report).expect("result file");
         std::fs::rename(dir.join("result.tmp"), dir.join("result")).expect("result file");
     }
 
@@ -1312,7 +1316,7 @@ mod real_terminal {
             "the program to receive abc",
             || std::fs::read(&received).unwrap_or_default() == b"abc",
         );
-        assert_eq!(child.finish(), "done");
+        assert_eq!(child.finish(), "crossterm kept input false");
     }
 }
 
