@@ -1018,7 +1018,7 @@ async function agentRowTexts(page) {
     return [...document.querySelectorAll('[aria-label="Session actions"]')]
       .map((trigger) => {
         let row = trigger
-        while (row && !row.classList.contains("group/flat-row")) row = row.parentElement
+        while (row && !row.classList.contains("group/reveal")) row = row.parentElement
         return row
       })
       .filter((row) => row && row.getBoundingClientRect().height > 1)
