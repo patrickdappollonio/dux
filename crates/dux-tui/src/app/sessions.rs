@@ -6073,6 +6073,7 @@ mod tests {
                 bindings: Vec::new(),
             },
             raw_input_parser: crate::raw_input::RawInputParser::default(),
+            terminal_input: crate::terminal_input::TerminalInput::default(),
             debug_raw_input: crate::app::debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),

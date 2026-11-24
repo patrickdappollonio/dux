@@ -16,8 +16,11 @@ mod key_decode;
 mod key_encode;
 mod keybindings;
 mod numeric;
+#[cfg(test)]
+mod pty_child;
 mod raw_input;
 mod server_screen;
+mod terminal_input;
 mod theme;
 mod tui_color;
 

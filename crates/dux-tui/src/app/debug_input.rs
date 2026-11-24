@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Local;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -331,21 +331,22 @@ impl App {
     /// One poll of the input debugger's own reader, run instead of either
     /// input path while the debugger is open, or while it still holds input
     /// read after it closed (an arriving paste, an unfinished sequence). On
-    /// the first poll it hands over from crossterm: every event crossterm
-    /// already holds is handled first, because a poll of stdin cannot see
-    /// crossterm's queue. Returns whether the app should exit.
+    /// the first poll it takes the bytes the other readers left unread first.
+    /// Returns whether the app should exit.
     pub(super) fn poll_debug_raw_input(&mut self, stdin: impl AsFd) -> Result<bool> {
         if !self.debug_raw_input.reading {
-            let held = || match crate::io_retry::retry_on_interrupt(|| event::poll(Duration::ZERO))
-            {
-                Ok(true) => crate::io_retry::retry_on_interrupt(event::read).ok(),
-                _ => None,
-            };
-            if self.hand_debug_input_over(held) {
+            if self.hand_debug_input_over(|| None) {
                 return Ok(true);
             }
             if !self.input_debugger_open() {
                 return Ok(false);
+            }
+            let held = self.terminal_input.take_bytes();
+            if !held.is_empty() {
+                self.mark_frame_dirty();
+                if self.record_debug_input_bytes(&held) {
+                    return Ok(true);
+                }
             }
         }
 

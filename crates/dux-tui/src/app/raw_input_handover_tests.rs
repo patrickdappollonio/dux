@@ -70,8 +70,11 @@ fn keys_read_with_the_toggle_out_of_fullscreen_reach_the_windowed_pane() {
     let mut app = fullscreen_app_typing_into(&received);
 
     assert!(!app.process_raw_input_bytes(b"ab\x07cd"));
-
     assert_eq!(app.input_target, InputTarget::None);
+    while let Some(event) = app.terminal_input.next_event() {
+        assert!(!app.handle_terminal_event(event));
+    }
+
     assert_eq!(wait_for_received(&received, "abcd"), "abcd");
 }
 
@@ -93,6 +96,8 @@ fn keys_read_with_a_macro_bar_key_that_opens_nothing_still_reach_the_program() {
     typed.extend_from_slice(b"cd");
 
     assert!(!app.process_raw_input_bytes(&typed));
+    let rest = app.terminal_input.take_bytes();
+    assert!(!app.process_raw_input_bytes(&rest));
 
     assert!(app.macro_bar.is_none(), "test premise: no macros to show");
     assert_eq!(app.input_target, InputTarget::Agent);

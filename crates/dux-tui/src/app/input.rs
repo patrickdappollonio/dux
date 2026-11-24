@@ -3384,24 +3384,29 @@ impl App {
         let mut buf = [0u8; 4096];
         let poll_ms = 100u64.min(self.max_poll_ms());
         let stdin_borrow = stdin_handle.as_fd();
-        if !wait_for_input(&stdin_borrow, Duration::from_millis(poll_ms))? {
-            self.resolve_pending_bare_esc(&stdin_borrow, &mut buf)?;
-            return Ok(false);
-        }
-
-        let n = read_raw_chunk(stdin_borrow, &mut buf)?;
-        if n == 0 {
-            return Ok(false);
-        }
+        let held = self.terminal_input.take_bytes();
+        let first = if held.is_empty() {
+            if !wait_for_input(&stdin_borrow, Duration::from_millis(poll_ms))? {
+                self.resolve_pending_bare_esc(&stdin_borrow, &mut buf)?;
+                return Ok(false);
+            }
+            let n = read_raw_chunk(stdin_borrow, &mut buf)?;
+            if n == 0 {
+                return Ok(false);
+            }
+            buf[..n].to_vec()
+        } else {
+            held
+        };
         // Raw bytes are input like any other: local state (scroll, selection,
         // the macro bar) can move before the child echoes anything.
         self.mark_frame_dirty();
 
-        if self.consume_loading_raw_input(&buf[..n]) {
+        if self.consume_loading_raw_input(&first) {
             return Ok(false);
         }
 
-        if self.process_raw_input_bytes(&buf[..n]) {
+        if self.process_raw_input_bytes(&first) {
             return Ok(true);
         }
 
@@ -3471,7 +3476,10 @@ impl App {
             if std::time::Instant::now() >= drain_deadline {
                 break;
             }
-            // If we exited interactive mode during processing, stop draining.
+            // A key that handed input to another reader left the rest for it.
+            if self.terminal_input.has_unread() {
+                break;
+            }
             if !matches!(
                 self.input_target,
                 InputTarget::Agent | InputTarget::Terminal
@@ -4063,7 +4071,7 @@ impl App {
                     self.open_macro_bar();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return end(false, Some(index));
+                    return end(false, index);
                 }
                 // Only reachable while the take-over card covers this pane (see
                 // the match above), which is the one state where this key means
@@ -4073,7 +4081,7 @@ impl App {
                     self.take_over_focused_pty();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return end(false, None);
+                    return end(false, index);
                 }
                 // Only reachable while another device drives the pty (see the
                 // match above); the prompt takes over input from here.
@@ -4082,7 +4090,7 @@ impl App {
                     self.open_command_palette();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return end(false, Some(index));
+                    return end(false, index);
                 }
                 // In fullscreen the toggle means one thing: leave fullscreen.
                 RawSeqAction::Intercept(Action::ToggleFullscreen, ..) => {
@@ -4090,7 +4098,7 @@ impl App {
                     // `input_target`, which is what resolves the id.
                     dispatch.flush_and_stamp(self);
                     self.exit_interactive_mode();
-                    return end(false, Some(index));
+                    return end(false, index);
                 }
                 RawSeqAction::Intercept(Action::ScrollPageUp, _, raw, key) => {
                     self.route_raw_page_scroll(ScrollDirection::Up, &raw, key.as_ref(), dispatch);
@@ -4125,7 +4133,9 @@ impl App {
                 RawSeqAction::Mouse(mouse, raw) => {
                     match self.handle_raw_mouse(mouse, &raw, dispatch) {
                         RawInputFlow::Continue => {}
-                        RawInputFlow::Return(should_exit) => return end(should_exit, None),
+                        RawInputFlow::Return(should_exit) => {
+                            return end(should_exit, index);
+                        }
                     }
                 }
                 RawSeqAction::Intercept(_, _, raw, key) => {
@@ -4145,27 +4155,15 @@ impl App {
         None
     }
 
-    /// Hand what followed a key that ended a raw-input batch early to whichever
-    /// reader takes input now. Returns whether the app should exit.
-    fn hand_on_rest_of_read(&mut self, rest: Vec<Vec<u8>>) -> bool {
-        let mut rest = rest.into_iter();
-        while let Some(seq) = rest.next() {
-            if self.run_input_reader() == RunInputReader::Forwarding {
-                let tail: Vec<u8> = std::iter::once(seq).chain(rest).flatten().collect();
-                return self.process_raw_input_bytes(&tail);
-            }
-            // A paste is one event to crossterm's reader, and its end may not be
-            // in this read, so it and what follows it are dropped.
-            if seq == crate::raw_input::BRACKET_PASTE_START {
-                return false;
-            }
-            if let Some(event) = super::debug_input::event_crossterm_makes_of(&seq)
-                && self.handle_terminal_event(event)
-            {
-                return true;
-            }
-        }
-        false
+    /// Leave what followed a key that ended a raw-input batch early, the
+    /// parser's unfinished tail included, for whichever reader takes input next.
+    fn hand_on_rest_of_read(&mut self, rest: Vec<Vec<u8>>, tail: &[u8]) {
+        let mut bytes: Vec<u8> = rest.into_iter().flatten().collect();
+        bytes.extend_from_slice(tail);
+        self.raw_input_buf.clear();
+        self.raw_input_parser.clear();
+        self.raw_paste.in_bracket = false;
+        self.terminal_input.give_back(&bytes);
     }
 
     /// Process raw bytes that have already been read from stdin.
@@ -4174,6 +4172,7 @@ impl App {
     /// call it directly, without real stdin I/O.
     pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> bool {
         let sequences = self.parse_raw_input_sequences(bytes);
+        let tail = self.raw_input_parser.pending().to_vec();
         let mut plan = self.classify_raw_input_sequences(&sequences);
         let actions = std::mem::take(&mut plan.actions);
         let paste = if plan.normalized_paste_forwarded {
@@ -4198,14 +4197,13 @@ impl App {
             if end.should_exit {
                 return true;
             }
-            return end.hand_on_after.is_some_and(|action| {
-                let rest = sequences
-                    .into_iter()
-                    .skip(plan.origins[action] + 1)
-                    .map(|parsed| parsed.bytes)
-                    .collect();
-                self.hand_on_rest_of_read(rest)
-            });
+            let rest = sequences
+                .into_iter()
+                .skip(plan.origins[end.hand_on_after] + 1)
+                .map(|parsed| parsed.bytes)
+                .collect();
+            self.hand_on_rest_of_read(rest, &tail);
+            return false;
         }
         dispatch.finish(self, paste);
 

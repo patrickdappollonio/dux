@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
     MouseEvent, MouseEventKind,
 };
@@ -204,9 +204,9 @@ struct RawInputPlan {
 /// How a raw-input batch ended before its last action.
 struct RawBatchEnd {
     should_exit: bool,
-    /// The action after which the rest of the read is handed on to whichever
-    /// reader takes input now, or `None` when the rest is dropped.
-    hand_on_after: Option<usize>,
+    /// The action after which the rest of the read is left for whichever
+    /// reader takes input next.
+    hand_on_after: usize,
 }
 
 struct RawInputDispatch {
@@ -838,6 +838,8 @@ pub(crate) struct App {
     pub(crate) dormant_tab_press: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
+    /// What dux has read from its terminal and no reader has taken yet.
+    pub(crate) terminal_input: crate::terminal_input::TerminalInput,
     /// The input debugger's own raw reader, apart from the forwarding path's.
     pub(crate) debug_raw_input: debug_input::DebugRawInput,
     pub(crate) raw_input_buf: Vec<u8>,
@@ -5375,6 +5377,8 @@ mod pty_ownership;
 #[cfg(test)]
 mod raw_input_handover_tests;
 mod redraw;
+#[cfg(test)]
+mod typed_burst_tests;
 pub(crate) use redraw::RedrawGate;
 #[cfg(test)]
 mod ellipsis_rows;
@@ -5789,6 +5793,7 @@ impl App {
             dormant_tab_press: None,
             interactive_patterns,
             raw_input_parser: crate::raw_input::RawInputParser::default(),
+            terminal_input: crate::terminal_input::TerminalInput::default(),
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
@@ -6204,8 +6209,8 @@ impl App {
 
     fn refresh_run_terminal(&mut self, terminal: &mut ratatui::DefaultTerminal) {
         if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-            self.mark_frame_dirty();
-            self.retire_pending_link_click();
+            let (cols, rows) = crossterm::terminal::size().unwrap_or_default();
+            self.handle_terminal_event(Event::Resize(cols, rows));
             if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize()) {
                 self.report_runtime_error("terminal resize failed", &err);
             }
@@ -6357,49 +6362,61 @@ impl App {
     }
 
     fn poll_structured_run_input(&mut self) -> bool {
-        let idle_poll_ms = if self.any_row_animating() { 33 } else { 100 };
-        let poll_ms = idle_poll_ms.min(self.max_poll_ms());
-        let ready = match crate::io_retry::retry_on_interrupt(|| {
-            event::poll(Duration::from_millis(poll_ms))
-        }) {
-            Ok(ready) => ready,
-            Err(err) => {
-                self.report_runtime_error("event polling failed; input handling was skipped", &err);
-                false
+        if !self.terminal_input.has_unread() {
+            let idle_poll_ms = if self.any_row_animating() { 33 } else { 100 };
+            let poll_ms = idle_poll_ms.min(self.max_poll_ms());
+            match self.read_terminal_into_input(Duration::from_millis(poll_ms)) {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(err) => {
+                    self.report_runtime_error(
+                        "event polling failed; input handling was skipped",
+                        &err,
+                    );
+                    return false;
+                }
             }
-        };
-        if !ready {
-            return false;
         }
         self.drain_terminal_input()
     }
 
+    /// Wait up to `timeout` for the terminal and add one read to
+    /// `terminal_input`. Returns whether anything was read.
+    fn read_terminal_into_input(&mut self, timeout: Duration) -> std::io::Result<bool> {
+        use std::os::fd::AsFd;
+
+        let stdin = std::io::stdin();
+        let fd = stdin.as_fd();
+        if !input::wait_for_input(&fd, timeout)? {
+            return Ok(false);
+        }
+        let mut buf = [0u8; crate::terminal_input::READ_SIZE];
+        let n = input::read_raw_chunk(fd, &mut buf)?;
+        self.terminal_input.push_read(&buf[..n]);
+        Ok(n > 0)
+    }
+
+    /// Handle events while this reader still takes input. An event that hands
+    /// input to another reader leaves every byte after it in `terminal_input`.
     fn drain_terminal_input(&mut self) -> bool {
         loop {
-            let event = match crate::io_retry::retry_on_interrupt(event::read) {
-                Ok(event) => event,
-                Err(err) => {
-                    self.report_runtime_error(
-                        "event read failed; input handling was skipped",
-                        &err,
-                    );
-                    return false;
+            let Some(event) = self.terminal_input.next_event() else {
+                match self.read_terminal_into_input(Duration::ZERO) {
+                    Ok(true) => continue,
+                    Ok(false) => return false,
+                    Err(err) => {
+                        self.report_runtime_error(
+                            "event read failed; input handling was skipped",
+                            &err,
+                        );
+                        return false;
+                    }
                 }
             };
             if self.handle_terminal_event(event) {
                 return true;
             }
-            if matches!(
-                self.input_target,
-                InputTarget::Agent | InputTarget::Terminal
-            ) {
-                // Remaining stdin bytes now belong to the raw-input path.
-                return false;
-            }
-            if !matches!(
-                crate::io_retry::retry_on_interrupt(|| event::poll(Duration::ZERO)),
-                Ok(true)
-            ) {
+            if self.run_input_reader() != RunInputReader::Structured {
                 return false;
             }
         }
