@@ -16,6 +16,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
+import { HeaderButton } from "@/components/HeaderButton"
 import { Button } from "@/components/ui/button"
 import { EmptyState } from "@/components/ui/empty"
 import { MatchHighlight } from "@/components/MatchHighlight"
@@ -180,7 +181,7 @@ export function MacroPopover({
           disabled trigger cannot drift apart. */}
       {anchored ? null : (
         <PopoverTrigger ref={triggerRef} render={<TriggerButton shape={variant} />}>
-          <TriggerFace variant={variant} />
+          {pillFace(variant)}
         </PopoverTrigger>
       )}
       <PopoverContent
@@ -320,13 +321,17 @@ type TriggerVariant = "labeled" | "pill"
 
 // The trigger's one shape, shared by the live and the disabled control so the
 // cluster does not move when the take-over card comes or goes.
+//
+// The labelled one is the header's `HeaderButton` and brings its own icon and
+// word; only the pill's icon is handed in as the child.
 function TriggerButton({
   shape,
   className,
+  children,
   ...props
 }: { shape: TriggerVariant } & Omit<
   React.ComponentProps<typeof Button>,
-  "variant" | "size"
+  "variant" | "size" | "toggle"
 >) {
   if (shape === "pill") {
     return (
@@ -336,26 +341,25 @@ function TriggerButton({
         aria-label="Run a macro"
         {...props}
         className={cn("size-10 shrink-0 rounded-full", className)}
-      />
+      >
+        {children}
+      </Button>
     )
   }
   return (
-    <Button
-      variant="outline"
+    <HeaderButton
+      icon={<SquareSlash />}
+      label="Macros…"
       aria-label="Run a macro"
+      className={className}
       {...props}
-      className={cn("pointer-coarse:h-10", className)}
     />
   )
 }
 
-function TriggerFace({ variant }: { variant: TriggerVariant }) {
-  return (
-    <>
-      <SquareSlash />
-      {variant === "labeled" ? <>Macros…</> : null}
-    </>
-  )
+// What the pill's trigger carries as its child: the icon alone.
+function pillFace(variant: TriggerVariant) {
+  return variant === "pill" ? <SquareSlash /> : null
 }
 
 // A disabled button takes no pointer events, so the hint hangs off a focusable
@@ -381,7 +385,7 @@ function DisabledTrigger({
         )}
       >
         <TriggerButton shape={variant} disabled>
-          <TriggerFace variant={variant} />
+          {pillFace(variant)}
         </TriggerButton>
       </span>
     </SimpleTooltip>

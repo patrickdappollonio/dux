@@ -41,6 +41,7 @@ import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { matchCharRanges } from "@/lib/searchMatch"
@@ -896,36 +897,26 @@ function OpenEditorButton({
   const hide = folded ? "invisible absolute" : undefined
   const shared = {
     ref: buttonRef,
-    size: "default",
-    variant: "outline",
-    // A phone's word is gone and the icon alone is a square.
-    className: cn(
-      "max-md:h-11 max-md:w-11 max-md:px-0 pointer-coarse:h-10 max-md:pointer-coarse:h-11",
-      !unavailable && hide,
-    ),
+    icon: <FileCode2 />,
+    label: "Editor",
+    // A phone keeps the icon alone.
+    words: "computer",
   } as const
-  const face = (
-    <>
-      <FileCode2 />
-      <span className="max-md:sr-only">Editor</span>
-    </>
-  )
   if (unavailable !== null) {
     // A plain disabled button on both form factors: a disabled anchor is not
     // a thing, and there is no address worth keeping for a root that is gone.
     return (
       <ExplainedWhenDisabled disabled hint={unavailable} className={cn("rounded-lg", hide)}>
-        <Button {...shared} disabled>
-          {face}
-        </Button>
+        <HeaderButton {...shared} disabled />
       </ExplainedWhenDisabled>
     )
   }
   return (
     <SimpleTooltip content="Open editor">
       {isMobile ? (
-        <Button
+        <HeaderButton
           {...shared}
+          className={hide}
           // It really is an anchor, so the primitive is told not to expect a
           // native <button>: a link keeps a link's own semantics and gestures.
           nativeButton={false}
@@ -936,13 +927,9 @@ function OpenEditorButton({
               rel={EDITOR_TAB_REL}
             />
           }
-        >
-          {face}
-        </Button>
+        />
       ) : (
-        <Button {...shared} onClick={() => openEditor(root)}>
-          {face}
-        </Button>
+        <HeaderButton {...shared} className={hide} onClick={() => openEditor(root)} />
       )}
     </SimpleTooltip>
   )
@@ -1035,7 +1022,7 @@ function ChangesHeader({
         * its word and the `⋯` do not fit (the recap shrinks first and is not
         * counted), the editor button folds into the ⋯ as its first item, and
         * comes back once the pane is wide enough again. */}
-      <CardAction className="relative flex shrink-0 items-center gap-2 self-center">
+      <CardAction className={cn(HEADER_BUTTON_ROW, "relative self-center")}>
         <OpenEditorButton
           sessionId={sessionId}
           isMobile={isMobile}
@@ -1047,7 +1034,6 @@ function ChangesHeader({
           <EllipsisMenuTrigger
             ref={triggerRef}
             placement="header"
-            fit="roomy"
             aria-label="Changes actions"
           />
           <DropdownMenuContent align="end">

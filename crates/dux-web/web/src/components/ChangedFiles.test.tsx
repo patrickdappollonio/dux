@@ -1931,10 +1931,16 @@ describe("the Changes pane header's Editor button", () => {
   // One cluster, one look: the editor button wears the `⋯`'s outline variant, so
   // it reads as a button rather than a bare glyph. jsdom cannot paint, so the
   // shared Button's variant classes are what is pinned.
-  it("wears the ⋯'s outline variant", () => {
+  it("wears the ⋯'s outline variant at the same height token", () => {
     render(<ChangedFiles />)
     for (const control of [editorButton(), actionsTrigger()]) {
-      expect(control.className.split(/\s+/)).toContain("border-border")
+      const classes = control.className.split(/\s+/)
+      expect(classes).toContain("border-border")
+      // 32px, 40px on a phone and under a finger: a square for the ⋯, the
+      // same height for the labelled button.
+      expect(classes.some((c) => /^(size|h)-8$/.test(c))).toBe(true)
+      expect(classes.some((c) => /^max-md:(size|h)-10$/.test(c))).toBe(true)
+      expect(classes.some((c) => /^pointer-coarse:(size|h)-10$/.test(c))).toBe(true)
     }
   })
 

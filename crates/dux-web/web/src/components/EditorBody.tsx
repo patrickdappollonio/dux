@@ -164,6 +164,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { ImageZoomViewer } from "@/components/ImageZoomViewer"
 import { svgIntrinsicSize } from "@/lib/imageZoom"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
+import { HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -226,25 +227,6 @@ const MarkdownPreview = lazy(() => import("./MarkdownPreview"))
 // Cap how many results the search list renders so a 1-char query in a huge repo
 // can't mount thousands of rows.
 const MAX_SEARCH_RESULTS = 300
-
-// The header's one height token for its labelled controls, which all wear the
-// outline variant: the icon-only ones take the matching `size="icon"` plus
-// HEADER_ICON_CONTROL. A finger at any width gets the 40px floor
-// (pointer-coarse), and a control painted on a phone adds its own
-// (max-md:h-10); the rest are desktop-only and reached through the phone's fold.
-const HEADER_CONTROL = "h-8 shrink-0 pointer-coarse:h-10"
-const HEADER_ICON_CONTROL = "shrink-0 pointer-coarse:size-10"
-
-// Below xl the header's labelled controls do not fit beside the path (at md
-// they measured wider than the row), so each drops its words to a
-// screen-reader-only label, keeping its accessible name, and the padding
-// shrinks to make the lone icon a square: 32px, or 40px for a finger. The
-// shared tooltip names each one, on hover and on keyboard focus.
-const COLLAPSES_BELOW_XL = "max-xl:px-2 pointer-coarse:max-xl:px-3"
-
-function HeaderLabel({ children }: { children: React.ReactNode }) {
-  return <span className="max-xl:sr-only">{children}</span>
-}
 
 // The two lines of I/O around the explorer's persisted width. The decisions
 // (what the value means, what an unrecognised one does) are all in the pure
@@ -1693,60 +1675,50 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           // the Button toggle look's primary fill marks the current mode.
           <ButtonGroup className="shrink-0 max-md:hidden" aria-label="View mode">
             <SimpleTooltip content="File">
-              <Button
-                variant="outline"
-                className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL)}
+              <HeaderButton
+                icon={<FileText />}
+                label="File"
+                words="wide"
                 toggle
                 aria-pressed={activeTab.mode === "file"}
                 onClick={chooseFileView}
-              >
-                <FileText />
-                <HeaderLabel>File</HeaderLabel>
-              </Button>
+              />
             </SimpleTooltip>
             <SimpleTooltip content="Diff">
-              <Button
-                variant="outline"
-                className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL)}
+              <HeaderButton
+                icon={<GitCompare />}
+                label="Diff"
+                words="wide"
                 toggle
                 aria-pressed={activeTab.mode === "diff"}
                 onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
-              >
-                <GitCompare />
-                <HeaderLabel>Diff</HeaderLabel>
-              </Button>
+              />
             </SimpleTooltip>
           </ButtonGroup>
         )}
         {hasDiff && activeTab?.mode === "diff" && diffStale && (
           <SimpleTooltip content="This file changed on disk: reload the diff">
-            <Button
-              variant="outline"
-              className={cn(
-                HEADER_CONTROL,
-                COLLAPSES_BELOW_XL,
-                "text-dux-warning max-md:hidden",
-              )}
+            <HeaderButton
+              icon={<CircleAlert />}
+              label="Reload"
+              words="wide"
+              className="text-dux-warning max-md:hidden"
               aria-label="Reload the diff. The file changed on disk"
               onClick={refreshDiff}
-            >
-              <CircleAlert />
-              <HeaderLabel>Reload</HeaderLabel>
-            </Button>
+            />
           </SimpleTooltip>
         )}
         {canPreview && (
           <SimpleTooltip content={previewLabel}>
-            <Button
-              variant="outline"
-              className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:hidden")}
+            <HeaderButton
+              icon={showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
+              label={previewLabel}
+              words="wide"
+              className="max-md:hidden"
               toggle
               aria-pressed={showPreview}
               onClick={togglePreview}
-            >
-              {showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
-              <HeaderLabel>{previewLabel}</HeaderLabel>
-            </Button>
+            />
           </SimpleTooltip>
         )}
       </>
@@ -1767,16 +1739,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         hint={writeBlocked}
         className="rounded-lg"
       >
-        <Button
-          variant="default"
-          className={cn(HEADER_CONTROL, "max-md:h-10")}
+        <HeaderButton
+          primary
+          icon={isSaving ? <Spinner kind="ring" size="md" /> : <Save />}
+          label="Save"
           disabled={!dirty || fileBusy || readOnly || writeBlocked !== null}
           aria-busy={isSaving}
           onClick={save}
-        >
-          {isSaving ? <Spinner kind="ring" size="md" /> : <Save />}
-          Save
-        </Button>
+        />
       </ExplainedWhenDisabled>
     )
   }
@@ -1947,9 +1917,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     return (
       <>
         <SimpleTooltip content="Open in new tab">
-          <Button
-            variant="outline"
-            className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:h-10")}
+          <HeaderButton
+            icon={<ExternalLink />}
+            label="Open in new tab"
+            words="wide"
             render={
               <a
                 href={newTabHash(false)}
@@ -1965,20 +1936,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 }}
               />
             }
-          >
-            <ExternalLink />
-            <HeaderLabel>Open in new tab</HeaderLabel>
-          </Button>
+          />
         </SimpleTooltip>
         <SimpleTooltip content="Close">
-          <Button
-            variant="outline"
-            className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:h-10")}
+          <HeaderButton
+            icon={<X />}
+            label="Close"
+            words="wide"
             onClick={() => closeEditor()}
-          >
-            <X />
-            <HeaderLabel>Close</HeaderLabel>
-          </Button>
+          />
         </SimpleTooltip>
       </>
     )
@@ -2034,7 +2000,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       <>
         {/* Header: what this editor is rooted at, the view toggle and the
           actions. The open file's path lives in the status bar below.
-          Every control is HEADER_CONTROL's h-8 (32px), so min-h-12.25 (49px)
+          Every control is a HeaderButton's h-8 (32px), so min-h-12.25 (49px)
           is that plus the row's py-2 (16px) and its own border-b (1px; min-h
           is border-box): the bar keeps one height as controls come and go.
           For a finger every control is 40px, so the floor is 57px
@@ -2070,10 +2036,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             explorerCollapsed ? "Show the file explorer" : "Hide the file explorer"
           }
         >
-          <Button
-            size="icon"
-            variant="outline"
-            className={cn(HEADER_ICON_CONTROL, "max-md:size-10")}
+          <HeaderButton
+            icon={explorerCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
             aria-label={
               explorerCollapsed
                 ? "Show the file explorer"
@@ -2083,15 +2047,17 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             // accessible name (Hide/Show), and a pressed state on top of a
             // changing name reads as contradictory to assistive tech.
             onClick={toggleExplorer}
-          >
-            {explorerCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-          </Button>
+          />
         </SimpleTooltip>
         {renderRootTitle()}
-        {renderDesktopViewActions()}
-        {renderSaveAction()}
-        {renderMobileActions()}
-        {renderStandaloneActions()}
+        {/* The header's buttons, in the one row every header lays them out in;
+          * empty, as on a phone with no file open, it takes no gap. */}
+        <div className={cn(HEADER_BUTTON_ROW, "empty:hidden")}>
+          {renderDesktopViewActions()}
+          {renderSaveAction()}
+          {renderMobileActions()}
+          {renderStandaloneActions()}
+        </div>
       </div>
       </>
     )

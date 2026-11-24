@@ -45,7 +45,7 @@ export function isPillPlacement(p: EllipsisPlacement): p is PillPlacement {
  *   text and the screen's edge, and above and below are the rows' own
  *   full-height controls. Its box is `ROW_BOX.slim`, which the grip beside it
  *   shares.
- * - `roomy`: a phone's 44px box, for a pane whose neighbours already have it,
+ * - `roomy`: a phone's 44px box, for a row whose neighbours already have it,
  *   so the controls of one cluster share a height.
  */
 export const ROW_BOX = {
@@ -59,11 +59,9 @@ export const ROW_BOX = {
 } as const
 export type RowFit = Exclude<keyof typeof ROW_BOX, "standard">
 
-export const HEADER_BOX = {
-  standard: "size-8 shrink-0 max-md:size-10 pointer-coarse:size-10",
-  roomy:
-    "size-8 shrink-0 max-md:size-11 pointer-coarse:size-10 max-md:pointer-coarse:size-11",
-} as const
+// A header's one icon-only box, shared by the `⋯` and by every icon-only button
+// in a header (`HeaderButton`), which sit side by side and so share a height.
+export const HEADER_BOX = "size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
 
 /**
  * The banner strip's one height token. The counter and the controls beside the

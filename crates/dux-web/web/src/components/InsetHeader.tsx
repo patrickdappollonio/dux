@@ -13,7 +13,7 @@ import {
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { NewTabButton, StackNewDialog } from "@/components/StackNewDialog"
 import { TheaterToggle } from "@/components/TheaterToggle"
-import { Button } from "@/components/ui/button"
+import { HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
 import { useFoldToFit } from "@/hooks/use-fold-to-fit"
 import { useMacrosBlockedHint } from "@/hooks/use-macros-blocked"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
@@ -36,6 +36,7 @@ import {
   useDux,
   type SelectedTarget,
 } from "@/lib/store"
+import { cn } from "@/lib/utils"
 
 // The desktop center-pane top bar: one row of chips naming what you are looking
 // at, each a glyph followed by its value, then the pane's controls on the right.
@@ -175,7 +176,7 @@ export function InsetHeader() {
           frame between a target being selected and its agent arriving in the
           spine, which resizes the cluster and shifts every control in it. */}
       {selectedTarget && folded !== true ? (
-        <div ref={clusterRef} className="flex shrink-0 items-center gap-2">
+        <div ref={clusterRef} className={HEADER_BUTTON_ROW}>
           {newTabSession ? <NewTabButton session={newTabSession} /> : null}
           <TheaterToggle settled={folded === false} />
           {paneSubject ? <MacroPopover target={selectedTarget} /> : null}
@@ -208,7 +209,7 @@ export function InsetHeader() {
           interior, so a border on this edge misses the real line. */}
       <div
         data-testid="changes-pane-spacer"
-        className="flex min-w-fit shrink-0 items-center justify-end gap-2"
+        className={cn(HEADER_BUTTON_ROW, "min-w-fit justify-end")}
         style={{ width: `${spacer}%` }}
       >
         {/* The way back to a hidden Changes pane. Hiding it unmounts the pane
@@ -232,22 +233,16 @@ export function InsetHeader() {
             `showChangesPane` restores a width as well as the preference. */}
         {paneHidden && (
           <SimpleTooltip content="Show Changes pane">
-            <Button
-              variant="outline"
-              size={summary ? "default" : "icon"}
-              className={summary ? "pointer-coarse:h-10" : "pointer-coarse:size-10"}
+            <HeaderButton
+              icon={<PanelRightOpen />}
+              label={summary?.label}
               aria-label={
                 summary
                   ? `Show Changes pane, ${summary.countLabel}`
                   : "Show Changes pane"
               }
               onClick={() => showChangesPane()}
-            >
-              <PanelRightOpen />
-              {summary ? (
-                <span className="tabular-nums">{summary.label}</span>
-              ) : null}
-            </Button>
+            />
           </SimpleTooltip>
         )}
         <AppMenu />
