@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ScrollList, ScrollListRows } from "@/components/ui/scroll-list"
 import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { branchCheckboxLabel, predatesSentence } from "@/lib/branchWarning"
 import { clipboardWorktree } from "@/lib/flatClipboard"
@@ -581,148 +582,150 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
       }}
     >
       <ScrollArea className="h-64 shrink-0 rounded-md border max-md:h-auto max-md:min-h-40 max-md:flex-1">
-        {attachWorktreeLoading ? (
-          <div className="flex h-64 items-center justify-center max-md:h-40">
-            <Spinner kind="glyph" size="lg" tone="muted" />
-          </div>
-        ) : adoptable.length === 0 &&
-          attached.length === 0 &&
-          inUse.length === 0 &&
-          beingRemoved.length === 0 &&
-          attachWorktreeLeftovers.length === 0 ? (
-          // The spinner's box, so the dialog keeps its height when the list
-          // turns out empty.
-          <div className="flex h-64 items-center justify-center max-md:h-40">
-            <EmptyState
-              size="compact"
-              title="This project has no worktrees dux manages yet. Create an agent and one appears here."
-            />
-          </div>
-        ) : (
-          <div className="flex flex-col">
-            {adoptable.map((entry) => {
-              const isSelected = selected === entry.worktree_path
-              return (
-                <div
-                  key={entry.worktree_path}
-                  className={`flex min-h-11 w-full items-center gap-1 pr-1 md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${
-                    isSelected ? "bg-accent" : "hover:bg-accent/60"
-                  }`}
-                >
-                  <SimpleTooltip content={rowTooltip(entry)}>
-                    {/* min-h-11 gives a ≥44px touch target on phones; desktop
-                       keeps the compact density via md:. */}
-                    <button
-                      type="button"
-                      onClick={() => handleSelect(entry)}
-                      className="flex min-h-11 min-w-0 flex-1 items-center gap-x-2.5 px-3 py-2 text-left max-md:flex-wrap md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
-                    >
-                      <WorktreeRowBody entry={entry} />
-                    </button>
-                  </SimpleTooltip>
-                  <DropdownMenu>
-                    <EllipsisMenuTrigger placement="row" aria-label="Worktree actions" />
-                    <DropdownMenuContent align="end">
-                      {/* Neutral colour: the trailing ellipsis and the
-                         confirmation carry the danger, per the row-menu
-                         convention. */}
-                      <DropdownMenuItem
-                        onClick={() => openDeleteWorktree(projectId, entry)}
+        <ScrollList scroll="enclosing">
+          {attachWorktreeLoading ? (
+            <div className="flex h-64 items-center justify-center max-md:h-40">
+              <Spinner kind="glyph" size="lg" tone="muted" />
+            </div>
+          ) : adoptable.length === 0 &&
+            attached.length === 0 &&
+            inUse.length === 0 &&
+            beingRemoved.length === 0 &&
+            attachWorktreeLeftovers.length === 0 ? (
+            // The spinner's box, so the dialog keeps its height when the list
+            // turns out empty.
+            <div className="flex h-64 items-center justify-center max-md:h-40">
+              <EmptyState
+                size="compact"
+                title="This project has no worktrees dux manages yet. Create an agent and one appears here."
+              />
+            </div>
+          ) : (
+            <ScrollListRows gap="none" semantics="none">
+              {adoptable.map((entry) => {
+                const isSelected = selected === entry.worktree_path
+                return (
+                  <div
+                    key={entry.worktree_path}
+                    className={`flex min-h-11 w-full items-center gap-1 pr-1 md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${
+                      isSelected ? "bg-accent" : "hover:bg-accent/60"
+                    }`}
+                  >
+                    <SimpleTooltip content={rowTooltip(entry)}>
+                      {/* min-h-11 gives a ≥44px touch target on phones; desktop
+                         keeps the compact density via md:. */}
+                      <button
+                        type="button"
+                        onClick={() => handleSelect(entry)}
+                        className="flex min-h-11 min-w-0 flex-1 items-center gap-x-2.5 px-3 py-2 text-left max-md:flex-wrap md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
                       >
-                        <Trash2 />
-                        Delete worktree…
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-              )
-            })}
-            {attached.length > 0 ? (
-              <>
-                <div className="pt-2">
-                  <ModalGroupHeading inset caption="To remove one of these, delete the agent holding it.">
-                    Already has an agent
-                  </ModalGroupHeading>
-                </div>
-                {/* Deliberately no delete action: removing a worktree from under
-                  * a live agent breaks the session, and deleting the agent is
-                  * the path that already exists and already confirms. */}
-                {attached.map((entry) => (
-                  <SimpleTooltip
-                    key={entry.worktree_path}
-                    content={rowTooltip(entry)}
-                  >
-                    <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
-                      <WorktreeRowBody
-                        entry={entry}
-                        heldBy={agentName(entry)}
-                        inUse={entry.in_use}
-                      />
-                    </div>
-                  </SimpleTooltip>
-                ))}
-              </>
-            ) : null}
-            {inUse.length > 0 ? (
-              <>
-                <div className="pt-2">
-                  <ModalGroupHeading inset caption="Something is still using these. Each row says what; remove one once that has finished.">
-                    In use
-                  </ModalGroupHeading>
-                </div>
-                {/* No actions: the server refuses a removal while the folder is
-                  * in use, so offering one would only end in that refusal. */}
-                {inUse.map((entry) => (
-                  <SimpleTooltip
-                    key={entry.worktree_path}
-                    content={rowTooltip(entry)}
-                  >
-                    <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
-                      <WorktreeRowBody entry={entry} inUse={entry.reason} />
-                    </div>
-                  </SimpleTooltip>
-                ))}
-              </>
-            ) : null}
-            {beingRemoved.length > 0 ? (
-              <>
-                <div className="pt-2">
-                  <ModalGroupHeading inset caption="Their agents were just deleted. dux removes each one once that agent has stopped.">
-                    Being removed
-                  </ModalGroupHeading>
-                </div>
-                {/* No actions: the removal is already running, and a second
-                  * one would only race it. */}
-                {beingRemoved.map((entry) => (
-                  <SimpleTooltip
-                    key={entry.worktree_path}
-                    content={rowTooltip(entry)}
-                  >
-                    <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
-                      <WorktreeRowBody entry={entry} />
-                    </div>
-                  </SimpleTooltip>
-                ))}
-              </>
-            ) : null}
-            {attachWorktreeLeftovers.length > 0 ? (
-              <>
-                <div className="pt-2">
-                  <ModalGroupHeading inset caption="git let go of these folders, but something was still writing into them when dux deleted them.">
-                    Left over after a delete
-                  </ModalGroupHeading>
-                </div>
-                {attachWorktreeLeftovers.map((folder) => (
-                  <LeftoverRow
-                    key={folder.path}
-                    projectId={projectId}
-                    folder={folder}
-                  />
-                ))}
-              </>
-            ) : null}
-          </div>
-        )}
+                        <WorktreeRowBody entry={entry} />
+                      </button>
+                    </SimpleTooltip>
+                    <DropdownMenu>
+                      <EllipsisMenuTrigger placement="row" aria-label="Worktree actions" />
+                      <DropdownMenuContent align="end">
+                        {/* Neutral colour: the trailing ellipsis and the
+                           confirmation carry the danger, per the row-menu
+                           convention. */}
+                        <DropdownMenuItem
+                          onClick={() => openDeleteWorktree(projectId, entry)}
+                        >
+                          <Trash2 />
+                          Delete worktree…
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                )
+              })}
+              {attached.length > 0 ? (
+                <>
+                  <div className="pt-2">
+                    <ModalGroupHeading inset caption="To remove one of these, delete the agent holding it.">
+                      Already has an agent
+                    </ModalGroupHeading>
+                  </div>
+                  {/* Deliberately no delete action: removing a worktree from under
+                    * a live agent breaks the session, and deleting the agent is
+                    * the path that already exists and already confirms. */}
+                  {attached.map((entry) => (
+                    <SimpleTooltip
+                      key={entry.worktree_path}
+                      content={rowTooltip(entry)}
+                    >
+                      <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
+                        <WorktreeRowBody
+                          entry={entry}
+                          heldBy={agentName(entry)}
+                          inUse={entry.in_use}
+                        />
+                      </div>
+                    </SimpleTooltip>
+                  ))}
+                </>
+              ) : null}
+              {inUse.length > 0 ? (
+                <>
+                  <div className="pt-2">
+                    <ModalGroupHeading inset caption="Something is still using these. Each row says what; remove one once that has finished.">
+                      In use
+                    </ModalGroupHeading>
+                  </div>
+                  {/* No actions: the server refuses a removal while the folder is
+                    * in use, so offering one would only end in that refusal. */}
+                  {inUse.map((entry) => (
+                    <SimpleTooltip
+                      key={entry.worktree_path}
+                      content={rowTooltip(entry)}
+                    >
+                      <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
+                        <WorktreeRowBody entry={entry} inUse={entry.reason} />
+                      </div>
+                    </SimpleTooltip>
+                  ))}
+                </>
+              ) : null}
+              {beingRemoved.length > 0 ? (
+                <>
+                  <div className="pt-2">
+                    <ModalGroupHeading inset caption="Their agents were just deleted. dux removes each one once that agent has stopped.">
+                      Being removed
+                    </ModalGroupHeading>
+                  </div>
+                  {/* No actions: the removal is already running, and a second
+                    * one would only race it. */}
+                  {beingRemoved.map((entry) => (
+                    <SimpleTooltip
+                      key={entry.worktree_path}
+                      content={rowTooltip(entry)}
+                    >
+                      <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
+                        <WorktreeRowBody entry={entry} />
+                      </div>
+                    </SimpleTooltip>
+                  ))}
+                </>
+              ) : null}
+              {attachWorktreeLeftovers.length > 0 ? (
+                <>
+                  <div className="pt-2">
+                    <ModalGroupHeading inset caption="git let go of these folders, but something was still writing into them when dux deleted them.">
+                      Left over after a delete
+                    </ModalGroupHeading>
+                  </div>
+                  {attachWorktreeLeftovers.map((folder) => (
+                    <LeftoverRow
+                      key={folder.path}
+                      projectId={projectId}
+                      folder={folder}
+                    />
+                  ))}
+                </>
+              ) : null}
+            </ScrollListRows>
+          )}
+        </ScrollList>
       </ScrollArea>
 
       {selected ? (

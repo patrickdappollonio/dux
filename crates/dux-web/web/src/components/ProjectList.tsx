@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ScrollListRows } from "@/components/ui/scroll-list"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { ModalGroupHeading } from "@/components/modal"
 import { type ProjectListRow, type ProjectSearch } from "@/components/projectSearch"
@@ -53,19 +54,21 @@ export function ProjectRows({
           }
         />
       ) : (
-        filtered.map((row) => (
-          <ProjectRow
-            key={row.id}
-            row={row}
-            onPick={onPick}
-            pickId={pick.rowId(row.id)}
-            active={pick.shownKey === row.id}
-            menuOpen={menuOpenId === row.id}
-            setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
-            menu={menu}
-            needle={query.trim().toLowerCase()}
-          />
-        ))
+        <ScrollListRows gap="none" semantics="none">
+          {filtered.map((row) => (
+            <ProjectRow
+              key={row.id}
+              row={row}
+              onPick={onPick}
+              pickId={pick.rowId(row.id)}
+              active={pick.shownKey === row.id}
+              menuOpen={menuOpenId === row.id}
+              setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
+              menu={menu}
+              needle={query.trim().toLowerCase()}
+            />
+          ))}
+        </ScrollListRows>
       )}
     </>
   )

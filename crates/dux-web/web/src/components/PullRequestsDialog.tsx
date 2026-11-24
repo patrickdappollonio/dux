@@ -51,6 +51,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { EmptyState, ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ScrollList, ScrollListRows } from "@/components/ui/scroll-list"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
@@ -221,20 +222,22 @@ function PullRequests({ open, onClosed }: { open: boolean; onClosed: () => void 
         },
       ]}
     >
-      {view === "prs" ? (
-        <PullRequestsView
-          session={session}
-          name={name}
-          visible={visible}
-          hidden={hidden}
-        />
-      ) : (
-        <BranchesView
-          prs={[...visible, ...hidden]}
-          hidden={hidden}
-          branches={branches}
-        />
-      )}
+      <ScrollList scroll="enclosing">
+        {view === "prs" ? (
+          <PullRequestsView
+            session={session}
+            name={name}
+            visible={visible}
+            hidden={hidden}
+          />
+        ) : (
+          <BranchesView
+            prs={[...visible, ...hidden]}
+            hidden={hidden}
+            branches={branches}
+          />
+        )}
+      </ScrollList>
     </Modal>
   )
 }
@@ -359,7 +362,7 @@ function PullRequestsView({
         onDragEnd={handleDragEnd}
       >
         <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-          <ul className="flex flex-col gap-1">
+          <ScrollListRows gap="normal" semantics="list">
             {rows.map((row, index) => (
               <SortablePrRow
                 key={row.id}
@@ -371,7 +374,7 @@ function PullRequestsView({
                 last={index === rows.length - 1}
               />
             ))}
-          </ul>
+          </ScrollListRows>
         </SortableContext>
       </DndContext>
       {hidden.length > 0 ? (
@@ -608,7 +611,7 @@ function HiddenSection({ sessionId, hidden }: { sessionId: string; hidden: PrVie
         </Badge>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <ul className="flex flex-col gap-1">
+        <ScrollListRows gap="normal" semantics="list">
           {hidden.map((pr) => {
             const key = prKeyOf(pr)
             return (
@@ -636,7 +639,7 @@ function HiddenSection({ sessionId, hidden }: { sessionId: string; hidden: PrVie
               </li>
             )
           })}
-        </ul>
+        </ScrollListRows>
       </CollapsibleContent>
     </Collapsible>
   )
@@ -716,7 +719,7 @@ function BranchesView({
   return (
     <div data-testid="branches-list" className={LIST}>
       <ErrorLine size="xs">{branches.error}</ErrorLine>
-      <ul className="flex flex-col gap-1">
+      <ScrollListRows gap="normal" semantics="list">
         {rows.map((branch) => {
           const seen = branch.first_seen_at ? formatFirstSeen(branch.first_seen_at) : null
           return (
@@ -781,7 +784,7 @@ function BranchesView({
             </li>
           )
         })}
-      </ul>
+      </ScrollListRows>
       {loose.map((key) => {
         const shut = isHidden(key)
         const pr = find(key) ?? lookup(hidden, key)

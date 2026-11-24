@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react"
+import type { CSSProperties, ReactNode, RefObject } from "react"
 import { Radio } from "@base-ui/react/radio"
 import { RadioGroup } from "@base-ui/react/radio-group"
 import {
@@ -68,6 +68,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { EmptyState, ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ScrollList, ScrollListRows } from "@/components/ui/scroll-list"
 import { Input } from "@/components/ui/input"
 import { tabsListVariants } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
@@ -573,7 +574,13 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
           }
           footerNote={notices ?? undefined}
         >
-          {editing ? editor : items.length === 0 ? empty : list}
+          {editing ? (
+            editor
+          ) : items.length === 0 ? (
+            empty
+          ) : (
+            <ScrollList scroll="enclosing">{list}</ScrollList>
+          )}
         </Modal>
         {confirm}
       </>
@@ -599,12 +606,9 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
               {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
                   into the column gap so the rows still line up with the search. */}
               <div ref={setListRoom} className="flex min-h-0 flex-1 flex-col">
-                <div
-                  className="-mr-2 flex min-h-0 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]"
-                  style={{ height: listHeight }}
-                >
+                <ScrollList scroll="own" height={{ px: listHeight }} scrollbar="gutter" reveal="flush">
                   {list}
-                </div>
+                </ScrollList>
               </div>
             </div>
             <div className="flex min-h-0 flex-col overflow-y-auto rounded-lg border p-4">
@@ -760,20 +764,9 @@ function MacroList({
     onMove(keyOf(String(event.active.id)), keyOf(String(event.over.id)))
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLUListElement>) {
-    const at = items.findIndex((item) => item.key === selectedKey)
-    const target =
-      event.key === "ArrowDown"
-        ? items[Math.min(at + 1, items.length - 1)]
-        : event.key === "ArrowUp"
-          ? items[Math.max(at - 1, 0)]
-          : event.key === "Home"
-            ? items[0]
-            : event.key === "End"
-              ? items[items.length - 1]
-              : undefined
+  function moveTo(index: number) {
+    const target = items[index]
     if (target === undefined) return
-    event.preventDefault()
     onHighlight(target.key)
     rowEls.current.get(target.key)?.focus()
   }
@@ -788,11 +781,15 @@ function MacroList({
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={items.map((item) => dragId(item.key))} strategy={verticalListSortingStrategy}>
-        <ul
-          role="listbox"
-          aria-label="Macros"
-          className="flex flex-col gap-0.5"
-          onKeyDown={handleKeyDown}
+        <ScrollListRows
+          gap="tight"
+          semantics="listbox"
+          label="Macros"
+          movement={{
+            count: items.length,
+            at: items.findIndex((item) => item.key === selectedKey),
+            onMove: moveTo,
+          }}
         >
           {items.map((item) => (
             <MacroRow
@@ -812,7 +809,7 @@ function MacroList({
               onActivate={() => onActivate(item.key)}
             />
           ))}
-        </ul>
+        </ScrollListRows>
       </SortableContext>
     </DndContext>
   )

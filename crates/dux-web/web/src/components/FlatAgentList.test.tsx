@@ -1336,7 +1336,7 @@ describe("FlatAgentList reveals the selected row", () => {
   })
 
   // The scroller (0-200) carries the fade depth as its scroll padding, as
-  // `.dux-list-fade` sets it, and reports a scroll position of `scrollTop`
+  // `ScrollList` sets it, and reports a scroll position of `scrollTop`
   // within 1000px of content.
   function selectAlphaInFadingList(scrollTop: number) {
     const { rerender } = render(<FlatAgentList handlers={handlers} />)
