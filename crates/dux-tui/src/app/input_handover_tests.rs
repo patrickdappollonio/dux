@@ -1,6 +1,9 @@
 //! The contract for how the terminal UI reads its own terminal: input is never
 //! lost, duplicated, reordered or misrouted because of which reader happened
-//! to be reading when it arrived, and a resize wakes every reader's wait.
+//! to be reading when it arrived, and a resize ends every reader's wait at
+//! once without a storm of them ever holding a wait past its timeout. The
+//! `resize` module says how each half is tested: the first by a signal that
+//! cannot interrupt the waiting thread, so only the wake can end the wait.
 //!
 //! Run the suite with `cargo test -p dux-tui input_handover`. Each case drives
 //! the run loop's own input poll against a socket standing in for the
@@ -382,8 +385,24 @@ pub(super) fn assert_every_cut_matches(setup: Setup, typed: &[u8], want: &Outcom
 
 /// A resize wakes the wait for input in every mode, so the screen is redrawn
 /// and the background web server serviced while the window is dragged.
+///
+/// Two things are promised and each has its own tests. A resize ends a wait at
+/// once, through the wake the signal handler writes to; the cases deliver the
+/// signal on a thread that is not the one waiting, so nothing but the wake can
+/// end the wait early. A storm of resizes cannot hold a wait past its timeout;
+/// that one is about the wait resuming with the time it has left after a
+/// signal interrupts it, and the cases send the signal to the waiting thread.
 mod resize {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
     use super::*;
+
+    /// A signal and its handlers are the process's, and the wake a handler
+    /// writes to is every registered one, so the cases take turns.
+    fn one_at_a_time() -> MutexGuard<'static, ()> {
+        static TURN: Mutex<()> = Mutex::new(());
+        TURN.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// This thread, which a helper thread can send a signal to.
     struct ThisThread(libc::pthread_t);
@@ -393,7 +412,8 @@ mod resize {
     unsafe impl Send for ThisThread {}
 
     /// Send SIGWINCH to this thread every `every` for `lasting`, as a window
-    /// dragged by hand does, on a helper thread.
+    /// dragged by hand does, on a helper thread. The signal interrupts this
+    /// thread's `poll`, which is what a storm does to a wait.
     fn resize_storm(every: Duration, lasting: Duration) -> std::thread::JoinHandle<()> {
         // SAFETY: pthread_self has no preconditions.
         let me = ThisThread(unsafe { libc::pthread_self() });
@@ -409,9 +429,49 @@ mod resize {
         })
     }
 
+    /// Deliver one SIGWINCH to the process on a thread of its own, after
+    /// `delay`, and finish once its handlers have run. The thread polling is
+    /// not the one signalled, so its `poll` is not interrupted: only the wake
+    /// the handler writes to can end its wait.
+    fn resize_elsewhere(delay: Duration) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            // SAFETY: an all-zero sigset_t is a valid value, and sigemptyset sets it below.
+            let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `set` is a valid, initialised signal set.
+            unsafe { libc::sigemptyset(&raw mut set) };
+            // SAFETY: as above, and SIGWINCH is a valid signal number.
+            unsafe { libc::sigaddset(&raw mut set, libc::SIGWINCH) };
+            // A thread inherits its spawner's mask, and this one must take the
+            // signal itself.
+            // SAFETY: `set` is valid and the old mask is not asked for.
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut())
+            };
+            // SAFETY: SIGWINCH has a handler installed, so raising it runs that
+            // handler on this thread, where it is unblocked, before raise
+            // returns, and ends nothing.
+            unsafe { libc::raise(libc::SIGWINCH) };
+        })
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Wake {
+        Working,
+        /// The resize wake could not be set up.
+        Unavailable,
+    }
+
     /// Install real resize handlers in `app` for the length of a test.
-    fn with_live_signals(app: &mut App) -> SignalHandles {
-        let mut handles = register_signal_handles().expect("register the signal handlers");
+    fn with_live_signals(app: &mut App, wake: Wake) -> SignalHandles {
+        let mut handles = match wake {
+            Wake::Working => register_signal_handles(),
+            Wake::Unavailable => {
+                register_signal_handles_with(|| Err(std::io::Error::other("no socket pair")))
+            }
+        }
+        .expect("register the signal handlers");
+        assert_eq!(handles.resize_wake.is_some(), wake == Wake::Working);
         app.sigwinch_flag = Arc::clone(&handles.sigwinch_flag);
         app.resize_wake = handles.resize_wake.take();
         handles
@@ -429,11 +489,127 @@ mod resize {
         }
     }
 
-    /// Poll in `rig` while resizes arrive every 20ms for 600ms, and return the
-    /// longest single poll. Without a wake, a poll lasts until the storm ends.
-    fn longest_poll_under_a_resize_storm(rig: &mut Rig) -> Duration {
-        let handles = with_live_signals(&mut rig.app);
-        let storm = resize_storm(Duration::from_millis(20), Duration::from_millis(600));
+    /// Whether a resize has written to the app's wake and nothing has read it.
+    fn wake_is_pending(app: &App) -> bool {
+        let wake = app.resize_wake.as_ref().expect("a resize wake");
+        input::wait_for_input_or_wake(wake.as_fd(), None, Duration::ZERO)
+            .expect("look at the wake")
+            .input
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Mode {
+        Windowed,
+        Maximized,
+        InputDebugger,
+    }
+
+    const MODES: [Mode; 3] = [Mode::Windowed, Mode::Maximized, Mode::InputDebugger];
+
+    fn rig_in(mode: Mode) -> Rig {
+        let mut rig = Rig::new(match mode {
+            Mode::Windowed | Mode::InputDebugger => WINDOWED,
+            Mode::Maximized => MAXIMIZED,
+        });
+        if let Mode::InputDebugger = mode {
+            rig.app.prompt = PromptState::DebugInput {
+                lines: Vec::new(),
+                scroll_offset: 0,
+            };
+        }
+        rig
+    }
+
+    /// The input poll in `mode`, started with a resize already delivered and
+    /// nothing typed, ends by the wake: it reads the wake and notes the
+    /// resize. Nothing but the wake does either, because the signal's own
+    /// handler ran before the poll and the flag it set is cleared first.
+    fn assert_a_resize_wakes_the_wait_of(mode: Mode) {
+        let _turn = one_at_a_time();
+        let mut rig = rig_in(mode);
+        let handles = with_live_signals(&mut rig.app, Wake::Working);
+        resize_elsewhere(Duration::ZERO)
+            .join()
+            .expect("deliver the resize");
+        rig.app.sigwinch_flag.store(false, Ordering::Relaxed);
+        assert!(wake_is_pending(&rig.app), "the resize wrote the wake");
+
+        assert!(!rig.app.poll_run_input_from(rig.terminal.as_fd()));
+
+        assert!(
+            !wake_is_pending(&rig.app),
+            "the poll left the resize's wake unread"
+        );
+        assert!(
+            rig.app.sigwinch_flag.load(Ordering::Relaxed),
+            "the poll did not note the resize"
+        );
+        unregister(&mut rig.app, handles);
+    }
+
+    #[test]
+    fn a_resize_wakes_the_windowed_interface_s_wait() {
+        assert_a_resize_wakes_the_wait_of(Mode::Windowed);
+    }
+
+    #[test]
+    fn a_resize_wakes_the_maximized_pane_s_wait() {
+        assert_a_resize_wakes_the_wait_of(Mode::Maximized);
+    }
+
+    #[test]
+    fn a_resize_wakes_the_input_debugger_s_wait() {
+        assert_a_resize_wakes_the_wait_of(Mode::InputDebugger);
+    }
+
+    /// A wait of `LONG_WAIT` in each state the reader can be in ends as soon
+    /// as a resize arrives, on a signal that does not interrupt the waiting
+    /// thread. A wait that ignores the wake lasts the whole time.
+    #[test]
+    fn a_resize_ends_a_long_wait_at_once_in_every_reading_state() {
+        const LONG_WAIT: Duration = Duration::from_secs(10);
+        const ENDED_WITHIN: Duration = Duration::from_secs(3);
+
+        let _turn = one_at_a_time();
+        for state in [
+            TerminalReading::Reading,
+            TerminalReading::Ended,
+            TerminalReading::Failed,
+        ] {
+            let mut rig = Rig::new(WINDOWED);
+            let handles = with_live_signals(&mut rig.app, Wake::Working);
+            rig.app.terminal_reading = state;
+            rig.app.sigwinch_flag.store(false, Ordering::Relaxed);
+
+            let resize = resize_elsewhere(Duration::from_millis(50));
+            let started = Instant::now();
+            let input = rig
+                .app
+                .wait_for_terminal(rig.terminal.as_fd(), LONG_WAIT)
+                .expect("wait");
+            let waited = started.elapsed();
+            resize.join().expect("deliver the resize");
+
+            assert!(!input, "{state:?}: nothing was typed");
+            assert!(
+                waited < ENDED_WITHIN,
+                "{state:?}: the wait lasted {waited:?} of {LONG_WAIT:?} with a resize sent"
+            );
+            assert!(
+                rig.app.sigwinch_flag.load(Ordering::Relaxed),
+                "{state:?}: the wait did not note the resize"
+            );
+            unregister(&mut rig.app, handles);
+        }
+    }
+
+    /// Poll in `rig` while resizes arrive every 20ms, each interrupting the
+    /// poll, for as long as the storm lasts, and return the longest single
+    /// poll. A wait that started over after each interruption would last until
+    /// the storm ends.
+    fn longest_poll_under_a_resize_storm(rig: &mut Rig, wake: Wake) -> Duration {
+        let handles = with_live_signals(&mut rig.app, wake);
+        let storm = resize_storm(Duration::from_millis(20), Duration::from_millis(1500));
         let mut longest = Duration::ZERO;
         while !storm.is_finished() {
             let started = Instant::now();
@@ -449,62 +625,65 @@ mod resize {
         longest
     }
 
-    /// Without its resize wake the terminal UI still starts: a resize is
-    /// noticed when the wait for input times out, and a resize storm still
-    /// cannot hold a poll past that timeout.
+    /// A poll waits at most 100ms, so a poll that outlasts this was held by
+    /// the storm rather than by its own timeout.
+    const NOT_HELD_PAST: Duration = Duration::from_millis(500);
+
     #[test]
-    fn the_terminal_ui_starts_without_its_resize_wake() {
-        let mut handles =
-            register_signal_handles_with(|| Err(std::io::Error::other("no socket pair")))
-                .expect("the signal handlers are registered");
-        assert!(handles.resize_wake.is_none());
-        let mut rig = Rig::new(MAXIMIZED);
-        rig.app.sigwinch_flag = Arc::clone(&handles.sigwinch_flag);
-        rig.app.resize_wake = handles.resize_wake.take();
-        let storm = resize_storm(Duration::from_millis(20), Duration::from_millis(600));
-        let mut longest = Duration::ZERO;
-        while !storm.is_finished() {
-            let started = Instant::now();
-            assert!(!rig.app.poll_run_input_from(rig.terminal.as_fd()));
-            longest = longest.max(started.elapsed());
+    fn a_resize_storm_cannot_hold_a_wait_past_its_timeout_in_any_mode() {
+        let _turn = one_at_a_time();
+        for mode in MODES {
+            let mut rig = rig_in(mode);
+            let longest = longest_poll_under_a_resize_storm(&mut rig, Wake::Working);
+            assert!(
+                longest < NOT_HELD_PAST,
+                "{mode:?}: a poll lasted {longest:?}"
+            );
+            assert_eq!(
+                rig.app.input_debugger_open(),
+                matches!(mode, Mode::InputDebugger)
+            );
         }
-        storm.join().expect("the storm thread");
+    }
+
+    /// Without its resize wake the terminal UI still starts, and a resize
+    /// ends no wait early: the poll lasts its own timeout and notes the
+    /// resize only then. This pins that bound, not the wake.
+    #[test]
+    fn without_its_resize_wake_a_resize_is_noticed_when_the_poll_times_out() {
+        // The poll's timeout is 100ms; the margin is for the clock's rounding.
+        const NOT_BEFORE: Duration = Duration::from_millis(90);
+
+        let _turn = one_at_a_time();
+        let mut rig = Rig::new(MAXIMIZED);
+        let handles = with_live_signals(&mut rig.app, Wake::Unavailable);
+        resize_elsewhere(Duration::ZERO)
+            .join()
+            .expect("deliver the resize");
+
+        let started = Instant::now();
+        assert!(!rig.app.poll_run_input_from(rig.terminal.as_fd()));
+        let waited = started.elapsed();
         unregister(&mut rig.app, handles);
+
+        assert!(
+            waited >= NOT_BEFORE,
+            "the poll ended after {waited:?}, before its timeout"
+        );
+        assert!(waited < NOT_HELD_PAST, "the poll lasted {waited:?}");
         assert!(
             rig.app.sigwinch_flag.load(Ordering::Relaxed),
             "the resize was noted"
         );
-        assert!(longest < WOKEN_WITHIN, "a poll lasted {longest:?}");
     }
 
-    /// The bound is generous: a woken poll returns within one resize's gap,
-    /// and an unwoken one lasts the whole storm.
-    const WOKEN_WITHIN: Duration = Duration::from_millis(300);
-
+    /// The same without a wake under a storm: the timeout still bounds a poll.
     #[test]
-    fn a_resize_storm_wakes_the_windowed_interface_s_wait() {
-        let mut rig = Rig::new(WINDOWED);
-        let longest = longest_poll_under_a_resize_storm(&mut rig);
-        assert!(longest < WOKEN_WITHIN, "a poll lasted {longest:?}");
-    }
-
-    #[test]
-    fn a_resize_storm_wakes_the_maximized_pane_s_wait() {
+    fn without_its_resize_wake_a_resize_storm_cannot_hold_a_wait_past_its_timeout() {
+        let _turn = one_at_a_time();
         let mut rig = Rig::new(MAXIMIZED);
-        let longest = longest_poll_under_a_resize_storm(&mut rig);
-        assert!(longest < WOKEN_WITHIN, "a poll lasted {longest:?}");
-    }
-
-    #[test]
-    fn a_resize_storm_wakes_the_input_debugger_s_wait() {
-        let mut rig = Rig::new(WINDOWED);
-        rig.app.prompt = PromptState::DebugInput {
-            lines: Vec::new(),
-            scroll_offset: 0,
-        };
-        let longest = longest_poll_under_a_resize_storm(&mut rig);
-        assert!(longest < WOKEN_WITHIN, "a poll lasted {longest:?}");
-        assert!(rig.app.input_debugger_open());
+        let longest = longest_poll_under_a_resize_storm(&mut rig, Wake::Unavailable);
+        assert!(longest < NOT_HELD_PAST, "a poll lasted {longest:?}");
     }
 }
 
@@ -669,6 +848,40 @@ mod waiting {
         rig.settle();
         let received = rig.outcome().received;
         assert!(received.ends_with("a\x1bx"), "{:?}", &received[1000..]);
+    }
+
+    /// The maximized reader decides a lone Escape by waiting out the Escape
+    /// timeout and looking again, whatever the read before it held: it has no
+    /// "the read was full" rule of its own, and the one the windowed reader
+    /// keeps is not carried across the hand-over (the maximized pane reads
+    /// 4096 bytes at a time, the windowed one 1024). So a lone Escape that
+    /// ends a full read there is an Escape key, exactly as one that ends a
+    /// short read is, and the bytes the program receives are the same.
+    #[test]
+    fn a_lone_escape_ending_a_full_read_is_the_maximized_pane_s_escape_key() {
+        let escape_then_x = |setup: Setup, before: &[u8]| {
+            let mut full = before.to_vec();
+            full.push(0x1b);
+            let mut rig = Rig::new(setup);
+            rig.type_bytes(&full);
+            rig.settle();
+            assert!(!rig.app.terminal_input.has_unread());
+            assert!(!rig.app.raw_input_parser.pending_resolves_on_timeout());
+            rig.type_bytes(b"x");
+            rig.settle();
+            let after_a_full_read = rig.outcome();
+            let after_a_short_read = paced(setup, &[before, b"\x1b", b"x"]);
+            assert_eq!(after_a_full_read, after_a_short_read);
+            assert!(after_a_full_read.received.ends_with("a\x1bx"));
+        };
+
+        // The windowed read is full at 1024 bytes and hands the rest after its
+        // maximize key to the maximized reader.
+        let mut handed_over = vec![TOGGLE[0]];
+        handed_over.extend(vec![b'a'; crate::terminal_input::READ_SIZE - 2]);
+        escape_then_x(WINDOWED, &handed_over);
+        // The maximized reader's own read is full at 4096.
+        escape_then_x(MAXIMIZED, &[b'a'; 4095]);
     }
 
     /// The status screen's turn reads what is ready and returns: the serve
@@ -1540,12 +1753,13 @@ mod host_replies {
 
     const COLOUR_REPLY: &[u8] = b"\x1b]11;rgb:0/0/0\x07";
 
-    /// The windowed interface reads it as crossterm does: Alt-], then the
-    /// reply's characters as typed keys, and its closing BEL as Ctrl-g, which
-    /// is the maximize key. That is today's behaviour, pinned so a change to
-    /// it is deliberate.
+    /// A known bug, kept on purpose for parity with what is published: the
+    /// windowed interface reads a late reply as crossterm does, Alt-], then
+    /// the reply's characters as typed keys, and its closing BEL as Ctrl-g,
+    /// which is the maximize key. The case pins it so that fixing it is a
+    /// deliberate change to this expectation.
     #[test]
-    fn the_windowed_interface_reads_a_late_reply_as_keys() {
+    fn known_bug_kept_on_purpose_the_windowed_interface_types_a_late_reply_as_keys() {
         let want = burst(WINDOWED, COLOUR_REPLY);
         assert_eq!(want.received, "\x1b]11;rgb:0/0/0");
         assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
