@@ -31,7 +31,6 @@ const refreshChanges = vi.fn()
 const openEditor = vi.fn()
 const toggleChangesPane = vi.fn()
 const openCommit = vi.fn()
-const createTerminal = vi.fn()
 
 let mockState: DuxState
 // The pane subscribes selectively and is memoized, so a new state reaches it
@@ -62,7 +61,6 @@ vi.mock("@/lib/store", async (importOriginal) => {
     openEditor: (...args: unknown[]) => openEditor(...args),
     toggleChangesPane: (...args: unknown[]) => toggleChangesPane(...args),
     openCommit: (...args: unknown[]) => openCommit(...args),
-    createTerminal: (...args: unknown[]) => createTerminal(...args),
   }
 })
 
@@ -206,7 +204,6 @@ beforeEach(() => {
   openEditor.mockClear()
   toggleChangesPane.mockClear()
   openCommit.mockClear()
-  createTerminal.mockClear()
   stageMany.mockClear()
   unstageMany.mockClear()
   discardMany.mockClear()
@@ -582,7 +579,7 @@ describe("the Changes pane header in a quiet state", () => {
   it("keeps the editor open to a folder that is there but has no repository", () => {
     mockState = folderAt("no_repo", folderStates[0]!.sentence)
     render(<ChangedFiles />)
-    const button = screen.getByLabelText("Open editor")
+    const button = editorControl()
     expect(button.hasAttribute("disabled")).toBe(false)
     fireEvent.click(button)
     expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "q1" })
@@ -591,7 +588,7 @@ describe("the Changes pane header in a quiet state", () => {
   it("greys out the editor, with the reason, once the folder is gone", async () => {
     mockState = folderAt("missing", folderStates[4]!.sentence)
     render(<ChangedFiles />)
-    const button = screen.getByLabelText("Open editor")
+    const button = editorControl()
     expect(button.hasAttribute("disabled")).toBe(true)
     expect(screen.queryByText("This folder no longer exists on disk.")).toBeNull()
     act(() => button.parentElement!.focus())
@@ -614,8 +611,7 @@ describe("the Changes pane header in a quiet state", () => {
       expect(item.getAttribute("aria-disabled"), text).toBe("true")
       expect(reasonOf(item), text).toBe("This working copy no longer exists on disk.")
     }
-    expect(screen.getByLabelText("Open editor").hasAttribute("disabled")).toBe(true)
-    expect(screen.getByLabelText("New terminal").hasAttribute("disabled")).toBe(true)
+    expect(editorControl().hasAttribute("disabled")).toBe(true)
   })
 
   it("keeps the header while the changes load and when they fail to", () => {
@@ -654,11 +650,9 @@ describe("the Changes pane header in a quiet state", () => {
       mockState = folderAt("missing", folderStates[4]!.sentence)
       render(<ChangedFiles />)
       const menu = await openMenu()
-      for (const text of ["Open editor", "New terminal"]) {
-        const item = itemOf(menu, text)
-        expect(item.getAttribute("aria-disabled"), text).toBe("true")
-        expect(reasonOf(item), text).toBe("This folder no longer exists on disk.")
-      }
+      const item = itemOf(menu, "Open editor")
+      expect(item.getAttribute("aria-disabled")).toBe("true")
+      expect(reasonOf(item)).toBe("This folder no longer exists on disk.")
       // The git items share the sentence, which the menu says once.
       expect(menu.getAllByText("This folder no longer exists on disk.")).toHaveLength(1)
     } finally {
@@ -1867,12 +1861,18 @@ describe("the changes pane's group recaps", () => {
   })
 })
 
+// The header's editor button, whichever element it is (a button on a computer,
+// a link on a phone): the one control that says the word "Editor".
+function editorControl(): HTMLElement {
+  return screen.getByText("Editor").closest("button, a")!
+}
+
 // The pane header's direct route to the editor for the agent whose changes are
 // on screen. One button, one act: the in-page overlay on a computer, the
 // standalone editor's address on a phone (where the overlay renders nothing at
 // all), with the new-tab variant left to the row menus.
-describe("the Changes pane header's Open editor button", () => {
-  const editorButton = () => screen.getByLabelText("Open editor")
+describe("the Changes pane header's Editor button", () => {
+  const editorButton = editorControl
   const actionsTrigger = () => screen.getByLabelText("Changes actions")
 
   afterEach(() => {
@@ -1919,38 +1919,44 @@ describe("the Changes pane header's Open editor button", () => {
     const button = editorButton()
     const ellipsis = actionsTrigger()
 
-    expect(button.parentElement).toBe(ellipsis.parentElement)
+    // Its fold wrapper adds no box of its own, so the cell is the closest
+    // card action, the `⋯`'s own parent.
+    expect(button.closest('[data-slot="card-action"]')).toBe(ellipsis.parentElement)
     expect(
       ellipsis.compareDocumentPosition(button) &
         Node.DOCUMENT_POSITION_PRECEDING,
     ).toBeTruthy()
     // The misclick spacing between two adjacent icon squares.
-    expect(button.parentElement!.className).toContain("gap-2")
+    expect(ellipsis.parentElement!.className).toContain("gap-2")
   })
 
-  // One cluster, one look: the editor button wears the `⋯`'s outline variant at
-  // the same height token (including the touch floor), so it reads as a button
-  // rather than a bare glyph. jsdom cannot paint, so the shared Button's variant
-  // and size classes are what is pinned.
-  it("matches the ⋯ on variant and geometry", () => {
+  // One cluster, one look: the editor button wears the `⋯`'s outline variant, so
+  // it reads as a button rather than a bare glyph. jsdom cannot paint, so the
+  // shared Button's variant classes are what is pinned.
+  it("wears the ⋯'s outline variant at the same height token", () => {
     render(<ChangedFiles />)
-    const button = editorButton()
-    const ellipsis = actionsTrigger()
-
-    for (const control of [button, ellipsis]) {
+    for (const control of [editorButton(), actionsTrigger()]) {
       const classes = control.className.split(/\s+/)
-      expect(classes).toContain("size-8")
-      expect(classes).toContain("max-md:size-11")
-      // A finger on a tablet at desktop width gets the 40px floor, and a
-      // phone keeps its 44px under the finger too.
-      expect(classes).toContain("pointer-coarse:size-10")
-      expect(classes).toContain("max-md:pointer-coarse:size-11")
       expect(classes).toContain("border-border")
+      // 32px, 40px on a phone and under a finger: a square for the ⋯, the
+      // same height for the labelled button.
+      expect(classes.some((c) => /^(size|h)-8$/.test(c))).toBe(true)
+      expect(classes.some((c) => /^max-md:(size|h)-10$/.test(c))).toBe(true)
+      expect(classes.some((c) => /^pointer-coarse:(size|h)-10$/.test(c))).toBe(true)
     }
   })
 
-  it("names itself for a screen reader and hints the same words on hover", () => {
+  it("shows the word Editor beside its icon, and the icon alone on a phone", () => {
     render(<ChangedFiles />)
+    const button = editorButton()
+    expect(button.querySelector("svg")).toBeTruthy()
+    expect(button.textContent).toBe("Editor")
+    expect(screen.getByText("Editor").className).toContain("max-md:sr-only")
+  })
+
+  it("is named Editor for a screen reader, and hints Open editor on hover", () => {
+    render(<ChangedFiles />)
+    expect(screen.getByRole("button", { name: "Editor" })).toBe(editorButton())
     const cell = editorButton().parentElement!
     expect(
       within(cell)
@@ -1968,13 +1974,13 @@ describe("the Changes pane header's Open editor button", () => {
     } as unknown as DuxState
     render(<ChangedFiles />)
 
-    expect(screen.queryByLabelText("Open editor")).toBeNull()
+    expect(screen.queryByText("Editor")).toBeNull()
     expect(screen.getByText("No session selected")).toBeTruthy()
   })
 })
 
 // jsdom lays nothing out, so the header's widths are given: its own content
-// box, the title's text and the ⋯'s square. Returns the undo.
+// box, the title's text, the editor button and the ⋯'s square. Returns the undo.
 function headerWidth(width: number): () => void {
   const spies = [
     vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(function (this: Element) {
@@ -1985,14 +1991,17 @@ function headerWidth(width: number): () => void {
       return this.getAttribute("data-slot") === "card-title" ? 67 : 0
     }),
     vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
-      return this.getAttribute("aria-label") === "Changes actions" ? 32 : 0
+      if (this.getAttribute("aria-label") === "Changes actions") return 32
+      // The editor button with its word on it.
+      return this.getAttribute("data-slot") === "button" && this.textContent === "Editor" ? 86 : 0
     }),
   ]
   return () => spies.forEach((spy) => spy.mockRestore())
 }
 
-// A narrow pane keeps its title clear of the buttons by moving the editor and
-// New terminal into the ⋯, and only there.
+// A narrow pane keeps its title clear of the buttons by moving the editor
+// button into the ⋯. It stays laid out, out of sight, so the header can still
+// measure the width it needs to come back.
 describe("the Changes pane header in a narrow pane", () => {
   let restore: () => void = () => {}
   afterEach(() => restore())
@@ -2002,31 +2011,36 @@ describe("the Changes pane header in a narrow pane", () => {
     return within(await screen.findByRole("menu"))
   }
 
-  it("moves Open editor and New terminal into the ⋯ when they do not fit", async () => {
+  // The title is 67px, the editor button 86px and the ⋯ 32px, with 0px gaps in
+  // jsdom: 185px needed plus one pixel of slack, so a pane of 185px folds and
+  // one of 186px does not.
+  it("moves Open editor into the ⋯ when the title and the button do not fit", async () => {
     restore = headerWidth(120)
     render(<ChangedFiles />)
-    expect(screen.queryByLabelText("Open editor")).toBeNull()
-    expect(screen.queryByLabelText("New terminal")).toBeNull()
+    expect(editorControl().closest(".invisible")).toBeTruthy()
 
     const items = (await openMenu()).getAllByRole("menuitem")
-    expect(items.slice(0, 2).map((item) => item.textContent)).toEqual([
-      "Open editor",
-      "New terminal",
-    ])
+    expect(items[0]!.textContent).toBe("Open editor")
     expect(items[0]!.querySelector("svg")).toBeTruthy()
-    expect(items[1]!.querySelector("svg")).toBeTruthy()
-    fireEvent.click(items[1]!)
-    expect(createTerminal).toHaveBeenCalledWith("s1")
-
-    fireEvent.click(screen.getByLabelText("Changes actions"))
-    fireEvent.click((await screen.findByRole("menu")).querySelector('[role="menuitem"]')!)
+    fireEvent.click(items[0]!)
     expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "s1" })
   })
 
-  // The recap's own text is 120px here, so a pane that holds the title and
-  // the three buttons (67 + 3 x 32 = 163px, the button gaps being 0 in jsdom)
-  // but not the recap as well keeps the buttons: the recap is what shrinks.
-  it("keeps the buttons while only the summary has to shrink", () => {
+  it("folds at the title, the button and the ⋯ plus nothing to spare, and not with a pixel over", () => {
+    restore = headerWidth(185)
+    render(<ChangedFiles />)
+    expect(editorControl().closest(".invisible")).toBeTruthy()
+    cleanup()
+    restore()
+    restore = headerWidth(186)
+    render(<ChangedFiles />)
+    expect(editorControl().closest(".invisible")).toBeNull()
+  })
+
+  // The recap's own text is 120px here, so a pane that holds the title and the
+  // buttons (67 + 86 + 32 = 185px) but not the recap as well keeps the button:
+  // the recap is what shrinks.
+  it("keeps the button while only the summary has to shrink", () => {
     restore = headerWidth(200)
     mockState = {
       selectedSessionId: "s1",
@@ -2038,8 +2052,7 @@ describe("the Changes pane header in a narrow pane", () => {
       },
     } as unknown as DuxState
     render(<ChangedFiles />)
-    expect(screen.getByLabelText("Open editor")).toBeTruthy()
-    expect(screen.getByLabelText("New terminal")).toBeTruthy()
+    expect(editorControl().closest(".invisible")).toBeNull()
     expect(screen.getByLabelText(/^Changes: .*added/)).toBeTruthy()
   })
 
@@ -2058,55 +2071,42 @@ describe("the Changes pane header in a narrow pane", () => {
     )
     restore = headerWidth(400)
     render(<ChangedFiles />)
-    screen.getByLabelText("New terminal").focus()
+    editorControl().focus()
 
     restore()
     restore = headerWidth(120)
     act(() => observers.forEach((cb) => cb()))
-    expect(screen.queryByLabelText("New terminal")).toBeNull()
+    expect(editorControl().closest(".invisible")).toBeTruthy()
     expect(document.activeElement).toBe(screen.getByLabelText("Changes actions"))
   })
 
-  it("keeps them in the header, and out of the ⋯, when they fit", async () => {
+  it("keeps it in the header, and out of the ⋯, when it fits", async () => {
     restore = headerWidth(400)
     render(<ChangedFiles />)
-    expect(screen.getByLabelText("Open editor")).toBeTruthy()
-    expect(screen.getByLabelText("New terminal")).toBeTruthy()
-    const menu = await openMenu()
-    expect(menu.queryByText("Open editor")).toBeNull()
-    expect(menu.queryByText("New terminal")).toBeNull()
+    expect(editorControl().closest(".invisible")).toBeNull()
+    expect(
+      (await openMenu()).queryByText("Open editor"),
+    ).toBeNull()
   })
 })
 
-// The header's second door to the agent's New terminal: the same shared action
-// the agent menu and the dock strip's + run, for the agent on screen.
-describe("the Changes pane header's New terminal button", () => {
-  const terminalButton = () => screen.getByLabelText("New terminal")
-
-  it("opens a terminal for the selected agent, between the editor and the ⋯", () => {
-    render(<ChangedFiles />)
-    const button = terminalButton()
-    const editor = screen.getByLabelText("Open editor")
-    const ellipsis = screen.getByLabelText("Changes actions")
-    expect(button.parentElement).toBe(ellipsis.parentElement)
-    expect(editor.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(button.compareDocumentPosition(ellipsis) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    for (const token of ["size-8", "max-md:size-11", "pointer-coarse:size-10", "border-border"]) {
-      expect(button.className.split(/\s+/)).toContain(token)
-    }
-
-    fireEvent.click(button)
-    expect(createTerminal).toHaveBeenCalledTimes(1)
-    expect(createTerminal).toHaveBeenCalledWith("s1")
-  })
-
-  it("is absent when no agent is selected", () => {
-    mockState = {
-      selectedSessionId: null,
-      changes: loadedChanges(),
-    } as unknown as DuxState
+// The Changes pane no longer has a terminal button of its own: the centre
+// pane's New tab… and the agent's menu open one.
+describe("the Changes pane header and terminals", () => {
+  it("has no New terminal button, in the header or folded into the ⋯", async () => {
     render(<ChangedFiles />)
     expect(screen.queryByLabelText("New terminal")).toBeNull()
+    expect(screen.queryByText("New terminal")).toBeNull()
+    cleanup()
+    const restore = headerWidth(120)
+    try {
+      render(<ChangedFiles />)
+      fireEvent.click(screen.getByLabelText("Changes actions"))
+      const menu = within(await screen.findByRole("menu"))
+      expect(menu.queryByText("New terminal")).toBeNull()
+    } finally {
+      restore()
+    }
   })
 })
 
@@ -2692,24 +2692,6 @@ describe("the Changes pane while this page does not drive the agent", () => {
     fireEvent.click(screen.getByLabelText("Actions for a.ts"))
     menu = within(await screen.findByRole("menu"))
     expect(itemOf(menu, "Stage").getAttribute("aria-disabled")).toBe("true")
-  })
-
-  it("names the driving device on the disabled New terminal button", async () => {
-    mockState = withFiles([], [["a.ts", "M"]])
-    act(() => {
-      retire = registerPaneCover("s1", "card", {
-        row: agentRowKey("s1"),
-        driver: "other",
-        device: "Chrome on Linux",
-      })
-    })
-    render(<ChangedFiles />)
-    // A tap on the disabled control opens its hint.
-    fireEvent.click(screen.getByLabelText("New terminal").parentElement!)
-    expect(await screen.findByText(/Take over to add a tab or a terminal/)).toBeTruthy()
-    expect(screen.getByText(/Take over to add a tab or a terminal/).textContent).toBe(
-      "This agent is active on Chrome on Linux. Take over to add a tab or a terminal",
-    )
   })
 
   // A race the page lost: the server's sentence is what the person reads.

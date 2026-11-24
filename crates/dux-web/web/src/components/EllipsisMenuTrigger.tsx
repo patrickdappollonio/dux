@@ -38,7 +38,7 @@ type Reveal = "hover" | "hover-or-focus"
 type Placement =
   | { placement: "row"; reveal?: Reveal; fit?: RowFit }
   | { placement: PillPlacement; reveal?: Reveal }
-  | { placement: "header"; fit?: "roomy"; phoneOnly?: boolean }
+  | { placement: "header"; phoneOnly?: boolean }
   | { placement: "toolbar" | "banner" | "floating" }
 
 // A union member that does not name a key still has to refuse it, or a caller
@@ -97,7 +97,7 @@ export function EllipsisMenuTrigger({
     : placement === "row"
       ? ROW_BOX[fit ?? "standard"]
       : placement === "header"
-        ? cn(HEADER_BOX[fit === "roomy" ? "roomy" : "standard"], phoneOnly && "md:hidden")
+        ? cn(HEADER_BOX, phoneOnly && "md:hidden")
         : BOX[placement]
   const trigger = (
     <DropdownMenuTrigger

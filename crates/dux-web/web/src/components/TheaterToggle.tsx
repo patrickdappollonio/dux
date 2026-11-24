@@ -2,7 +2,7 @@ import { Maximize2, Minimize2 } from "lucide-react"
 import { useRef } from "react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { Button } from "@/components/ui/button"
+import { HeaderButton } from "@/components/HeaderButton"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { toggleTheater, useDux } from "@/lib/store"
 
@@ -21,21 +21,14 @@ export function TheaterToggle({ settled = true }: { settled?: boolean }) {
   const label = theater ? "Leave theater mode" : "Theater mode"
   return (
     <SimpleTooltip content={label}>
-      <Button
+      <HeaderButton
         ref={ref}
-        variant="outline"
-        // `default` rather than `icon`: the same height as the icon-only
-        // controls beside it, so the label changes only the width. A finger
-        // gets the 40px touch height, as does the rest of the header's cluster.
-        size="default"
-        className="shrink-0 pointer-coarse:h-10"
+        icon={theater ? <Minimize2 /> : <Maximize2 />}
+        label="Theater"
         aria-label={label}
         aria-pressed={theater}
         onClick={() => toggleTheater()}
-      >
-        {theater ? <Minimize2 /> : <Maximize2 />}
-        Theater
-      </Button>
+      />
     </SimpleTooltip>
   )
 }

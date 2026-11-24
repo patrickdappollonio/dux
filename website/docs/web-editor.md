@@ -300,7 +300,7 @@ disk version, or cancel. Cancelling keeps your text exactly as typed.
 > refused the same way.
 >
 > An editor in its own browser tab edits as the tab it was opened from. Opened from the
-> device that is driving, with **Open editor in new tab** or the phone's **Open editor**,
+> device that is driving, with **Open editor in new tab** or the **Editor** button in the Changes pane's header (an icon alone on a phone),
 > it can save; when another device takes the agent over it turns read-only, and it can
 > save again once the tab it came from takes the agent back. Opened from a bookmark or a
 > pasted link, or wherever the browser gives the new tab no link back to the tab it came

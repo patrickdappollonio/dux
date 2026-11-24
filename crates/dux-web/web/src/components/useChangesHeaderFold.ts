@@ -1,27 +1,25 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react"
 
-type Part = "header" | "title" | "recap" | "trigger"
-
-// How many icon squares the header's action cell holds when nothing is folded:
-// the editor button, the New terminal button and the `⋯`.
-const UNFOLDED_BUTTONS = 3
+type Part = "header" | "title" | "recap" | "editor" | "trigger"
 
 function px(value: string): number {
   const parsed = Number.parseFloat(value)
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-// Whether the title and all three buttons fail to fit side by side. The recap
-// is not counted: it shrinks to nothing to make room, so only a pane too
-// narrow for the title and the buttons folds them. Every width read here is
-// one folding cannot move: the title's full text (`scrollWidth`, which ignores
-// its own clipping) and the three buttons counted from the `⋯`, which never
-// leaves. So the answer is the same before and after the fold it causes, and a
-// fold cannot undo itself.
+// Whether the title, the editor button and the `⋯` fail to fit side by side.
+// The recap is not counted: it shrinks to nothing to make room, so only a pane
+// too narrow for the title and the buttons folds the editor button. Every
+// width read here is one folding cannot move: the title's full text
+// (`scrollWidth`, which ignores its own clipping), the `⋯`, which never
+// leaves, and the editor button, which the header keeps laid out (out of sight
+// and out of the flow) while it is folded, because its word makes it wider than
+// the `⋯` and no other node can say by how much. So the answer is the same
+// before and after the fold it causes, and a fold cannot undo itself.
 // `null` when the header has no width to judge by (not laid out, or hidden).
 function tooNarrow(nodes: Record<Part, HTMLElement | null>): boolean | null {
-  const { header, title, recap, trigger } = nodes
-  if (!header || !title || !trigger) return null
+  const { header, title, recap, editor, trigger } = nodes
+  if (!header || !title || !editor || !trigger) return null
   const style = getComputedStyle(header)
   const room = header.clientWidth - px(style.paddingLeft) - px(style.paddingRight)
   if (room <= 0) return null
@@ -36,25 +34,27 @@ function tooNarrow(nodes: Record<Part, HTMLElement | null>): boolean | null {
     title.scrollWidth +
     titleGap +
     px(style.columnGap) +
-    UNFOLDED_BUTTONS * trigger.offsetWidth +
-    (UNFOLDED_BUTTONS - 1) * buttonGap
+    editor.offsetWidth +
+    buttonGap +
+    trigger.offsetWidth
   // `scrollWidth` rounds to whole pixels, so one pixel of slack keeps a
   // rounded-down title from touching the first button.
   return needed + 1 > room
 }
 
-/** Whether the Changes pane header folds its editor and New terminal buttons
- * into its `⋯`, with the refs the header hangs on the parts it measures. It is
- * measured when a part mounts and whenever one of them changes size (a divider
- * drag, the recap appearing or going, a pointer change resizing the buttons),
- * and at no other time, so scrolling and typing elsewhere cost nothing. A
- * missing `ResizeObserver` (jsdom) leaves the mount-time answer standing. */
+/** Whether the Changes pane header folds its editor button into its `⋯`, with
+ * the refs the header hangs on the parts it measures. It is measured when a
+ * part mounts and whenever one of them changes size (a divider drag, the recap
+ * appearing or going, a pointer change resizing the buttons), and at no other
+ * time, so scrolling and typing elsewhere cost nothing. A missing
+ * `ResizeObserver` (jsdom) leaves the mount-time answer standing. */
 export function useChangesHeaderFold() {
   const [folded, setFolded] = useState(false)
   const nodes = useRef<Record<Part, HTMLElement | null>>({
     header: null,
     title: null,
     recap: null,
+    editor: null,
     trigger: null,
   })
   const observer = useRef<ResizeObserver | null>(null)
@@ -63,7 +63,7 @@ export function useChangesHeaderFold() {
   const measure = useCallback(() => {
     const next = tooNarrow(nodes.current)
     if (next === null) return
-    // The buttons that fold are the `⋯`'s siblings.
+    // The button that folds is the `⋯`'s sibling.
     const trigger = nodes.current.trigger
     const active = document.activeElement
     focusInFolding.current =
@@ -85,6 +85,7 @@ export function useChangesHeaderFold() {
   const headerRef = useCallback((node: HTMLElement | null) => track("header", node), [track])
   const titleRef = useCallback((node: HTMLElement | null) => track("title", node), [track])
   const recapRef = useCallback((node: HTMLElement | null) => track("recap", node), [track])
+  const editorRef = useCallback((node: HTMLElement | null) => track("editor", node), [track])
   const triggerRef = useCallback((node: HTMLElement | null) => track("trigger", node), [track])
 
   // A button that folds away while it holds focus hands it to the `⋯`.
@@ -107,5 +108,5 @@ export function useChangesHeaderFold() {
     }
   }, [measure])
 
-  return { folded, headerRef, titleRef, recapRef, triggerRef }
+  return { folded, headerRef, titleRef, recapRef, editorRef, triggerRef }
 }

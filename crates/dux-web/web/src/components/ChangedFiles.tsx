@@ -28,7 +28,6 @@ import {
   Search,
   Square,
   SquareCheck,
-  SquareTerminal,
   TriangleAlert,
   Undo2,
   X,
@@ -42,6 +41,7 @@ import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { FoldedAway, HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { matchCharRanges } from "@/lib/searchMatch"
@@ -92,7 +92,6 @@ import {
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
 import {
-  createTerminal,
   forceRefreshChanges,
   openCommit,
   openDiscard,
@@ -104,7 +103,6 @@ import {
   useDuxSelector,
 } from "@/lib/store"
 import {
-  addToAgentBlockHint,
   agentChangeBlockReason,
   useAgentChangeBlockSelective,
   useRowDriverLabel,
@@ -157,12 +155,10 @@ const NO_RECAP: ChangedFilesRecap = {
 // One height for both controls in the selection row; they differ in width only.
 const SELECTION_CONTROL = "h-9 max-md:h-10 pointer-coarse:h-10"
 
-// The pane's icon squares under a finger: 40px at any width, and a phone's
-// 44px kept whatever its pointer. The last class is not redundant: Tailwind
-// emits `pointer-coarse:` after `max-md:`, so without it a phone with a finger
-// would drop to 40.
-const TOUCH_ICON = "max-md:size-11 pointer-coarse:size-10 max-md:pointer-coarse:size-11"
-// The same rule for a control whose height alone is set.
+// A control whose height alone is set, under a finger: 40px at any width, and
+// a phone's 44px kept whatever its pointer. The last class is not redundant:
+// Tailwind emits `pointer-coarse:` after `max-md:`, so without it a phone with a
+// finger would drop to 40.
 const TOUCH_MIN_HEIGHT = "max-md:min-h-11 pointer-coarse:min-h-10 max-md:pointer-coarse:min-h-11"
 
 // The row's one leading slot: the status marker and the selection checkbox
@@ -864,9 +860,12 @@ function GroupHeader({
 // "Open editor here", so there is no second way to keep in step. The new-tab
 // variant stays a menu item.
 //
-// On a phone the overlay does not exist, so this is a real `<a>` to the
-// standalone editor's address, which also keeps long-press and middle-click
-// doing what the browser makes them do.
+// It carries the word "Editor" beside its icon on a computer, because a lone
+// glyph is the control nobody finds; a phone keeps the icon alone, as phones
+// prefer, and the tooltip and the accessible name say the word either way. On a
+// phone the overlay does not exist, so this is a real `<a>` to the standalone
+// editor's address, which also keeps long-press and middle-click doing what the
+// browser makes them do.
 //
 // It matches the `⋯` on variant as well as geometry. It navigates rather than
 // acts, and the tenet would let it be quieter, but a ghost glyph beside an
@@ -876,95 +875,65 @@ function GroupHeader({
 // The editor needs the agent's directory and nothing else, so a quiet pane
 // keeps it live; only a directory that is gone greys it out, with `unavailable`
 // saying so through the shared tooltip on a focusable wrapper.
+//
+// `folded` takes it out of the header's flow and out of sight (`invisible`, so
+// it is no stop for the keyboard or a screen reader either) while the header
+// has moved it into the `⋯`, but keeps it laid out, so the header can still
+// measure the width it would need to come back.
 function OpenEditorButton({
   sessionId,
   isMobile,
   unavailable,
+  folded,
+  buttonRef,
 }: {
   sessionId: string
   isMobile: boolean
   unavailable: string | null
+  folded: boolean
+  buttonRef: (node: HTMLElement | null) => void
 }) {
   const root = agentRoot(sessionId)
-  const label = "Open editor"
   const shared = {
-    size: "icon",
-    variant: "outline",
-    "aria-label": label,
-    className: TOUCH_ICON,
+    ref: buttonRef,
+    icon: <FileCode2 />,
+    label: "Editor",
+    // A phone keeps the icon alone.
+    words: "computer",
   } as const
   if (unavailable !== null) {
     // A plain disabled button on both form factors: a disabled anchor is not
     // a thing, and there is no address worth keeping for a root that is gone.
     return (
-      <ExplainedWhenDisabled disabled hint={unavailable} className="rounded-lg">
-        <Button {...shared} disabled>
-          <FileCode2 />
-        </Button>
-      </ExplainedWhenDisabled>
+      <FoldedAway folded={folded}>
+        <ExplainedWhenDisabled disabled hint={unavailable} className="rounded-lg">
+          <HeaderButton {...shared} disabled />
+        </ExplainedWhenDisabled>
+      </FoldedAway>
     )
   }
   return (
-    <SimpleTooltip content={label}>
-      {isMobile ? (
-        <Button
-          {...shared}
-          // It really is an anchor, so the primitive is told not to expect a
-          // native <button>: a link keeps a link's own semantics and gestures.
-          nativeButton={false}
-          render={
-            <a
-              href={standaloneEditorHash(root)}
-              target="_blank"
-              rel={EDITOR_TAB_REL}
-            />
-          }
-        >
-          <FileCode2 />
-        </Button>
-      ) : (
-        <Button {...shared} onClick={() => openEditor(root)}>
-          <FileCode2 />
-        </Button>
-      )}
-    </SimpleTooltip>
-  )
-}
-
-// A second door to the agent's own New terminal, the one its menu and its dock
-// strip's `+` run: a shell owned by this agent, in its worktree or its folder,
-// that docks under it. Same outline square as the editor button beside it, and
-// greyed with the same reason when the directory is gone, since that directory
-// is where the shell would start.
-function NewTerminalButton({
-  sessionId,
-  unavailable,
-}: {
-  sessionId: string
-  unavailable: string | null
-}) {
-  const label = "New terminal"
-  const shared = {
-    size: "icon",
-    variant: "outline",
-    "aria-label": label,
-    className: TOUCH_ICON,
-  } as const
-  if (unavailable !== null) {
-    return (
-      <ExplainedWhenDisabled disabled hint={unavailable} className="rounded-lg">
-        <Button {...shared} disabled>
-          <SquareTerminal />
-        </Button>
-      </ExplainedWhenDisabled>
-    )
-  }
-  return (
-    <SimpleTooltip content={label}>
-      <Button {...shared} onClick={() => createTerminal(sessionId)}>
-        <SquareTerminal />
-      </Button>
-    </SimpleTooltip>
+    <FoldedAway folded={folded}>
+      <SimpleTooltip content="Open editor">
+        {isMobile ? (
+          <HeaderButton
+            {...shared}
+            // It really is an anchor, so the primitive is told not to expect a
+            // native <button>: a link keeps a link's own semantics and gestures.
+            nativeButton={false}
+            render={
+              <a
+                href={standaloneEditorHash(root)}
+                target="_blank"
+                rel={EDITOR_TAB_REL}
+              />
+            }
+          />
+        ) : (
+          <HeaderButton {...shared} onClick={() => openEditor(root)} />
+        )}
+      </SimpleTooltip>
+    </FoldedAway>
   )
 }
 
@@ -988,8 +957,8 @@ interface ChangesHeaderProps {
 
 // The pane's one header, in every state an agent can put the pane in: loaded,
 // loading, failed, and every quiet one. A quiet pane is still a pane the user
-// may want to hide, open the editor from or open a terminal from, so the title,
-// the editor and terminal actions and the ⋯ never leave with the list.
+// may want to hide or open the editor from, so the title, the editor button and
+// the ⋯ never leave with the list.
 function ChangesHeader({
   sessionId,
   stagedCount,
@@ -1002,15 +971,9 @@ function ChangesHeader({
 }: ChangesHeaderProps) {
   const reasonId = useId()
   const editorReasonId = useId()
-  const terminalReasonId = useId()
-  const { folded, headerRef, titleRef, recapRef, triggerRef } = useChangesHeaderFold()
-  // While this device does not drive the agent, a terminal opened here would
-  // join a row it does not drive, so New terminal is disabled with that
-  // reason, unless the gone directory already gave it one.
+  const { folded, headerRef, titleRef, recapRef, editorRef, triggerRef } =
+    useChangesHeaderFold()
   const driver = useRowDriverLabel({ sessionId })
-  const terminalBlocked =
-    editorBlocked ??
-    (changeBlock === null ? null : addToAgentBlockHint(changeBlock, driver))
   // Commit, push and pull write, so a page that does not drive the agent gets
   // them greyed with that reason; Refresh only reads, so it is greyed for a
   // quiet pane alone.
@@ -1020,13 +983,10 @@ function ChangesHeader({
   // screen reader hears why on the item itself while sighted readers see it
   // once at the head of the menu rather than repeated under each row.
   const blocked = writeBlocked !== null
-  // Folded, the editor and terminal items carry their own reason the same way.
-  // A gone directory greys both kinds of item with one sentence, which the
-  // menu then says once, above the editor items, for all of them.
+  // Folded, the editor item carries its own reason the same way. A gone
+  // directory greys it and the git items with one sentence, which the menu
+  // then says once, above the editor item, for all of them.
   const editorReason = folded ? editorBlocked : null
-  const terminalReason = folded ? terminalBlocked : null
-  // Said once, above the editor items, when it is the editor's reason too.
-  const terminalReasonOwn = terminalReason !== null && terminalReason !== editorReason
   const gitReasonShared = editorReason !== null && writeBlocked === editorReason
   const describedBy = blocked
     ? gitReasonShared
@@ -1060,27 +1020,22 @@ function ChangesHeader({
         <ChangesRecap ref={recapRef} scope="Changes" recap={recap} />
       </div>
       {/* The cell is a row of its own: `gap-2` is the misclick spacing between
-        * the editor button, the terminal button and the `⋯`, adjacent icon
-        * squares of one size. When the title and all three do not
-        * fit (the recap shrinks first and is not counted), the editor and
-        * terminal buttons fold into the ⋯ as its first items, and come back
-        * once the pane is wide enough again. */}
-      <CardAction className="flex shrink-0 items-center gap-2 self-center">
-        {folded ? null : (
-          <>
-            <OpenEditorButton
-              sessionId={sessionId}
-              isMobile={isMobile}
-              unavailable={editorBlocked}
-            />
-            <NewTerminalButton sessionId={sessionId} unavailable={terminalBlocked} />
-          </>
-        )}
+        * the editor button and the `⋯`. When the title, the editor button with
+        * its word and the `⋯` do not fit (the recap shrinks first and is not
+        * counted), the editor button folds into the ⋯ as its first item, and
+        * comes back once the pane is wide enough again. */}
+      <CardAction className={cn(HEADER_BUTTON_ROW, "relative self-center")}>
+        <OpenEditorButton
+          sessionId={sessionId}
+          isMobile={isMobile}
+          unavailable={editorBlocked}
+          folded={folded}
+          buttonRef={editorRef}
+        />
         <DropdownMenu>
           <EllipsisMenuTrigger
             ref={triggerRef}
             placement="header"
-            fit="roomy"
             aria-label="Changes actions"
           />
           <DropdownMenuContent align="end">
@@ -1114,29 +1069,6 @@ function ChangesHeader({
                     <FileCode2 />
                     Open editor
                   </DropdownMenuItem>
-                  {/* A group of its own, because the primitive's label part
-                    * names its group, for a reason only this item has. */}
-                  <DropdownMenuGroup>
-                    {terminalReasonOwn ? (
-                      <DropdownMenuLabel id={terminalReasonId} className="max-w-64">
-                        {terminalReason}
-                      </DropdownMenuLabel>
-                    ) : null}
-                    <DropdownMenuItem
-                      disabled={terminalReason !== null}
-                      aria-describedby={
-                        terminalReason === null
-                          ? undefined
-                          : terminalReasonOwn
-                            ? terminalReasonId
-                            : editorReasonId
-                      }
-                      onClick={() => createTerminal(sessionId)}
-                    >
-                      <SquareTerminal />
-                      New terminal
-                    </DropdownMenuItem>
-                  </DropdownMenuGroup>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
               </>

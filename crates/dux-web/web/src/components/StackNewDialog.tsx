@@ -5,7 +5,7 @@ import { useState, type ReactNode } from "react"
 import { IconTile } from "@/components/IconTile"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
-import { Button } from "@/components/ui/button"
+import { HeaderButton } from "@/components/HeaderButton"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   addToAgentBlockHint,
@@ -42,18 +42,12 @@ export function NewTabButton({ session }: { session: SessionView }) {
         hint={block === null ? "New agent tab or terminal" : addToAgentBlockHint(block, device)}
         className="rounded-lg"
       >
-        <Button
-          variant="outline"
-          // `default` like Theater and Macros beside it: one height, and the
-          // label changes only the width. 40px tall under a finger, like them.
-          size="default"
-          className="shrink-0 pointer-coarse:h-10"
+        <HeaderButton
+          icon={<Plus />}
+          label="New tab…"
           disabled={block !== null}
           onClick={() => setAdding(true)}
-        >
-          <Plus />
-          New tab…
-        </Button>
+        />
       </ExplainedWhenDisabled>
       {dialog}
     </>

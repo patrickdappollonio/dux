@@ -1,6 +1,6 @@
 import { Settings } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
+import { HeaderButton } from "@/components/HeaderButton"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -92,12 +92,7 @@ export function AppMenu() {
           Visible text supplies the accessible name so voice commands can match
           "Settings". */}
       <DropdownMenuTrigger
-        render={
-          <Button variant="outline" className="pointer-coarse:h-10">
-            <Settings />
-            Settings
-          </Button>
-        }
+        render={<HeaderButton icon={<Settings />} label="Settings" />}
       />
       <DropdownMenuContent align="end" side="bottom">
         <AppMenuBody />

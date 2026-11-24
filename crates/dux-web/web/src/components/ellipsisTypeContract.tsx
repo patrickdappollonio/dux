@@ -8,7 +8,7 @@ export function EllipsisTypeContract() {
   return (
     <>
       <EllipsisMenuTrigger placement="row" reveal="hover" fit="slim" aria-label="Row" />
-      <EllipsisMenuTrigger placement="header" fit="roomy" phoneOnly aria-label="Header" />
+      <EllipsisMenuTrigger placement="header" phoneOnly aria-label="Header" />
       <EllipsisMenuTrigger placement="tab-pill" reveal="hover-or-focus" aria-label="Pill" />
       {/* @ts-expect-error a pill's box is its own, roomy or not */}
       <EllipsisMenuTrigger placement="tab-pill" fit="roomy" aria-label="Pill" />
@@ -18,7 +18,9 @@ export function EllipsisTypeContract() {
       <EllipsisMenuTrigger placement="tab-pill" phoneOnly aria-label="Pill" />
       {/* @ts-expect-error a row's fits are alternatives, never two at once */}
       <EllipsisMenuTrigger placement="row" fit={["slim", "roomy"]} aria-label="Row" />
-      {/* @ts-expect-error a header is roomy or it is not; slim and compact are a row's */}
+      {/* @ts-expect-error a header's box is one, and its neighbours share it; no fit is a header's */}
+      <EllipsisMenuTrigger placement="header" fit="roomy" aria-label="Header" />
+      {/* @ts-expect-error no fit is a header's, slim and compact being a row's */}
       <EllipsisMenuTrigger placement="header" fit="slim" aria-label="Header" />
       {/* @ts-expect-error a row is never left out of the computer layout */}
       <EllipsisMenuTrigger placement="row" phoneOnly aria-label="Row" />
