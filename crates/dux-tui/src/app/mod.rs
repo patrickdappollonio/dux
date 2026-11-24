@@ -4429,7 +4429,7 @@ enum RunInputReader {
     Debugger,
     /// The raw path that forwards typing to a program.
     Forwarding,
-    /// crossterm's decoded events.
+    /// The windowed interface's, which reads events as crossterm decodes them.
     Structured,
 }
 
@@ -5383,11 +5383,7 @@ pub(crate) use pr_clone::{PrFolder, PrReviewQuestion};
 mod input_handover_tests;
 mod project_actions;
 mod pty_ownership;
-#[cfg(test)]
-mod raw_input_handover_tests;
 mod redraw;
-#[cfg(test)]
-mod typed_burst_tests;
 pub(crate) use redraw::RedrawGate;
 #[cfg(test)]
 mod ellipsis_rows;
@@ -5974,6 +5970,23 @@ impl App {
         self.engine
     }
 
+    /// Leave every byte this interface has read and not acted on for the
+    /// surface that takes the terminal next, the start-web-server status screen.
+    pub(crate) fn leave_unread_input_for_next_surface(&mut self) {
+        let mut unread = self.raw_input_parser.pending().to_vec();
+        self.raw_input_parser.clear();
+        self.raw_input_buf.clear();
+        unread.extend(self.debug_raw_input.take_partial_sequence());
+        unread.extend(self.terminal_input.take_bytes());
+        crate::terminal_input::leave_for_next_surface(&unread);
+    }
+
+    /// Take what the surface before this interface left unread, to read first.
+    pub(crate) fn take_unread_input_from_last_surface(&mut self) {
+        let left = crate::terminal_input::take_from_last_surface().take_bytes();
+        self.terminal_input.give_back(&left);
+    }
+
     pub(crate) fn run(&mut self) -> Result<RunExit> {
         let mode = self.begin_extended_keys();
         self.start_run_services();
@@ -6327,11 +6340,10 @@ impl App {
     }
 
     /// Which reader takes this iteration's input: the input debugger's own
-    /// while it is open, or while it still holds input read after it closed (a
-    /// paste still arriving, an unfinished sequence); else the forwarding path
-    /// when it is typing into a program; else crossterm's.
+    /// while it is open, else the forwarding path when it is typing into a
+    /// program, else the windowed interface's.
     fn run_input_reader(&self) -> RunInputReader {
-        if self.input_debugger_open() || self.debug_raw_input.holds_input_for_main_ui() {
+        if self.input_debugger_open() {
             RunInputReader::Debugger
         } else if self.should_poll_raw_input() {
             RunInputReader::Forwarding

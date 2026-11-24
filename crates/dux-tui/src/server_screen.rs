@@ -28,13 +28,13 @@
 use crate::numeric::usize_to_u16_wrapping;
 use std::collections::VecDeque;
 use std::io::{Stdout, Write, stdout};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Result;
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll as poll_event, read as read_event,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{cursor, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -171,7 +171,7 @@ enum ScreenKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExitKind {
+pub(crate) enum ExitKind {
     ReturnToTui,
     QuitProcess,
 }
@@ -435,6 +435,7 @@ pub struct ServerStatusScreen {
     /// Whether the shutdown's wait is over: its first message is the start (the
     /// wait begins), the next is the result (the wait has ended).
     shutdown_done: bool,
+    keys: ScreenKeys,
 }
 
 impl std::fmt::Debug for ServerStatusScreen {
@@ -491,6 +492,7 @@ impl ServerStatusScreen {
             dirty: false,
             shutdown_message: None,
             shutdown_done: false,
+            keys: ScreenKeys::new(),
         };
         screen.sync();
         screen.draw(0)?;
@@ -502,23 +504,29 @@ impl ServerStatusScreen {
     /// should take. Rendering errors are swallowed: a failed redraw must not
     /// crash the server or strand the user; the next tick retries.
     pub fn tick(&mut self) -> ServerScreenTick {
-        while poll_event(Duration::ZERO).unwrap_or(false) {
-            match read_event() {
-                Ok(Event::Key(key)) => match screen_key(key, &self.bindings) {
-                    Some(ScreenKey::Exit(ExitKind::ReturnToTui)) => {
-                        return ServerScreenTick::ReturnToTui;
-                    }
-                    Some(ScreenKey::Exit(ExitKind::QuitProcess)) => {
-                        return ServerScreenTick::QuitProcess;
-                    }
-                    Some(ScreenKey::Scroll(action)) => self.scroll_by(action),
-                    None => {}
-                },
-                Ok(Event::Resize(_, _)) => self.dirty = true,
-                Ok(_) => {}
-                // A read error shouldn't kill the server; ignore and continue.
-                Err(_) => break,
+        let stdin = std::io::stdin();
+        let bindings = &self.bindings;
+        let mut scrolls = Vec::new();
+        let exit = read_screen_keys(&mut self.keys, stdin.as_fd(), |key| {
+            match screen_key(key, bindings) {
+                Some(ScreenKey::Exit(exit)) => Some(exit),
+                Some(ScreenKey::Scroll(action)) => {
+                    scrolls.push(action);
+                    None
+                }
+                None => None,
             }
+        });
+        for action in scrolls {
+            self.scroll_by(action);
+        }
+        match exit {
+            Some(ExitKind::ReturnToTui) => return ServerScreenTick::ReturnToTui,
+            Some(ExitKind::QuitProcess) => return ServerScreenTick::QuitProcess,
+            None => {}
+        }
+        if self.keys.take_resized() {
+            self.dirty = true;
         }
 
         let secs = self.started.elapsed().as_secs();
@@ -558,7 +566,13 @@ impl ServerStatusScreen {
     /// resize, a scroll or when the log moved, and say whether a Ctrl-c asked to
     /// stop waiting and quit now.
     pub fn shutdown_tick(&mut self) -> bool {
-        let turn = shutdown_turn(pending_events(), &self.bindings);
+        let stdin = std::io::stdin();
+        let keys = &mut self.keys;
+        let mut turn = shutdown_turn(
+            std::iter::from_fn(|| keys.next_event(stdin.as_fd())),
+            &self.bindings,
+        );
+        turn.redraw |= self.keys.take_resized();
         for action in &turn.scrolls {
             self.scroll_by(*action);
         }
@@ -750,13 +764,106 @@ fn shutdown_turn(
     turn
 }
 
-/// The events already waiting, without blocking. A failed poll ends the list.
-fn pending_events() -> impl Iterator<Item = std::io::Result<Event>> {
-    std::iter::from_fn(|| match poll_event(Duration::ZERO) {
-        Ok(true) => Some(read_event()),
-        Ok(false) => None,
-        Err(err) => Some(Err(err)),
-    })
+/// The status screen's reader of its terminal. It starts with what the
+/// windowed interface left unread, and leaves what it does not read for the
+/// interface that comes back after it.
+#[derive(Debug)]
+pub(crate) struct ScreenKeys {
+    input: crate::terminal_input::TerminalInput,
+    resized: Arc<AtomicBool>,
+    resize_sig_id: Option<signal_hook::SigId>,
+}
+
+impl ScreenKeys {
+    fn new() -> Self {
+        let mut keys = Self::unwatched();
+        match signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&keys.resized))
+        {
+            Ok(id) => keys.resize_sig_id = Some(id),
+            // Without it the screen redraws on its next uptime second.
+            Err(_) => keys.resize_sig_id = None,
+        }
+        keys
+    }
+
+    /// A reader that notices no resize.
+    pub(crate) fn unwatched() -> Self {
+        Self {
+            input: crate::terminal_input::take_from_last_surface(),
+            resized: Arc::new(AtomicBool::new(false)),
+            resize_sig_id: None,
+        }
+    }
+
+    /// The next event of the bytes waiting, decoded as crossterm decodes them,
+    /// reading one more chunk from `terminal` when the decoded ones run out.
+    /// `None` once nothing more is ready.
+    fn next_event(&mut self, terminal: BorrowedFd<'_>) -> Option<std::io::Result<Event>> {
+        loop {
+            if let Some(event) = self.input.next_event() {
+                return Some(Ok(event));
+            }
+            match read_ready_chunk(terminal, &mut self.input) {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(err) => return Some(Err(err)),
+            }
+        }
+    }
+
+    /// Whether the window was resized since the last ask.
+    fn take_resized(&self) -> bool {
+        self.resized.swap(false, Ordering::Relaxed)
+    }
+}
+
+impl Drop for ScreenKeys {
+    fn drop(&mut self) {
+        if let Some(id) = self.resize_sig_id.take() {
+            signal_hook::low_level::unregister(id);
+        }
+        crate::terminal_input::leave_for_next_surface(&self.input.take_bytes());
+    }
+}
+
+/// Add one chunk `terminal` has ready to `input`, without waiting. Whether
+/// there was one.
+fn read_ready_chunk(
+    terminal: BorrowedFd<'_>,
+    input: &mut crate::terminal_input::TerminalInput,
+) -> std::io::Result<bool> {
+    use rustix::event::{PollFd, PollFlags, poll};
+
+    let zero = rustix::time::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let mut fds = [PollFd::new(&terminal, PollFlags::IN)];
+    if crate::io_retry::retry_on_interrupt_errno(|| poll(&mut fds, Some(&zero)))? == 0 {
+        return Ok(false);
+    }
+    let mut buf = [0u8; crate::terminal_input::READ_SIZE];
+    let n = crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(terminal, &mut buf))?;
+    input.push_read(&buf[..n]);
+    Ok(n > 0)
+}
+
+/// Act on the keys waiting on `terminal` with `on_key` until one of them asks
+/// to leave the screen, which leaves every byte after it unread. A read that
+/// fails ends the turn.
+pub(crate) fn read_screen_keys(
+    keys: &mut ScreenKeys,
+    terminal: BorrowedFd<'_>,
+    mut on_key: impl FnMut(KeyEvent) -> Option<ExitKind>,
+) -> Option<ExitKind> {
+    while let Some(Ok(event)) = keys.next_event(terminal) {
+        if let Event::Key(key) = event
+            && let Some(exit) = on_key(key)
+        {
+            return Some(exit);
+        }
+    }
+    None
 }
 
 /// Clamp the scroll position to what there is, and only then decide what the

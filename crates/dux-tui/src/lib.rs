@@ -182,7 +182,8 @@ pub fn resume_after_server(
     // so the resumed TUI does not replay a stale passthrough backlog to the host
     // terminal it is only now taking back.
     engine.discard_passthrough_backlog();
-    let app = app::App::resume(*engine)?;
+    let mut app = app::App::resume(*engine)?;
+    app.take_unread_input_from_last_surface();
     run_app(app, companion)
 }
 
@@ -205,6 +206,7 @@ fn run_app(
             urls,
             startup,
         } => {
+            app.leave_unread_input_for_next_surface();
             // Serving headless: `auto` identity now resolves to the forced
             // ghostty identity for agents launched under the server. Existing
             // PTYs keep their spawn-time env until relaunch.

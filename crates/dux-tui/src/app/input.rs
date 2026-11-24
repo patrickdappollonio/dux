@@ -225,15 +225,6 @@ pub(super) fn read_raw_chunk(
     crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(&fd, &mut *buf))
 }
 
-/// Wait up to `timeout` for `fd` to have something to read, and say whether it
-/// does. A zero timeout only looks.
-pub(super) fn wait_for_input(
-    fd: &impl std::os::fd::AsFd,
-    timeout: Duration,
-) -> rustix::io::Result<bool> {
-    Ok(wait_for_input_or_wake(fd.as_fd(), None, timeout)?.input)
-}
-
 /// What a wait for the terminal ended on; neither when it timed out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Waited {
@@ -242,7 +233,8 @@ pub(super) struct Waited {
 }
 
 /// Wait up to `timeout` for `fd` to have something to read or `wake` to become
-/// readable. A signal that interrupts the wait does not restart its timeout.
+/// readable; a zero timeout only looks. A signal that interrupts the wait does
+/// not restart its timeout.
 pub(super) fn wait_for_input_or_wake(
     fd: std::os::fd::BorrowedFd<'_>,
     wake: Option<std::os::fd::BorrowedFd<'_>>,
@@ -3918,7 +3910,9 @@ impl App {
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
-        dispatch.flush(self);
+        // Stamped here too: a click can leave the pane, which moves the target
+        // the stamp is resolved from.
+        dispatch.flush_and_stamp(self);
         if self.handle_takeover_card_mouse(mouse) || self.handle_dormant_card_mouse(mouse) {
             return RawInputFlow::Continue;
         }
@@ -42488,9 +42482,9 @@ cyan = "#00ffff"
     }
 
     /// The debugger reads the terminal's raw bytes itself, with no agent
-    /// selected: each key shows its label, its kind and its bytes, a key
-    /// crossterm held when the debugger took over shows first with its bytes
-    /// not seen, and only an unmodified Escape closes it.
+    /// selected: each key shows its label, its kind and its bytes, a key that
+    /// reaches it already decoded shows with its bytes not seen, and only an
+    /// unmodified Escape closes it.
     #[test]
     fn debug_input_records_a_key_then_escape_closes_it() {
         let mut app = test_app(default_bindings());
@@ -42498,12 +42492,12 @@ cyan = "#00ffff"
         assert!(app.selected_session().is_none());
         open_input_debugger(&mut app);
 
-        let mut held = vec![crossterm::event::Event::Key(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-        ))]
-        .into_iter();
-        assert!(!app.hand_debug_input_over(|| held.next()));
+        assert!(
+            !app.handle_terminal_event(crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )))
+        );
         assert!(!app.record_debug_input_bytes(b"\x1b[108;6u"));
         let rows = debugger_rows(&app);
         assert_eq!(rows.len(), 4, "two entries of two rows each: {rows:#?}");
@@ -42574,7 +42568,6 @@ cyan = "#00ffff"
         assert!(matches!(app.prompt, PromptState::None));
 
         open_input_debugger(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
         app.record_debug_input_bytes(b"\x1b[27u");
         assert!(matches!(app.prompt, PromptState::None));
     }
@@ -42586,7 +42579,6 @@ cyan = "#00ffff"
         let mut app = app_with_minimized_typeable_caret_child("");
         app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
         open_input_debugger(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
         app.record_debug_input_bytes(b"\x1b[108;6uab\x1b[13;2u\x1b[200~text\x1b[201~");
         app.record_debug_input_bytes(b"\x1b[27u");
         assert!(matches!(app.prompt, PromptState::None));

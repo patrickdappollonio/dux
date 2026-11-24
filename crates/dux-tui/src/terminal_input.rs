@@ -51,17 +51,17 @@ pub(crate) struct TerminalInput {
 /// the status screen back to a new interface on the resume.
 static BETWEEN_SURFACES: Mutex<TerminalInput> = Mutex::new(TerminalInput::new());
 
-/// Leave what `input` holds for the next surface to read, after anything an
-/// earlier surface left that nobody has taken yet.
-pub(crate) fn leave_for_next_surface(mut input: TerminalInput) {
-    if input.is_empty() {
+/// Leave `bytes` for the next surface to read, after anything an earlier
+/// surface left that nobody has taken yet.
+pub(crate) fn leave_for_next_surface(bytes: &[u8]) {
+    if bytes.is_empty() {
         return;
     }
-    let mut slot = BETWEEN_SURFACES
+    BETWEEN_SURFACES
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let bytes = input.take_bytes();
-    slot.unread.extend(bytes);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unread
+        .extend(bytes);
 }
 
 /// Take what the last surface left unread.
@@ -93,6 +93,7 @@ impl TerminalInput {
     }
 
     /// Whether nothing is held at all, a begun sequence included.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.unread.is_empty() && self.partial.is_empty()
     }

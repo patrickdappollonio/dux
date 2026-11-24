@@ -101,11 +101,80 @@ fn bytes_given_back_come_before_a_sequence_already_begun() {
     );
 }
 
-const CROSSTERM_CHILD:&str = "terminal_input::tests::child_records_crossterm_events";
+/// The files a guard reads, under this crate's `src`.
+fn source_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read the source folder") {
+        let path = entry.expect("a source entry").path();
+        if path.is_dir() {
+            source_files(&path, files);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+}
 
-/// Not a test on its own: run as a child in a pseudo-terminal, it appends a
-/// line per event crossterm's own reader returns to `<dir>/events`.
+/// Whether `source` reaches crossterm's event reader, as far as its text shows:
+/// a qualified `crossterm::event::poll` or `read` (through ratatui's re-export
+/// too), `read` or `poll` named in a `use crossterm::event::{…}` list, an
+/// `EventStream`, or `event::poll(` or `event::read(` in a file that imports
+/// crossterm's `event` module.
+fn reaches_crossterm_s_reader(source: &str) -> bool {
+    let imports_module = source.contains("use crossterm::event;")
+        || source.contains("use crossterm::event::{self")
+        || source.contains("use ratatui::crossterm::event;");
+    let imports_reader = source
+        .match_indices("crossterm::event::{")
+        .any(|(at, opening)| {
+            let list = &source[at + opening.len()..];
+            let list = &list[..list.find('}').unwrap_or(list.len())];
+            list.split(',').any(|item| {
+                let name = item.split_whitespace().next().unwrap_or_default();
+                name == "read" || name == "poll"
+            })
+        });
+    source.contains("crossterm::event::read")
+        || source.contains("crossterm::event::poll")
+        || source.contains("EventStream")
+        || imports_reader
+        || (imports_module && (source.contains("event::poll(") || source.contains("event::read(")))
+}
+
+/// crossterm's event reader, once polled, reads the terminal into a queue of
+/// its own that no other reader sees, so a byte it took would never reach the
+/// buffer every reader of the terminal UI shares. `dux config` runs as its own
+/// command, and this file's differential test drives crossterm in a child.
 #[test]
+fn nothing_in_the_terminal_ui_reads_through_crossterm_s_event_reader() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    source_files(&src, &mut files);
+    let allowed = ["config_cli.rs", "terminal_input_tests.rs"];
+    let readers: Vec<_> = files
+        .iter()
+        .filter(|path| {
+            !allowed
+                .iter()
+                .any(|name| path.file_name().is_some_and(|file| file == *name))
+        })
+        .filter(|path| {
+            reaches_crossterm_s_reader(&std::fs::read_to_string(path).expect("read a source file"))
+        })
+        .collect();
+    assert!(readers.is_empty(), "reads through crossterm: {readers:#?}");
+    assert!(
+        reaches_crossterm_s_reader(
+            &std::fs::read_to_string(src.join("config_cli.rs")).expect("read config_cli.rs")
+        ),
+        "the guard no longer sees the one reader it allows"
+    );
+}
+
+const CROSSTERM_CHILD: &str = "terminal_input::tests::child_records_crossterm_events";
+
+/// Run as a child in a pseudo-terminal, it appends a line per event crossterm's
+/// own reader returns to `<dir>/events`.
+#[test]
+#[ignore = "runs only as the child of a test in this file, in a pseudo-terminal"]
 fn child_records_crossterm_events() {
     let Some(dir) = child_dir() else {
         return;
@@ -120,30 +189,78 @@ fn child_records_crossterm_events() {
     }
 }
 
-/// Feed `items` to crossterm's real reader in a child, one write each, and
-/// return the lines it recorded once they stop coming.
-fn crossterm_events_of(items: &[Vec<u8>]) -> Vec<String> {
-    let child = PtyChild::start(CROSSTERM_CHILD, "");
+/// Written last: once crossterm has decoded it, it has decoded everything
+/// before it. No corpus or fuzzed item makes Ctrl-Alt-Shift-F12.
+const END_OF_ITEMS: &[u8] = b"\x1b[24;8~";
+
+/// The most bytes one write to the child carries. Each write waits for the
+/// child to have decoded the one before, so the child reads it whole, in one
+/// read, from an otherwise empty terminal.
+const WRITE_SIZE: usize = 256;
+
+/// Whole items grouped into writes of at most [`WRITE_SIZE`] bytes.
+fn writes_of(items: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut writes: Vec<Vec<u8>> = vec![Vec::new()];
     for item in items {
-        child.type_bytes(item);
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    let events = child.dir.path().join("events");
-    let mut last = (u64::MAX, Instant::now());
-    loop {
-        let len = std::fs::metadata(&events).map_or(0, |meta| meta.len());
-        if len != last.0 {
-            last = (len, Instant::now());
-        } else if last.1.elapsed() > Duration::from_millis(800) {
-            break;
+        let last = writes.last_mut().expect("a write");
+        if !last.is_empty() && last.len() + item.len() > WRITE_SIZE {
+            writes.push(item.clone());
+        } else {
+            last.extend_from_slice(item);
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
-    std::fs::read_to_string(events)
-        .expect("events")
+    writes
+}
+
+/// The events dux decodes from `writes`, one read each, as lines.
+fn our_events(writes: &[Vec<u8>]) -> Vec<String> {
+    let reads: Vec<&[u8]> = writes.iter().map(Vec::as_slice).collect();
+    events_of_reads(&reads)
+        .iter()
+        .map(|event| format!("{event:?}"))
+        .collect()
+}
+
+fn lines_of(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+/// Feed `writes` to crossterm's real reader in a child, each once the child
+/// has decoded the one before as dux does, and return what it decoded. A write
+/// that crossterm decodes differently stops the feed once its wait runs out.
+fn crossterm_events_of(writes: &[Vec<u8>]) -> Vec<String> {
+    let child = PtyChild::start(CROSSTERM_CHILD, "");
+    let events = child.dir.path().join("events");
+    for (sent, write) in writes.iter().enumerate() {
+        child.type_bytes(write);
+        let want = our_events(&writes[..=sent]).len();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lines_of(&events).len() < want && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if lines_of(&events).len() != want {
+            break;
+        }
+    }
+    child.type_bytes(END_OF_ITEMS);
+    let end = format!("{:?}", events_of_reads(&[END_OF_ITEMS])[0]);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut lines = lines_of(&events);
+        if lines.last() == Some(&end) {
+            lines.pop();
+            return lines;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "crossterm never decoded the end marker; it decoded {lines:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Deterministic fragments a fuzzed item is built from. No `0` digit and no bare
@@ -312,12 +429,9 @@ fn fuzzed(count: usize, mut seed: u64) -> Vec<Vec<u8>> {
 }
 
 fn assert_same_as_crossterm(items: &[Vec<u8>]) {
-    let reads: Vec<&[u8]> = items.iter().map(Vec::as_slice).collect();
-    let ours: Vec<String> = events_of_reads(&reads)
-        .iter()
-        .map(|event| format!("{event:?}"))
-        .collect();
-    let theirs = crossterm_events_of(items);
+    let writes = writes_of(items);
+    let ours = our_events(&writes);
+    let theirs = crossterm_events_of(&writes);
     let first_difference = ours.iter().zip(&theirs).position(|(a, b)| a != b);
     assert!(
         ours == theirs,
@@ -329,6 +443,8 @@ fn assert_same_as_crossterm(items: &[Vec<u8>]) {
     );
 }
 
+// These compare dux's decoder with the crossterm in Cargo.lock, so run them
+// again after every crossterm upgrade.
 #[test]
 fn every_hand_picked_sequence_decodes_as_crossterm_reads_it() {
     assert_same_as_crossterm(&corpus());

@@ -144,7 +144,9 @@ impl Rig {
     }
 
     fn terminal_has_bytes(&self) -> bool {
-        input::wait_for_input(&self.terminal.as_fd(), Duration::ZERO).expect("look at the socket")
+        input::wait_for_input_or_wake(self.terminal.as_fd(), None, Duration::ZERO)
+            .expect("look at the socket")
+            .input
     }
 
     /// Whether every byte typed so far has been taken by a reader that can
@@ -241,8 +243,15 @@ fn app_typing_into(received: &Path, setup: Setup) -> (App, Option<Box<dyn std::a
     } else {
         let mut app = test_app(default_bindings());
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        let client = PtyClient::spawn("sh", &["-c".to_string(), script], Path::new("."), 5, 80, 100)
-            .expect("spawn the embedded program");
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), script],
+            Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn the embedded program");
         app.engine.providers.insert(TabId::new(slot_tab), client);
         app.center_mode = CenterMode::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
@@ -420,5 +429,592 @@ mod resize {
         let longest = longest_poll_under_a_resize_storm(&mut rig);
         assert!(longest < WOKEN_WITHIN, "a poll lasted {longest:?}");
         assert!(rig.app.input_debugger_open());
+    }
+}
+
+/// Keys around the fullscreen toggle, which hands input from the windowed
+/// interface's reader to the maximized pane's and back.
+mod maximize_and_back {
+    use super::*;
+
+    #[test]
+    fn text_around_the_maximize_key_reaches_the_program_in_order() {
+        let want = assert_burst_matches_paced(WINDOWED, &[b"ab", TOGGLE, b"cd"]);
+        assert_eq!(want.received, "abcd");
+        assert_eq!(
+            (want.target, want.fullscreen),
+            (InputTarget::Agent, FullscreenOverlay::Agent)
+        );
+        assert_every_cut_matches(WINDOWED, b"ab\x07cd", &want);
+    }
+
+    #[test]
+    fn text_around_the_leave_key_reaches_the_program_in_order() {
+        let want = assert_burst_matches_paced(MAXIMIZED, &[b"ab", TOGGLE, b"cd"]);
+        assert_eq!(want.received, "abcd");
+        assert_eq!(
+            (want.target, want.fullscreen),
+            (InputTarget::None, FullscreenOverlay::None)
+        );
+        assert_every_cut_matches(MAXIMIZED, b"ab\x07cd", &want);
+    }
+
+    #[test]
+    fn maximize_leave_and_maximize_again_in_one_read() {
+        let want =
+            assert_burst_matches_paced(WINDOWED, &[b"a", TOGGLE, b"b", TOGGLE, b"c", TOGGLE, b"d"]);
+        assert_eq!(want.received, "abcd");
+        assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// Ctrl-Shift-g, Ctrl-i and Ctrl-m reach the program as their classic
+    /// bytes and the pane stays maximized; a Super chord with no classic form
+    /// is dropped.
+    #[test]
+    fn extended_chords_after_the_maximize_key_reach_the_program_in_their_classic_form() {
+        let setup = Setup {
+            keys: Keys::Extended,
+            ..WINDOWED
+        };
+        let pieces: &[&[u8]] = &[
+            TOGGLE,
+            b"\x1b[103;6u",
+            b"\x1b[105;5u",
+            b"\x1b[109;5u",
+            b"\x1b[103;9u",
+            b"z",
+        ];
+        let want = assert_burst_matches_paced(setup, pieces);
+        assert_eq!(want.received, "\x07\t\rz");
+        assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
+        assert_every_cut_matches(setup, &pieces.concat(), &want);
+    }
+
+    /// With extended keys off the maximized pane forwards a `CSI … u` as it came.
+    #[test]
+    fn chords_after_the_maximize_key_with_extended_keys_off_are_forwarded_as_sent() {
+        let want = assert_burst_matches_paced(WINDOWED, &[TOGGLE, b"\x1b[103;6u", b"z"]);
+        assert_eq!(want.received, "\x1b[103;6uz");
+    }
+
+    #[test]
+    fn extended_chords_after_the_leave_key_reach_the_windowed_interface() {
+        let setup = Setup {
+            keys: Keys::Extended,
+            ..MAXIMIZED
+        };
+        let pieces: &[&[u8]] = &[TOGGLE, b"\x1b[105;5u", b"\x1b[109;5u", b"z"];
+        let want = assert_burst_matches_paced(setup, pieces);
+        assert_every_cut_matches(setup, &pieces.concat(), &want);
+    }
+
+    /// The program never enabled bracketed paste, so the maximized pane sends
+    /// the paste's line breaks as carriage returns: loose keys would keep the
+    /// line feed.
+    #[test]
+    fn a_paste_just_after_the_maximize_key_arrives_whole() {
+        let pieces: &[&[u8]] = &[TOGGLE, b"\x1b[200~p1\np2\x1b[201~", b"z"];
+        let want = assert_burst_matches_paced(WINDOWED, pieces);
+        assert_eq!(want.received, "p1\rp2z");
+        assert_every_cut_matches(WINDOWED, &pieces.concat(), &want);
+    }
+
+    /// A toggle inside a paste is pasted text, before the switch as after it.
+    #[test]
+    fn a_paste_that_holds_the_toggle_is_one_paste() {
+        let pieces: &[&[u8]] = &[b"\x1b[200~a\x07b\x1b[201~", TOGGLE, b"c"];
+        let want = assert_burst_matches_paced(WINDOWED, pieces);
+        assert_eq!(want.received, "a\x07bc");
+        assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
+        assert_every_cut_matches(WINDOWED, &pieces.concat(), &want);
+    }
+
+    #[test]
+    fn a_paste_just_after_the_leave_key_arrives_whole() {
+        let pieces: &[&[u8]] = &[TOGGLE, b"\x1b[200~q1\nq2\x1b[201~"];
+        let want = assert_burst_matches_paced(MAXIMIZED, pieces);
+        assert_eq!(want.received, "q1\rq2");
+        assert_every_cut_matches(MAXIMIZED, &pieces.concat(), &want);
+    }
+
+    #[test]
+    fn a_mouse_click_and_focus_reports_straddling_the_maximize_key() {
+        let setup = Setup {
+            program: Program::ReadsMouse,
+            ..WINDOWED
+        };
+        let pieces: &[&[u8]] = &[
+            b"\x1b[I",
+            TOGGLE,
+            b"\x1b[<0;20;10M",
+            b"\x1b[<0;20;10m",
+            b"\x1b[O",
+        ];
+        let want = assert_burst_matches_paced(setup, pieces);
+        assert!(want.received.contains("[<0;"), "{want:?}");
+        assert_every_cut_matches(setup, &pieces.concat(), &want);
+    }
+
+    #[test]
+    fn a_mouse_click_and_focus_reports_straddling_the_leave_key() {
+        let setup = Setup {
+            program: Program::ReadsMouse,
+            ..MAXIMIZED
+        };
+        let pieces: &[&[u8]] = &[
+            b"\x1b[I",
+            TOGGLE,
+            b"\x1b[<0;20;10M",
+            b"\x1b[<0;20;10m",
+            b"\x1b[O",
+        ];
+        let want = assert_burst_matches_paced(setup, pieces);
+        assert_every_cut_matches(setup, &pieces.concat(), &want);
+    }
+
+    #[test]
+    fn a_lone_escape_just_after_the_maximize_key_reaches_the_program() {
+        let want = assert_burst_matches_paced(WINDOWED, &[TOGGLE, b"\x1b"]);
+        assert_eq!(want.received, "\x1b");
+    }
+
+    #[test]
+    fn a_lone_escape_just_after_the_leave_key_reaches_the_windowed_interface() {
+        let want = assert_burst_matches_paced(MAXIMIZED, &[TOGGLE, b"\x1b"]);
+        assert_eq!(
+            want.received, "\x1b",
+            "the windowed pane types into the program"
+        );
+        assert_eq!(want.fullscreen, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn an_arrow_key_after_either_key_arrives_whole_however_the_reads_cut_it() {
+        for setup in [WINDOWED, MAXIMIZED] {
+            let want = assert_burst_matches_paced(setup, &[TOGGLE, b"\x1b[A", b"x"]);
+            assert_every_cut_matches(setup, b"\x07\x1b[Ax", &want);
+        }
+    }
+
+    #[test]
+    fn non_latin_text_crosses_either_key_whole_however_the_reads_cut_it() {
+        for setup in [WINDOWED, MAXIMIZED] {
+            let pieces: &[&[u8]] = &["漢".as_bytes(), TOGGLE, "字é".as_bytes()];
+            let want = assert_burst_matches_paced(setup, pieces);
+            assert_every_cut_matches(setup, &pieces.concat(), &want);
+        }
+        let want = paced(WINDOWED, &["漢".as_bytes(), TOGGLE, "字é".as_bytes()]);
+        assert_eq!(want.received, "漢字é");
+    }
+
+    /// Nothing is left in any reader's queue once a burst has been read.
+    #[test]
+    fn nothing_is_left_held_after_a_burst_across_either_key() {
+        for setup in [WINDOWED, MAXIMIZED] {
+            let mut rig = Rig::new(setup);
+            rig.type_bytes(b"a\x07b\x07c\x1b[A");
+            rig.settle();
+            assert!(rig.app.terminal_input.is_empty());
+            assert_eq!(rig.app.raw_input_parser.pending(), b"");
+            assert_eq!(rig.app.raw_input_buf, b"");
+            assert!(!rig.app.debug_raw_input.holds_partial_sequence());
+        }
+    }
+}
+
+/// Keys around a key that opens a dialog or an overlay, or takes over the pane
+/// from another device, in the same read.
+mod dialogs_and_take_over {
+    use super::*;
+
+    fn default_key(action: Action) -> Vec<u8> {
+        default_bindings()
+            .byte_patterns_for(action)
+            .into_iter()
+            .next()
+            .expect("the action has a default key")
+    }
+
+    /// The palette key in the window opens the palette and what follows is
+    /// typed into its search field.
+    #[test]
+    fn the_palette_key_opens_the_palette_and_takes_what_follows() {
+        let palette = default_key(Action::OpenPalette);
+        let pieces: &[&[u8]] = &[b"ab", &palette, b"cd"];
+        let want = assert_burst_matches_paced(WINDOWED, pieces);
+        assert_eq!(want.received, "ab");
+        assert_eq!(want.prompt, "Command");
+        assert_every_cut_matches(WINDOWED, &pieces.concat(), &want);
+    }
+
+    /// The macro bar key with no macros to show leaves typing with the program.
+    #[test]
+    fn the_macro_bar_key_with_nothing_to_show_keeps_typing_with_the_program() {
+        let macro_bar = default_key(Action::OpenMacroBar);
+        let pieces: &[&[u8]] = &[b"ab", &macro_bar, b"cd"];
+        let want = assert_burst_matches_paced(MAXIMIZED, pieces);
+        assert_eq!(want.received, "abcd");
+        assert_every_cut_matches(MAXIMIZED, &pieces.concat(), &want);
+    }
+
+    /// With the take-over card up in fullscreen, typing reaches nothing until
+    /// the take-over key; what follows it in the same read reaches the program
+    /// once the claim has landed, as it does typed a moment later.
+    #[test]
+    fn keys_after_the_take_over_key_reach_the_program_once_it_is_taken_over() {
+        let setup = Setup {
+            driver: Driver::Browser,
+            ..MAXIMIZED
+        };
+        let take_over = default_key(Action::FocusAgent);
+        let pieces: &[&[u8]] = &[b"ab", &take_over, b"cd"];
+        let want = assert_burst_matches_paced(setup, pieces);
+        assert_eq!(want.received, "cd");
+        assert_eq!(
+            (want.target, want.fullscreen),
+            (InputTarget::Agent, FullscreenOverlay::Agent)
+        );
+        assert_every_cut_matches(setup, &pieces.concat(), &want);
+    }
+}
+
+/// Mouse reports in the same read as a click that leaves the maximized pane.
+mod clicks {
+    use super::*;
+
+    fn left(kind: u8, column: u16, row: u16) -> Vec<u8> {
+        format!("\x1b[<0;{};{}{}", column + 1, row + 1, char::from(kind)).into_bytes()
+    }
+
+    /// A press outside the maximized pane leaves it; its release, read with
+    /// it, reaches the windowed interface, as it does when it comes a moment
+    /// later.
+    #[test]
+    fn the_release_of_a_click_that_leaves_the_maximized_pane_reaches_the_windowed_interface() {
+        let pieces: &[&[u8]] = &[&left(b'M', 0, 0), &left(b'm', 0, 0), b"z"];
+        let want = assert_burst_matches_paced(MAXIMIZED, pieces);
+        assert_eq!(want.fullscreen, FullscreenOverlay::None);
+        assert_eq!(
+            want.received, "z",
+            "the windowed pane types into the program"
+        );
+        assert_every_cut_matches(MAXIMIZED, &pieces.concat(), &want);
+    }
+
+    /// Text read with a click that leaves the maximized pane reaches the
+    /// program as typing, before the pane is left.
+    #[test]
+    fn text_read_with_a_click_that_leaves_the_maximized_pane_reaches_the_program_as_typing() {
+        let pieces: &[&[u8]] = &[b"ab", &left(b'M', 0, 0)];
+        let want = assert_burst_matches_paced(MAXIMIZED, pieces);
+        assert_eq!(want.received, "ab");
+        assert_eq!(want.fullscreen, FullscreenOverlay::None);
+
+        let mut rig = Rig::new(MAXIMIZED);
+        let tab = rig.app.engine.sessions[0].slot_tab_id().to_string();
+        rig.type_bytes(&pieces.concat());
+        rig.settle();
+        assert!(
+            rig.app.engine.pty_input.contains_key(&tab),
+            "the text counted as typing"
+        );
+    }
+}
+
+/// Keys around the hand-over of the terminal to the start-web-server status
+/// screen and back to a new interface when serving stops.
+mod status_screen {
+    use std::sync::MutexGuard;
+
+    use crossterm::event::KeyCode;
+
+    use super::*;
+    use crate::server_screen::{ExitKind, ScreenKeys, read_screen_keys};
+
+    /// What one surface leaves for the next is process-wide, so the cases that
+    /// pass bytes through it take turns.
+    static BETWEEN_SURFACES: Mutex<()> = Mutex::new(());
+
+    fn take_turn() -> MutexGuard<'static, ()> {
+        let turn = BETWEEN_SURFACES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(crate::terminal_input::take_from_last_surface());
+        turn
+    }
+
+    /// One turn of the status screen over `typed`, where `q` returns to dux.
+    /// Returns the keys it acted on, the return key included.
+    fn screen_turn(keys: &mut ScreenKeys, typed: &[u8]) -> (Vec<KeyCode>, Option<ExitKind>) {
+        use std::io::Write as _;
+        let (terminal, mut keyboard) = UnixStream::pair().expect("a socket pair");
+        keyboard.write_all(typed).expect("type into the screen");
+        let mut seen = Vec::new();
+        let exit = read_screen_keys(keys, terminal.as_fd(), |key| {
+            seen.push(key.code);
+            (key.code == KeyCode::Char('q')).then_some(ExitKind::ReturnToTui)
+        });
+        (seen, exit)
+    }
+
+    #[test]
+    fn half_a_key_held_by_the_maximized_pane_at_the_flip_completes_on_the_status_screen() {
+        let _turn = take_turn();
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        rig.app.leave_unread_input_for_next_surface();
+        let mut keys = ScreenKeys::unwatched();
+        assert_eq!(screen_turn(&mut keys, b"A"), (vec![KeyCode::Up], None));
+    }
+
+    #[test]
+    fn half_a_key_held_by_the_windowed_interface_at_the_flip_completes_on_the_status_screen() {
+        let _turn = take_turn();
+        let mut rig = Rig::new(WINDOWED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        rig.app.leave_unread_input_for_next_surface();
+        let mut keys = ScreenKeys::unwatched();
+        assert_eq!(screen_turn(&mut keys, b"A"), (vec![KeyCode::Up], None));
+    }
+
+    /// Keys read with the status screen's return key reach the interface that
+    /// comes back, and never a later status screen.
+    #[test]
+    fn keys_read_with_the_return_key_reach_the_interface_that_comes_back() {
+        let _turn = take_turn();
+        let mut keys = ScreenKeys::unwatched();
+        assert_eq!(
+            screen_turn(&mut keys, b"q\x1b[Ax"),
+            (vec![KeyCode::Char('q')], Some(ExitKind::ReturnToTui))
+        );
+        drop(keys);
+
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.take_unread_input_from_last_surface();
+        rig.settle();
+        assert!(
+            crate::terminal_input::take_from_last_surface().is_empty(),
+            "nothing is left for a later status screen"
+        );
+        let outcome = rig.outcome();
+        assert_eq!(
+            outcome.received, "\x1b[Ax",
+            "the windowed pane types into the program"
+        );
+    }
+
+    #[test]
+    fn half_a_key_read_with_the_return_key_completes_in_the_interface_that_comes_back() {
+        let _turn = take_turn();
+        let mut keys = ScreenKeys::unwatched();
+        assert_eq!(
+            screen_turn(&mut keys, b"q\x1b["),
+            (vec![KeyCode::Char('q')], Some(ExitKind::ReturnToTui))
+        );
+        drop(keys);
+
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.take_unread_input_from_last_surface();
+        rig.type_bytes(b"A");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "\x1b[A");
+    }
+
+    /// A flip and a return with nothing typed leave nothing behind.
+    #[test]
+    fn a_flip_and_a_return_with_nothing_typed_carry_nothing() {
+        let _turn = take_turn();
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.leave_unread_input_for_next_surface();
+        let mut keys = ScreenKeys::unwatched();
+        assert_eq!(screen_turn(&mut keys, b""), (vec![], None));
+        drop(keys);
+        assert!(crate::terminal_input::take_from_last_surface().is_empty());
+    }
+}
+
+/// Keys around the input debugger opening and closing in the same read.
+mod input_debugger {
+    use super::*;
+
+    /// An unmodified Escape the debugger reads without waiting out the Escape
+    /// ambiguity, as a terminal with extended keys sends it.
+    const CLOSE: &[u8] = b"\x1b[27u";
+
+    fn open_debugger(rig: &mut Rig) {
+        rig.app.prompt = PromptState::DebugInput {
+            lines: Vec::new(),
+            scroll_offset: 0,
+        };
+    }
+
+    fn with_debugger_open(pieces: &[&[u8]]) -> Outcome {
+        let mut rig = Rig::new(WINDOWED);
+        open_debugger(&mut rig);
+        for piece in pieces {
+            rig.type_bytes(piece);
+            rig.settle();
+        }
+        rig.outcome()
+    }
+
+    /// Whatever follows the closing Escape in its read does what it does when
+    /// it arrives after the debugger has closed.
+    #[test]
+    fn keys_read_with_the_closing_escape_act_as_they_do_after_it() {
+        for rest in [
+            &b"ab"[..],
+            b"\x1b[A",
+            b"\x1b[1;5R",
+            b"\x1bOx",
+            b"\x1b[M #(",
+            b"\x1b[200~p1\np2\x1b[201~",
+            "漢é".as_bytes(),
+            b"\x1b[105;5u",
+            b"\x1b]11;rgb:0/0/0\x07",
+        ] {
+            let paced = with_debugger_open(&[CLOSE, rest]);
+            let burst = with_debugger_open(&[&[CLOSE, rest].concat()]);
+            assert_eq!(burst, paced, "{rest:?} read with the closing Escape");
+            assert_eq!(paced.prompt, "None");
+        }
+    }
+
+    #[test]
+    fn a_key_cut_by_the_read_after_the_closing_escape_arrives_whole() {
+        let typed = [CLOSE, b"\x1b[Ax"].concat();
+        let want = with_debugger_open(&[CLOSE, b"\x1b[Ax"]);
+        assert_eq!(want.received, "\x1b[Ax");
+        for at in CLOSE.len()..typed.len() {
+            if typed[at - 1] == 0x1b {
+                continue;
+            }
+            let mut rig = Rig::new(WINDOWED);
+            open_debugger(&mut rig);
+            rig.type_bytes(&typed[..at]);
+            rig.turn();
+            rig.type_bytes(&typed[at..]);
+            rig.settle();
+            assert_eq!(rig.outcome(), want, "cut at {at}");
+        }
+    }
+
+    /// Bytes the windowed interface had not read when a key opened the
+    /// debugger are the debugger's to show.
+    #[test]
+    fn keys_read_with_the_key_that_opens_the_debugger_are_shown_by_it() {
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.terminal_input.push_read(b"x");
+        open_debugger(&mut rig);
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "");
+        assert_eq!(outcome.debugger_lines, 2, "a key row and its bytes row");
+    }
+
+    #[test]
+    fn nothing_is_left_with_the_debugger_after_it_closes() {
+        let mut rig = Rig::new(WINDOWED);
+        open_debugger(&mut rig);
+        rig.type_bytes(&[CLOSE, b"\x1b["].concat());
+        rig.settle();
+        assert!(!rig.app.input_debugger_open());
+        assert!(!rig.app.debug_raw_input.holds_partial_sequence());
+        assert_eq!(rig.app.run_input_reader(), RunInputReader::Structured);
+    }
+}
+
+/// What only a real terminal shows: the run loop reading its own stdin in raw
+/// mode, and the kernel's SIGWINCH when the window is resized. The child runs
+/// in a pseudo-terminal the test types into and resizes.
+mod real_terminal {
+    use super::*;
+    use crate::pty_child::{PtyChild, child_dir, wait_until};
+
+    const CHILD: &str = "app::input_handover_tests::real_terminal::child_runs_the_run_loop_s_input";
+
+    #[test]
+    #[ignore = "runs only as the child of a test in this module, in a pseudo-terminal"]
+    fn child_runs_the_run_loop_s_input() {
+        let Some(dir) = child_dir() else {
+            return;
+        };
+        let (mut app, _serving) = app_typing_into(&dir.join("received"), WINDOWED);
+        let mut handles = register_signal_handles().expect("register the signal handlers");
+        app.sigwinch_flag = Arc::clone(&handles.sigwinch_flag);
+        app.resize_wake = handles.resize_wake.take();
+        let mut screen = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+            .expect("a test screen");
+        crossterm::terminal::enable_raw_mode().expect("raw mode on the child's terminal");
+        std::fs::write(dir.join("ready"), b"").expect("ready marker");
+        let mut resizes = 0;
+        while !dir.join("done").exists() {
+            screen.draw(|frame| app.render(frame)).expect("draw");
+            assert!(!app.poll_run_input(), "the app asked to exit");
+            if app.sigwinch_flag.swap(false, Ordering::Relaxed) {
+                resizes += 1;
+            }
+        }
+        // The resize was sent before the done marker was written, so it has
+        // landed by now even when it landed after the last poll.
+        if app.sigwinch_flag.swap(false, Ordering::Relaxed) {
+            resizes += 1;
+        }
+        let _ = crossterm::terminal::disable_raw_mode();
+        let report = format!(
+            "resized {}\ntarget {:?}\nfullscreen {:?}",
+            resizes > 0,
+            app.input_target,
+            app.fullscreen_overlay
+        );
+        std::fs::write(dir.join("result.tmp"), report).expect("result file");
+        std::fs::rename(dir.join("result.tmp"), dir.join("result")).expect("result file");
+    }
+
+    #[test]
+    fn a_burst_across_the_maximize_key_and_a_resize_reach_the_run_loop_from_a_real_terminal() {
+        let child = PtyChild::start(CHILD, "");
+        let received = child.dir.path().join("received");
+        child.type_bytes(b"ab\x07cd");
+        wait_until(
+            Duration::from_secs(30),
+            "the program to receive abcd",
+            || std::fs::read(&received).unwrap_or_default() == b"abcd",
+        );
+        child.resize(30, 100);
+        let report = child.finish();
+        assert_eq!(
+            report, "resized true\ntarget Agent\nfullscreen Agent",
+            "{report}"
+        );
+    }
+}
+
+/// A terminal's late answer to a question dux asked, such as its background
+/// colour, arriving as input.
+mod host_replies {
+    use super::*;
+
+    const COLOUR_REPLY: &[u8] = b"\x1b]11;rgb:0/0/0\x07";
+
+    /// The windowed interface reads it as crossterm does: Alt-], then the
+    /// reply's characters as typed keys, and its closing BEL as Ctrl-g, which
+    /// is the maximize key. That is today's behaviour, pinned so a change to
+    /// it is deliberate.
+    #[test]
+    fn the_windowed_interface_reads_a_late_reply_as_keys() {
+        let want = burst(WINDOWED, COLOUR_REPLY);
+        assert_eq!(want.received, "\x1b]11;rgb:0/0/0");
+        assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// The maximized pane knows a reply's shape and types none of it.
+    #[test]
+    fn the_maximized_pane_types_none_of_a_late_reply() {
+        let want = burst(MAXIMIZED, COLOUR_REPLY);
+        assert_eq!(want.received, "");
+        assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
     }
 }
