@@ -1377,15 +1377,6 @@ struct ResourceMonitorColumns {
 }
 
 impl ResourceMonitorColumns {
-    /// The CPU heading: it says "all cores" whenever the column is wide enough.
-    fn cpu_heading(&self) -> &'static str {
-        if self.cpu_w == RESOURCE_MONITOR_CPU_WIDE_W {
-            RESOURCE_MONITOR_CPU_HEADING
-        } else {
-            RESOURCE_MONITOR_CPU_SHORT_HEADING
-        }
-    }
-
     /// Number of visible columns, used to compute inter-column spacing.
     fn visible_count(&self) -> u16 {
         3 + u16::from(self.show_pid) + u16::from(self.show_procs) // Name + CPU + RSS + optionals
@@ -1395,11 +1386,6 @@ impl ResourceMonitorColumns {
 const RESOURCE_MONITOR_PID_W: u16 = 8;
 const RESOURCE_MONITOR_PROCS_W: u16 = 6;
 const RESOURCE_MONITOR_CPU_W: u16 = 8;
-/// The CPU column when the room allows the heading that says what the figures
-/// are a share of; see [`resource_monitor_columns`].
-const RESOURCE_MONITOR_CPU_WIDE_W: u16 = 17;
-const RESOURCE_MONITOR_CPU_HEADING: &str = "CPU % (all cores)";
-const RESOURCE_MONITOR_CPU_SHORT_HEADING: &str = "CPU %";
 const RESOURCE_MONITOR_RSS_W: u16 = 12;
 /// Floor below which the Name column is no longer considered readable and
 /// we drop another column instead of shrinking it further.
@@ -1429,21 +1415,9 @@ fn resource_row_expand_indicator(
     }
 }
 
-/// The columns that fit. The CPU column is wide enough to say "all cores" in its
-/// heading only while PID and Procs still fit beside it; a narrower terminal
-/// keeps the short heading and the short column rather than lose a column or
-/// squeeze the name.
 fn resource_monitor_columns(inner_width: u16) -> ResourceMonitorColumns {
-    let wide = plan_resource_monitor_columns(inner_width, RESOURCE_MONITOR_CPU_WIDE_W);
-    if wide.show_pid && wide.show_procs {
-        return wide;
-    }
-    plan_resource_monitor_columns(inner_width, RESOURCE_MONITOR_CPU_W)
-}
-
-fn plan_resource_monitor_columns(inner_width: u16, cpu_w: u16) -> ResourceMonitorColumns {
     let try_plan = |show_pid: bool, show_procs: bool| -> Option<ResourceMonitorColumns> {
-        let mut fixed = cpu_w + RESOURCE_MONITOR_RSS_W;
+        let mut fixed = RESOURCE_MONITOR_CPU_W + RESOURCE_MONITOR_RSS_W;
         let mut visible_cols = 3u16; // Name, CPU %, RSS
         if show_pid {
             fixed += RESOURCE_MONITOR_PID_W;
@@ -1468,7 +1442,7 @@ fn plan_resource_monitor_columns(inner_width: u16, cpu_w: u16) -> ResourceMonito
             name_w: name_w.max(1),
             pid_w: RESOURCE_MONITOR_PID_W,
             procs_w: RESOURCE_MONITOR_PROCS_W,
-            cpu_w,
+            cpu_w: RESOURCE_MONITOR_CPU_W,
             rss_w: RESOURCE_MONITOR_RSS_W,
         })
     };
@@ -1480,11 +1454,11 @@ fn plan_resource_monitor_columns(inner_width: u16, cpu_w: u16) -> ResourceMonito
             show_pid: false,
             show_procs: false,
             name_w: inner_width
-                .saturating_sub(cpu_w + RESOURCE_MONITOR_RSS_W + 2)
+                .saturating_sub(RESOURCE_MONITOR_CPU_W + RESOURCE_MONITOR_RSS_W + 2)
                 .max(1),
             pid_w: RESOURCE_MONITOR_PID_W,
             procs_w: RESOURCE_MONITOR_PROCS_W,
-            cpu_w,
+            cpu_w: RESOURCE_MONITOR_CPU_W,
             rss_w: RESOURCE_MONITOR_RSS_W,
         })
 }
@@ -15286,7 +15260,7 @@ impl App {
         if columns.show_procs {
             header_cells.push(Cell::from("Procs").style(header_style));
         }
-        header_cells.push(Cell::from(columns.cpu_heading()).style(header_style));
+        header_cells.push(Cell::from("CPU %").style(header_style));
         header_cells.push(Cell::from("RSS").style(header_style));
         let header = Row::new(header_cells);
 
@@ -24907,10 +24881,7 @@ mod tests {
     fn resource_monitor_columns_never_drops_cpu_or_rss() {
         for width in [10u16, 20, 40, 60, 100, 200] {
             let cols = resource_monitor_columns(width);
-            assert!(
-                cols.cpu_w == RESOURCE_MONITOR_CPU_W || cols.cpu_w == RESOURCE_MONITOR_CPU_WIDE_W,
-                "the CPU column is the short one or the one with its heading in full"
-            );
+            assert_eq!(cols.cpu_w, RESOURCE_MONITOR_CPU_W);
             assert_eq!(cols.rss_w, RESOURCE_MONITOR_RSS_W);
         }
     }
@@ -24961,10 +24932,6 @@ mod tests {
                 .find(|line| line.contains(needle))
                 .unwrap_or_else(|| panic!("no row with {needle}"))
         };
-        assert!(
-            line_of("Name").contains("CPU % (all cores)"),
-            "with room, the heading says what the figures are a share of"
-        );
         assert!(line_of("a-small-one").contains("<0.1%"));
         assert!(line_of("an-idle-one").contains("0.0%"));
         assert!(!line_of("an-idle-one").contains("<0.1%"));

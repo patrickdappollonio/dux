@@ -23,7 +23,3 @@ export function formatCpu(percent: number): string {
   if (percent > 0 && text === "0.0") return "<0.1%"
   return `${text}%`
 }
-
-// What the CPU column counts, said once beside the poll cadence where the table has no room
-// for it on every row. The TUI's heading says the same in its own column.
-export const CPU_SCOPE_NOTE = "CPU is of all cores"

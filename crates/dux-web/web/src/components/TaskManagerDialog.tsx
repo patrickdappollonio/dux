@@ -24,7 +24,7 @@ import { useIsMobile, useIsNarrowComputerLayout } from "@/hooks/use-mobile"
 import { useIsTruncated } from "@/hooks/use-truncated"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { formatRegularCount } from "@/lib/formatRegularCount"
-import { CPU_SCOPE_NOTE, formatBytes, formatCpu } from "@/lib/formatStats"
+import { formatBytes, formatCpu } from "@/lib/formatStats"
 import {
   RESOURCE_POLL_INTERVAL_MS,
   nextPollDelay,
@@ -280,7 +280,7 @@ function TaskManager({ open, onClosed }: { open: boolean; onClosed: () => void }
                 <th className="py-1 pr-2 text-left font-medium">Name</th>
                 <th className="w-[4.5rem] py-1 pr-2 text-right font-medium">PID</th>
                 <th className="w-14 py-1 pr-2 text-right font-medium">Procs</th>
-                <th className="w-32 py-1 pr-2 text-right font-medium whitespace-nowrap">CPU (all cores)</th>
+                <th className="w-20 py-1 pr-2 text-right font-medium">CPU</th>
                 <th className="w-24 py-1 pr-2 text-right font-medium">Memory</th>
                 <th className="w-28 py-1" />
               </tr>
@@ -333,7 +333,7 @@ function LivePollPill({ intervalMs }: { intervalMs: number }) {
         aria-hidden
         className="size-2 shrink-0 fill-current agent-status-dot agent-status-dot--on"
       />
-      Updating {pollIntervalLabel(intervalMs)} · {CPU_SCOPE_NOTE}
+      Updating {pollIntervalLabel(intervalMs)}
     </span>
   )
 }

@@ -883,17 +883,8 @@ describe("TaskManagerDialog", () => {
     seed({ spine: { sessions: [] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
     expect(
-      await screen.findByText(new RegExp(`^Updating every ${RESOURCE_POLL_INTERVAL_MS / 1000}s`)),
+      await screen.findByText(`Updating every ${RESOURCE_POLL_INTERVAL_MS / 1000}s`),
     ).toBeTruthy()
-  })
-
-  it("says_what_the_cpu_figures_are_a_share_of", async () => {
-    // The column heading on a computer, and the status line on both layouts (a phone
-    // has no headings, so the line is where it is said).
-    seed({ spine: { sessions: [] } } as Partial<DuxState>)
-    render(<TaskManagerDialog />)
-    expect(await screen.findByText(/Updating every 1s · CPU is of all cores/)).toBeTruthy()
-    expect(screen.getByRole("columnheader", { name: "CPU (all cores)" })).toBeTruthy()
   })
 
   it("the_live_pills_dot_reuses_the_already_reduced_motion_safe_status_dot", async () => {
