@@ -225,6 +225,13 @@ pub(super) fn read_raw_chunk(
     crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(&fd, &mut *buf))
 }
 
+/// Whether a read failing with `err` says the terminal is gone for good: the
+/// device hung up or vanished, or the descriptor no longer names it.
+pub(super) fn terminal_is_gone(err: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    matches!(err, Errno::IO | Errno::NXIO | Errno::NODEV | Errno::BADF)
+}
+
 /// What a wait for the terminal ended on; neither when it timed out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Waited {

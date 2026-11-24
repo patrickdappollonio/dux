@@ -6075,6 +6075,7 @@ mod tests {
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             terminal_input: crate::terminal_input::TerminalInput::default(),
             terminal_input_ended: false,
+            terminal_read_failed: false,
             debug_raw_input: crate::app::debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),

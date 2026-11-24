@@ -844,6 +844,9 @@ pub(crate) struct App {
     /// Whether a read of the terminal returned nothing, which a raw-mode
     /// terminal does only once hung up; it would then poll ready forever.
     pub(crate) terminal_input_ended: bool,
+    /// Whether the last read of the terminal failed in a way that may pass, so
+    /// the next read waits a poll's length first.
+    pub(crate) terminal_read_failed: bool,
     /// The input debugger's own raw reader, apart from the forwarding path's.
     pub(crate) debug_raw_input: debug_input::DebugRawInput,
     pub(crate) raw_input_buf: Vec<u8>,
@@ -5818,6 +5821,7 @@ impl App {
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             terminal_input: crate::terminal_input::TerminalInput::default(),
             terminal_input_ended: false,
+            terminal_read_failed: false,
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
@@ -6396,13 +6400,19 @@ impl App {
 
     /// Wait up to `timeout` for `terminal` to have bytes, and say whether it
     /// does; a resize ends the wait. Once its input has ended, the answer is no.
+    /// After a failed read, the terminal is looked at only once a wait with a
+    /// timeout has passed.
     pub(crate) fn wait_for_terminal(
-        &self,
+        &mut self,
         terminal: BorrowedFd<'_>,
         timeout: Duration,
     ) -> rustix::io::Result<bool> {
+        if self.terminal_read_failed && timeout.is_zero() {
+            return Ok(false);
+        }
+        let resting = self.terminal_input_ended || self.terminal_read_failed;
         let wake = self.resize_wake.as_ref().map(AsFd::as_fd);
-        let waited = match (self.terminal_input_ended, wake) {
+        let waited = match (resting, wake) {
             (false, _) => input::wait_for_input_or_wake(terminal, wake, timeout)?,
             (true, Some(wake)) => input::Waited {
                 input: false,
@@ -6419,23 +6429,35 @@ impl App {
             wake.clear();
             self.sigwinch_flag.store(true, Ordering::Relaxed);
         }
+        if std::mem::take(&mut self.terminal_read_failed) && !self.terminal_input_ended {
+            return Ok(input::wait_for_input_or_wake(terminal, None, Duration::ZERO)?.input);
+        }
         Ok(waited.input)
     }
 
     /// One read of `terminal` into `buf`, as much as it has ready. A read of
-    /// nothing means its input has ended, which every later wait remembers.
+    /// nothing, or an error saying the terminal has gone, means its input has
+    /// ended, which every later wait remembers; any other error is returned.
     pub(crate) fn read_terminal(
         &mut self,
         terminal: BorrowedFd<'_>,
         buf: &mut [u8],
     ) -> rustix::io::Result<usize> {
-        let n = input::read_raw_chunk(terminal, buf)?;
+        let (n, gone) = match input::read_raw_chunk(terminal, buf) {
+            Ok(n) => (n, None),
+            Err(err) if input::terminal_is_gone(err) => (0, Some(err)),
+            Err(err) => {
+                self.terminal_read_failed = true;
+                return Err(err);
+            }
+        };
         if n == 0 && !buf.is_empty() && !self.terminal_input_ended {
             self.terminal_input_ended = true;
-            logger::warn(
-                "the terminal's input has ended, so dux reads no more keys; it quits on the \
-                 terminal's hang-up signal",
-            );
+            let how = gone.map_or_else(|| "has ended".to_string(), |err| format!("failed: {err}"));
+            logger::warn(&format!(
+                "the terminal's input {how}, so dux reads no more keys; it quits on the \
+                 terminal's hang-up signal"
+            ));
         }
         Ok(n)
     }

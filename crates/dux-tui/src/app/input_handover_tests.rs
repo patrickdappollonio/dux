@@ -100,7 +100,7 @@ pub(super) struct Outcome {
 /// One app, a stand-in terminal it reads, and a program behind its agent pane.
 pub(super) struct Rig {
     pub(super) app: App,
-    terminal: UnixStream,
+    terminal: std::os::fd::OwnedFd,
     keyboard: UnixStream,
     received: PathBuf,
     screen: ratatui::Terminal<ratatui::backend::TestBackend>,
@@ -116,7 +116,7 @@ impl Rig {
         let (terminal, keyboard) = UnixStream::pair().expect("a socket pair");
         let mut rig = Self {
             app,
-            terminal,
+            terminal: terminal.into(),
             keyboard,
             received,
             screen: ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
@@ -132,6 +132,12 @@ impl Rig {
     pub(super) fn type_bytes(&mut self, bytes: &[u8]) {
         use std::io::Write as _;
         self.keyboard.write_all(bytes).expect("type into dux");
+    }
+
+    /// Read `terminal` from now on, at the descriptor number the rig's own
+    /// terminal has, as a terminal that changes under a reader does.
+    fn swap_terminal(&mut self, terminal: impl AsFd) {
+        rustix::io::dup2(terminal, &mut self.terminal).expect("swap the terminal");
     }
 
     /// The terminal's input ends: every read from now on returns nothing.
@@ -580,6 +586,72 @@ mod waiting {
                 assert_waits(&mut rig, &format!("{reader:?}, ended after {typed:?}"));
             }
         }
+    }
+
+    /// A read that fails with an I/O error is a terminal that has gone for
+    /// good, as one read by a process group its session has orphaned is.
+    #[test]
+    fn a_reader_whose_terminal_reads_an_io_error_waits() {
+        for reader in READERS {
+            let mut rig = rig(reader);
+            rig.swap_terminal(pty_reading_an_io_error());
+            assert_waits(&mut rig, &format!("{reader:?}, reading an I/O error"));
+            assert!(rig.app.terminal_input_ended, "{reader:?}: the input ended");
+        }
+    }
+
+    /// A read error that does not say the terminal has gone is retried after
+    /// a wait, and once the terminal reads again its input arrives.
+    #[test]
+    fn a_reader_whose_read_fails_waits_and_reads_again() {
+        for reader in READERS {
+            let mut failing = rig(reader);
+            let directory = tempfile::tempdir().expect("tempdir");
+            let unreadable = std::fs::File::open(directory.path()).expect("open a directory");
+            failing.swap_terminal(&unreadable);
+            assert_waits(&mut failing, &format!("{reader:?}, failing reads"));
+            assert!(
+                !failing.app.terminal_input_ended,
+                "{reader:?}: the input goes on"
+            );
+            let (terminal, keyboard) = UnixStream::pair().expect("a socket pair");
+            failing.swap_terminal(&terminal);
+            failing.keyboard = keyboard;
+            failing.type_bytes(b"x");
+            failing.settle();
+            let mut never_failed = rig(reader);
+            never_failed.type_bytes(b"x");
+            never_failed.settle();
+            assert_eq!(failing.outcome(), never_failed.outcome(), "{reader:?}");
+        }
+    }
+
+    /// The leading end of a pseudo-terminal whose other end is closed, which
+    /// Linux reads as an I/O error.
+    fn pty_reading_an_io_error() -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd as _;
+        let (mut leader, mut follower) = (-1, -1);
+        // SAFETY: openpty writes two descriptors into the integers it is
+        // given and reads nothing through its null arguments.
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut leader,
+                &raw mut follower,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty");
+        // SAFETY: openpty just returned both descriptors, owned by nobody else.
+        let (leader, follower) = unsafe {
+            (
+                std::os::fd::OwnedFd::from_raw_fd(leader),
+                std::os::fd::OwnedFd::from_raw_fd(follower),
+            )
+        };
+        drop(follower);
+        leader
     }
 
     /// A lone Escape that ends a read of [`READ_SIZE`](crate::terminal_input::READ_SIZE)
