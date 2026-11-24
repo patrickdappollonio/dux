@@ -73,7 +73,6 @@ const ALLOWED: Allowed[] = [
   { file: "components/WorktreesDialog.tsx", line: 'className="grid gap-2 text-sm text-destructive"', reason: `${STANDING} (the delete-leftover-folder confirm)` },
   { file: "components/WorktreesDialog.tsx", line: 'className="text-sm text-destructive"', reason: BRANCH_WARNING },
   { file: "components/CustomizeWebappDialog.tsx", line: 'below && "text-destructive"', reason: "one word of the strength meter's label, not a sentence" },
-  { file: "components/StandaloneAgentDialog.tsx", line: '"text-xs text-destructive"', reason: "the name field's help paragraph turning red, always present and tied to the field by aria-describedby" },
   { file: "components/StartupLogsDialog.tsx", line: 'className="text-destructive"', reason: "a span inside a danger Notice, which already announces it" },
   { file: "components/ChangedFiles.tsx", line: "TriangleAlert", reason: "the icon of a failed-load row with its own Retry, built elsewhere" },
   { file: "components/FlatAgentList.tsx", line: "text-destructive", reason: "a sidebar row's failure word, not a dialog" },

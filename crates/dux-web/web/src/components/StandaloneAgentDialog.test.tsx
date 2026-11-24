@@ -262,7 +262,7 @@ describe("StandaloneAgentDialog name field", () => {
     seed(SHORTCUTS)
     render(<StandaloneAgentDialog />)
     await pick(shortcutRows()[0])
-    return screen.getByRole<HTMLInputElement>("textbox")
+    return screen.getByRole<HTMLInputElement>("textbox", { name: "Agent name" })
   }
   const description = (field: HTMLElement) =>
     (field.getAttribute("aria-describedby") ?? "")

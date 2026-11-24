@@ -1,10 +1,11 @@
-import { useEffect, useId, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { AgentNameInput } from "@/components/AgentNameFields"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
 import { Modal, useModalLifetime } from "@/components/modal"
 import { ProjectShortcutList } from "@/components/ProjectShortcutList"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
+import { FormGroup } from "@/components/ui/form-group"
 import { InlineCode } from "@/components/ui/inline-code"
 import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { standaloneAgentDefaultName } from "@/lib/agentWorkspace"
@@ -83,7 +84,6 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
     return () => resized.disconnect()
   }, [selected, shortcutsShown, reducedMotion])
   const invalidName = name !== "" && !isValidAgentName(name)
-  const nameHelpId = useId()
 
   function handleCreate() {
     if (!selected || invalidName) return
@@ -179,33 +179,34 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
             * The default is derived through the twin of the server's folder
             * conversion, so it cannot promise another name, and it is said
             * under the field, where a long one is not cut off. */}
-          <AgentNameInput
-            value={name}
-            onChange={(raw) => setName(sanitizeAgentName(raw))}
-            onSubmit={handleCreate}
-            placeholder="Agent name (optional)"
-            invalid={invalidName}
-            describedBy={nameHelpId}
-            generating={false}
-            autoFocus={false}
-          />
-          <p
-            id={nameHelpId}
-            className={invalidName ? "text-xs text-destructive" : "text-xs text-muted-foreground"}
+          <FormGroup
+            layout="stacked"
+            control="single"
+            spokenName="Agent name"
+            help={
+              invalidName ? null : (
+                <>
+                  Left empty, the agent is called{" "}
+                  <InlineCode>{standaloneAgentDefaultName(selected)}</InlineCode>. Any name git
+                  accepts for a branch works.
+                </>
+              )
+            }
+            notes={[{ words: <>The agent runs in <InlineCode>{selected}</InlineCode>.</> }]}
+            error={invalidName ? INVALID_AGENT_NAME : null}
           >
-            {invalidName ? (
-              INVALID_AGENT_NAME
-            ) : (
-              <>
-                Left empty, the agent is called{" "}
-                <InlineCode>{standaloneAgentDefaultName(selected)}</InlineCode>. Any name git
-                accepts for a branch works.
-              </>
+            {(field) => (
+              <AgentNameInput
+                field={field}
+                value={name}
+                onChange={(raw) => setName(sanitizeAgentName(raw))}
+                onSubmit={handleCreate}
+                placeholder="Agent name (optional)"
+                generating={false}
+                autoFocus={false}
+              />
             )}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            The agent runs in <InlineCode>{selected}</InlineCode>.
-          </p>
+          </FormGroup>
         </div>
       ) : null}
     </Modal>

@@ -122,7 +122,8 @@ afterEach(() => {
 
 const address = () => screen.getByLabelText("Repository address") as HTMLInputElement
 const destination = () => screen.getByLabelText("Destination folder") as HTMLInputElement
-const agentName = () => screen.getByLabelText("Agent name") as HTMLInputElement
+// "First agent" over a clone, "Agent" over a pull request's offer.
+const agentName = () => screen.getByLabelText(/^(First agent|Agent)$/) as HTMLInputElement
 const type = (field: HTMLElement, value: string) =>
   fireEvent.change(field, { target: { value } })
 
@@ -290,6 +291,17 @@ describe("CloneProjectDialog", () => {
     // Answering the refusal retires it.
     type(destination(), "/home/u/elsewhere")
     expect(screen.queryByRole("alert")).toBeNull()
+  })
+
+  it("labels each of its boxes, reads the agent name's rules with it, and marks a refused name", async () => {
+    await open()
+    expect(address().id).toBe((screen.getByText("Repository address") as HTMLLabelElement).htmlFor)
+    expect(destination().id).toBe((screen.getByText("Destination folder") as HTMLLabelElement).htmlFor)
+    const name = screen.getByRole("textbox", { name: "First agent" })
+    const read = (name.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent)
+    expect(read).toEqual(["Any name git accepts for a branch. This becomes the branch name."])
+    type(name, "a..b")
+    expect(name.getAttribute("aria-invalid")).toBe("true")
   })
 
   it("cannot be submitted without an address", async () => {
@@ -604,7 +616,7 @@ describe("CloneProjectDialog for a pull request", () => {
 
   it("does not call an empty name an error before anything is typed", async () => {
     await openPr({ name: "" })
-    expect(agentName().getAttribute("aria-invalid")).toBe("false")
+    expect(agentName().getAttribute("aria-invalid")).not.toBe("true")
     expect(primary("Clone and create").disabled).toBe(true)
   })
 })
