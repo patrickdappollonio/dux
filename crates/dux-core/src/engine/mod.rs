@@ -323,6 +323,25 @@ pub(crate) fn changed_files_poll_delay(interval: Duration, last_sweep: Duration)
     interval.max(last_sweep.min(CHANGED_FILES_POLL_MAX_DELAY))
 }
 
+/// The warning for input a pty's full write queue dropped; `what` is
+/// "the agent " or "the terminal ", followed by its name.
+fn dropped_input_status(pty_id: &str, what: &str, name: &str) -> StatusUpdate {
+    // Not sticky: the program that stopped reading is still on screen, so the
+    // person can see where to look.
+    StatusUpdate::keyed(
+        format!("pty-input-dropped:{pty_id}"),
+        crate::statusline::StatusTone::Warning,
+        status_text![
+            "Some input sent to ",
+            what,
+            q(name),
+            " was dropped: it stopped reading its input and dux could hold no more for it. \
+             Once it responds again, check what it received and send anything missing again; \
+             if it stays stuck, stop and restart it."
+        ],
+    )
+}
+
 /// Take the changed-files queue lock, recovering from poisoning. A panic while
 /// the lock is held would otherwise stop every future refresh for the life of
 /// the process, and the guarded state is two plain fields that no panic can
@@ -2684,6 +2703,36 @@ impl Engine {
                 self.pty_activity.insert(terminal_id.clone(), now);
                 self.terminal_activity_at
                     .insert(terminal_id.clone(), now_wall);
+            }
+        }
+        self.report_dropped_pty_input();
+    }
+
+    /// Say, on both surfaces, that input to a pty was dropped because its
+    /// program stopped reading and its write queue filled. A later drop is said
+    /// again once the earlier warning has had its time on screen; with
+    /// auto-clear off it never leaves by itself, so it is not said again.
+    fn report_dropped_pty_input(&self) {
+        let repeat_after = (self.config.ui.status_clear_seconds > 0).then(|| {
+            Duration::from_secs(u64::from(self.config.ui.status_clear_seconds))
+                * crate::statusline::WARNING_CLEAR_FACTOR
+        });
+        for (tab_id, provider) in &self.providers {
+            if provider.take_input_drop_report(repeat_after) {
+                let name = self
+                    .owning_session_for_tab(tab_id.as_str())
+                    .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+                    .map_or_else(|| tab_id.as_str().to_string(), AgentSession::display_label);
+                self.post_status(dropped_input_status(tab_id.as_str(), "the agent ", &name));
+            }
+        }
+        for (terminal_id, terminal) in &self.companion_terminals {
+            if terminal.client.take_input_drop_report(repeat_after) {
+                self.post_status(dropped_input_status(
+                    terminal_id,
+                    "the terminal ",
+                    &terminal.label,
+                ));
             }
         }
     }
