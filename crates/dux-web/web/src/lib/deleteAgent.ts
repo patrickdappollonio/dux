@@ -268,9 +268,9 @@ export function branchesCheckedProse(
           ? [
               "Everything on ",
               ...where,
-              " is also on another branch, and this repository has no remote",
+              " is also on another branch, and this repository has no remote.",
             ]
-          : ["No unpushed work on ", ...where],
+          : ["No unpushed work on ", ...where, "."],
         losesCommits: false,
       },
     }
@@ -286,11 +286,11 @@ export function branchesCheckedProse(
     holding.length > 2 ? [`${holding.length} branches`] : nameList(holding, " and ")
   const tail = noRemote
     ? one
-      ? " is on no other branch, and this repository has no remote"
-      : " are on no other branch, and this repository has no remote"
+      ? " is on no other branch, and this repository has no remote."
+      : " are on no other branch, and this repository has no remote."
     : one
-      ? " isn't pushed anywhere"
-      : " aren't pushed anywhere"
+      ? " isn't pushed anywhere."
+      : " aren't pushed anywhere."
   return {
     ok: {
       prose: joinProse(

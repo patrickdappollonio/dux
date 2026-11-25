@@ -342,9 +342,11 @@ pub fn branches_checked_prose(
             (many, true) => prose.push_text(format!("the {many} branches")),
             (many, false) => prose.push_text(format!("any of the {many} branches")),
         }
-        if no_remote {
-            prose.push_text(" is also on another branch, and this repository has no remote");
-        }
+        prose.push_text(if no_remote {
+            " is also on another branch, and this repository has no remote."
+        } else {
+            "."
+        });
         return Ok(Some(BranchesChecked {
             prose,
             loses_commits: false,
@@ -371,10 +373,10 @@ pub fn branches_checked_prose(
         push_list(&mut prose, &holding, " and ");
     }
     prose.push_text(match (no_remote, one) {
-        (false, true) => " isn't pushed anywhere",
-        (false, false) => " aren't pushed anywhere",
-        (true, true) => " is on no other branch, and this repository has no remote",
-        (true, false) => " are on no other branch, and this repository has no remote",
+        (false, true) => " isn't pushed anywhere.",
+        (false, false) => " aren't pushed anywhere.",
+        (true, true) => " is on no other branch, and this repository has no remote.",
+        (true, false) => " are on no other branch, and this repository has no remote.",
     });
     Ok(Some(BranchesChecked {
         prose,

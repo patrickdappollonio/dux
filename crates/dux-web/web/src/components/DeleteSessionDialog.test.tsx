@@ -688,10 +688,10 @@ describe("DeleteSessionDialog", () => {
       await act(async () => answer(offer({ name: "dux/s1", origin: "dux" })))
       expect(screen.getByRole("status")).toBe(checking)
       expect(checking.closest('[data-slot="branch-check-slot"]')).toBe(slot)
-      expect(checking.textContent).toBe("No unpushed work on dux/s1")
+      expect(checking.textContent).toBe("No unpushed work on dux/s1.")
       act(() => vi.advanceTimersByTime(5000))
       expect(screen.getByRole("status")).toBe(checking)
-      expect(checking.textContent).toBe("No unpushed work on dux/s1")
+      expect(checking.textContent).toBe("No unpushed work on dux/s1.")
     } finally {
       vi.useRealTimers()
     }
@@ -725,7 +725,7 @@ describe("DeleteSessionDialog", () => {
       answer: offer({ name: "dux/s1", origin: "dux" }, [], {
         current_unpushed: { count: 1, has_remote_refs: true },
       }),
-      says: "1 commit on dux/s1 isn't pushed anywhere",
+      says: "1 commit on dux/s1 isn't pushed anywhere.",
       chips: ["dux/s1"],
       tone: "warning",
     },
@@ -734,7 +734,7 @@ describe("DeleteSessionDialog", () => {
       answer: offer({ name: "dux/s1", origin: "dux" }, [], {
         current_unpushed: { count: 3, has_remote_refs: true },
       }),
-      says: "3 commits on dux/s1 aren't pushed anywhere",
+      says: "3 commits on dux/s1 aren't pushed anywhere.",
       chips: ["dux/s1"],
       tone: "warning",
     },
@@ -743,7 +743,7 @@ describe("DeleteSessionDialog", () => {
       answer: offer({ name: "dux/s1", origin: "dux" }, [
         { name: "spike", origin: "dux", oid: OID_B },
       ]),
-      says: "No unpushed work on dux/s1 or spike",
+      says: "No unpushed work on dux/s1 or spike.",
       chips: ["dux/s1", "spike"],
       tone: "neutral",
     },
@@ -757,7 +757,7 @@ describe("DeleteSessionDialog", () => {
           both_unpushed: { count: 2, has_remote_refs: true },
         },
       ),
-      says: "2 commits on spike aren't pushed anywhere",
+      says: "2 commits on spike aren't pushed anywhere.",
       chips: ["spike"],
       tone: "warning",
     },
@@ -767,7 +767,7 @@ describe("DeleteSessionDialog", () => {
         { name: "spike", origin: "dux", oid: OID_B },
         { name: "fix", origin: "dux", oid: OID_C },
       ]),
-      says: "No unpushed work on any of the 3 branches",
+      says: "No unpushed work on any of the 3 branches.",
       chips: [],
       tone: "neutral",
     },
@@ -776,7 +776,7 @@ describe("DeleteSessionDialog", () => {
       answer: offer({ name: "dux/s1", origin: "dux" }, [], {
         current_unpushed: { count: 1, has_remote_refs: false },
       }),
-      says: "1 commit on dux/s1 is on no other branch, and this repository has no remote",
+      says: "1 commit on dux/s1 is on no other branch, and this repository has no remote.",
       chips: ["dux/s1"],
       tone: "warning",
     },
@@ -948,7 +948,7 @@ describe("DeleteSessionDialog", () => {
       await act(async () => {})
       expect(currentBox().getAttribute("aria-checked")).toBe("true")
       expect(screen.queryByText(/This branch existed before the agent\./)).toBeNull()
-      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
+      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1.")
     } finally {
       vi.useRealTimers()
     }
