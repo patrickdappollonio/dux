@@ -55,7 +55,7 @@ A handful of subcommands handle the file without you hunting for it:
   - `dux config reset` removes the config, the log, the server log with its rotated copies
     and your saved remotes. It **keeps your agents and worktrees**.
   - `dux config reset --all` is the full factory reset: all of that, plus the session
-    database and every worktree dux made. It keeps one thing, the note that you have
+    database, every worktree dux made and every folder dux created for a standalone agent. It keeps one thing, the note that you have
     already seen the welcome screen, so the next start does not greet you as a stranger.
     Browser tabs and saved remotes that knew it treat the reset dux as a different one.
     See the warning below.
@@ -222,8 +222,9 @@ the comments around them.
 ### Factory reset in detail
 
 > [!WARNING]
-> A factory reset (`dux config reset --all`) deletes every worktree dux made, **uncommitted
-> work included**. It is all or nothing, and it refuses to run while another dux is running.
+> A factory reset (`dux config reset --all`) deletes every worktree dux made and every
+> folder dux created for a standalone agent, **uncommitted work and everything in them
+> included**. It is all or nothing, and it refuses to run while another dux is running.
 
 Here is what the reset does, in order:
 
@@ -245,7 +246,9 @@ Some things to know:
 - **If a folder cannot be removed** once deleting has begun, the reset stops there, keeps
   the database and the config, lists what it removed and what failed, and exits with status
   1. Fix that and run it again.
-- **A folder a standalone agent runs in is never removed.**
+- **A folder you chose for a standalone agent is never removed.** A folder dux created for
+  one is removed, only while it is still the folder dux created and holds no other agent's
+  folder or project; one that cannot be removed is a warning, and the reset goes on.
 - **Branches kept with a left-over folder go too,** when dux created them and they still
   point where they did when the folder was left behind. A branch that existed before its
   agent is kept, as a delete keeps it.

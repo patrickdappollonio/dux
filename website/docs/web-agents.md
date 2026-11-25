@@ -121,9 +121,10 @@ new**: the same choices, **New agent** included, as one dialog.
 
 A plain new agent starts by asking which project it belongs to. If the answer is "none",
 the bottom of that project list has two ways out: **Add a new project…**, and **Add
-standalone agent…**, which swaps the list for the folder picker a
-[standalone agent](/docs/creating-agents#running-an-agent-in-a-folder-you-already-have)
-starts from.
+standalone agent…**, which swaps the list for the name box a
+[standalone agent](/docs/creating-agents#running-a-standalone-agent)
+starts from: give it a name and dux creates a folder for it, or go on from there to a
+folder you already have.
 
 ![The New agent project picker: a search field over the projects, each with its agent count, and Add a new project and Add standalone agent side by side at the bottom.](/screens/new-agent-picker.png)
 
@@ -235,8 +236,8 @@ The manager checks again at the moment you confirm, and a few rules keep it safe
 - A removal that finds work still running in the worktree waits for it the same way an agent
   delete does.
 - A standalone agent inside a worktree keeps that worktree for as long as the agent exists,
-  because dux never removes a standalone agent's folder. Delete that agent, or move its folder
-  out, first. The same holds when you delete the worktree's own agent with the worktree box
+  because dux never removes a folder you chose for a standalone agent. Delete that agent, or
+  move its folder out, first. The same holds when you delete the worktree's own agent with the worktree box
   ticked: the worktree is kept and dux names the standalone agent.
 - Once a removal of a folder has begun, nothing new starts in it or in any folder inside it:
   a new agent, a standalone agent, a relaunch, a terminal or a project added there is refused

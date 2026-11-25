@@ -15,9 +15,9 @@ filesystem. Repository not on the machine yet? Skip the shell trip:
 [Cloning a repository](#cloning-a-repository) clones it, adds it as a project and starts
 its first agent in one go.
 
-One path skips all of that. A **standalone agent** has no branch and no worktree and runs
-in a folder you point it at, with no project at all. See
-[Running an agent in a folder you already have](#running-an-agent-in-a-folder-you-already-have).
+One path skips all of that. A **standalone agent** has no branch and no worktree and no
+project at all: give it a name and dux creates a folder for it, or point it at a folder
+you already have. See [Running a standalone agent](#running-a-standalone-agent).
 
 Every path below exists on both front ends and does the same thing on each. Only the way
 you reach it differs, so each section names both: a button or a row's `⋯` menu in the
@@ -885,11 +885,12 @@ right now. Fork at a decision point to explore two approaches to the same proble
 > directories do not travel. Neither do edits hidden with `assume-unchanged` or
 > `skip-worktree`, which are invisible to git status.
 
-## Running an agent in a folder you already have
+## Running a standalone agent
 
 Everything above creates a branch and a working copy. A **standalone agent** does not:
-you pick a folder, and the AI runs there. Good for a scratch directory, a notes folder, a
-pile of downloads to sort, or a repository you want worked on in place.
+the AI runs in a plain folder. Just want to talk to an agent? Give it a name and dux
+creates a folder for it. Or pick a folder you already have: a scratch directory, a notes
+folder, a pile of downloads to sort, or a repository you want worked on in place.
 
 This is the browser.
 
@@ -900,12 +901,12 @@ agent would name, and the changes panel says why it has nothing to show.
 
 ![The terminal UI with a standalone agent selected: its row carries a star over the folder path, and the changes panel says the folder has no git repository.](/screens/tui-standalone-star.png)
 
-Every way in opens the same folder browser. Any folder is accepted: it does not have to
-be a git repository, and dux initializes nothing in it.
+Every way in asks first for one thing, the agent's name:
 
-- **In the browser:** **New standalone agent…** from the launcher's **▾** menu or
-  the app menu's New submenu, and **Add standalone agent…** at the bottom of the New agent
-  project list, for when you went looking for a project and none fits.
+- **In the browser:** **New standalone agent…** from the launcher's **▾** menu, the
+  **Start something new** dialog or the app menu's New submenu, and **Add standalone
+  agent…** at the bottom of the New agent project list, for when you went looking for a
+  project and none fits.
 - **In the terminal UI:** a key anywhere in the agents pane, a key inside the "New agent in
   project" chooser too (so you can change your mind once you are already there and no
   project fits), and the `new-standalone-agent` palette command. The `?` help overlay names
@@ -916,6 +917,31 @@ be a git repository, and dux initializes nothing in it.
 > chord, because plain letters go into the search box. GNU Screen's flow control can
 > swallow that chord before dux ever sees it; the palette command still works there, and
 > so does rebinding the key to something your terminal passes through.
+
+### Starting with only a name
+
+The name box opens with a generated two-word name, the same kind
+[Naming an agent](#naming-an-agent) describes; keep it or type your own. Under it dux says
+where the agent will run, following what you type: a new folder named after the agent in
+your standalone agents folder, `agents` inside dux's own folder (beside `worktrees`)
+unless you set `standalone_agents_directory` under `[defaults]` in `config.toml`. Confirm,
+and dux creates that folder and starts the agent in it.
+
+- The name follows the same rules as any agent's name, and it is required, because it
+  names the folder. A `/` in it becomes a `-` in the folder's name.
+- A name whose folder is already there is refused: "A folder with that name is already
+  there. Pick another name." Nothing is created and what is there is left alone.
+- The folder is a plain folder: dux does not make it a git repository.
+- Renaming the agent later never moves or renames its folder.
+
+The same command line create is `dux agents add --new-folder --name <name>`.
+
+### Using a folder you already have
+
+Below the name box, **Use an existing folder or project…** (a button under the field in
+the terminal UI) opens the folder browser instead. In the browser its **Back** returns to
+the name box. Any folder is accepted: it does not have to be a git repository, and dux
+initializes nothing in it.
 
 ### Starting in a project's folder
 
@@ -962,8 +988,9 @@ A project that cannot be picked stays in the list, greyed out, and says why:
 
 ### Naming a standalone agent
 
-Both surfaces then ask what to call the agent. The name is optional, and backing out of
-that question creates nothing and leaves the folder untouched.
+In a folder you picked, both surfaces then ask what to call the agent. The name is
+optional there, and backing out of that question creates nothing and leaves the folder
+untouched.
 
 - **Empty:** the agent is named after the folder, turned into a valid agent name (`My
   Notes! (2026)` becomes `My-Notes-2026`). A folder with nothing usable in its name gives
@@ -974,7 +1001,8 @@ that question creates nothing and leaves the folder untouched.
 
 What a standalone agent does NOT have:
 
-- **No branch and no worktree.** dux creates nothing on disk for it.
+- **No branch and no worktree.** The only thing dux ever creates on disk for it is the
+  folder of one started with only a name.
 - **No project.** It sits among your other agents, told apart by the `✷` star over its
   folder on the row's second line. A standalone terminal wears the same star.
 - **No branch features.** Pushing, pulling, forking, pull requests and branch renaming
@@ -986,22 +1014,36 @@ What a standalone agent does NOT have:
 Everything else is there: the embedded terminal, agent tabs, companion terminals, the
 in-browser editor, file drops, renaming, the resource monitor and auto-reopen.
 
-### dux never creates, moves or removes the folder
+### What happens to the folder
+
+dux remembers which folders it created. That, and nothing you send it, decides what
+deleting the agent may do with the folder.
+
+> [!WARNING]
+> **A folder dux created** goes with the agent unless you keep it. The delete dialog
+> offers **Also delete its folder**, ticked, naming the folder, and says how many files
+> it holds: they are deleted with it. Untick it to keep the folder. Outside the dialogs it
+> goes too: `dux agents rm` deletes it unless you add `--keep-folder`, and a factory reset
+> deletes it. dux deletes it only once the agent has stopped, and only while the folder at
+> that path is still the one it created: if something else has been put there since, or
+> another agent or a project has moved in, it is kept and dux says why.
 
 > [!IMPORTANT]
-> The folder's existence and location are yours alone. dux does not create it, move it or
-> remove it, ever.
+> **A folder you chose** is yours alone. dux does not create it, move it or remove it,
+> ever.
 >
 > - Deleting the agent removes dux's own record and nothing else. The delete dialog says
->   so: there is no "also remove the worktree" checkbox, because there is no worktree.
+>   so: there is no checkbox for the folder.
+> - Asking to delete it anyway (`dux agents rm --delete-folder`) is refused, and nothing
+>   is deleted, the agent included.
 > - A factory reset skips the folder too.
 
-Things do get written *inside* it: the agent works in it, a dropped file lands in it, a
-commit writes to its repository.
+Things do get written *inside* either kind: the agent works in it, a dropped file lands in
+it, a commit writes to its repository.
 
 A file you drop onto a standalone agent is saved in a hidden upload directory inside the
-folder. Because dux never cleans the folder up, that directory stays there after the agent
-is gone. Remove it yourself if you do not want it.
+folder. In a folder you chose, dux never cleans up, so that directory stays there after
+the agent is gone. Remove it yourself if you do not want it.
 
 ### The changes panel follows the folder
 
