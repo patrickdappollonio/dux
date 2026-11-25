@@ -262,7 +262,7 @@ fn left_by_a_create(
     .ok()?;
     let stat = rustix::fs::fstat(&dir).ok()?;
     if stat.st_uid != rustix::process::geteuid().as_raw()
-        || filesystem_of(&dir).ok()? != filesystem_of(root_fd).ok()?
+        || filesystem_of(&dir).ok()?.is_on(filesystem_of(root_fd).ok()?) != Some(true)
     {
         return None;
     }
@@ -393,6 +393,7 @@ impl FolderKept {
             StopWhy::Mounted => {
                 "another filesystem is mounted there, and dux never deletes inside one".to_string()
             }
+            StopWhy::CannotTellMounted => CANNOT_TELL_MOUNTED.to_string(),
             StopWhy::Failed(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => {
                 "dux does not have permission to delete it".to_string()
             }
@@ -548,12 +549,43 @@ pub fn let_go(path: &Path, mark: Option<FolderMark>) {
     }
 }
 
-/// The filesystem a directory is on: its device and, where the system says,
+/// The filesystem a directory is on: its device and what the system says of
 /// the mount it belongs to, which tells a bind mount of the same device apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Filesystem {
     device: u64,
-    mount: Option<u64>,
+    mount: Mount,
+}
+
+/// What the system says of the mount a directory belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mount {
+    /// The mount's id.
+    Id(u64),
+    /// Only whether a filesystem is mounted on the directory itself.
+    MountPoint(bool),
+    /// Nothing, so whether a filesystem is mounted on it cannot be told.
+    Unknown,
+    /// Nothing, and the device alone tells filesystems apart (macOS).
+    #[cfg(not(target_os = "linux"))]
+    DeviceOnly,
+}
+
+impl Filesystem {
+    /// Whether this directory, directly inside one on `outer`, is on `outer`
+    /// too; `None` when that cannot be told.
+    fn is_on(self, outer: Self) -> Option<bool> {
+        if self.device != outer.device {
+            return Some(false);
+        }
+        match (self.mount, outer.mount) {
+            (Mount::Id(id), Mount::Id(outer_id)) => Some(id == outer_id),
+            (Mount::MountPoint(mounted), _) => Some(!mounted),
+            #[cfg(not(target_os = "linux"))]
+            (Mount::DeviceOnly, Mount::DeviceOnly) => Some(true),
+            _ => None,
+        }
+    }
 }
 
 /// Which filesystem the opened directory at a path inside the folder is on.
@@ -562,21 +594,88 @@ type FilesystemOf<'a> = &'a dyn Fn(&Path, &OwnedFd) -> rustix::io::Result<Filesy
 fn filesystem_of(dir: &OwnedFd) -> rustix::io::Result<Filesystem> {
     Ok(Filesystem {
         device: numbers_of(&rustix::fs::fstat(dir)?).device,
-        mount: mount_id(dir),
+        mount: mount_of(dir),
     })
 }
 
+/// The mount id where the kernel gives it (5.8 and later), else whether the
+/// directory is a mount point by `/proc/self/mountinfo`.
 #[cfg(target_os = "linux")]
-fn mount_id(dir: &OwnedFd) -> Option<u64> {
-    let found =
-        rustix::fs::statx(dir, "", AtFlags::EMPTY_PATH, rustix::fs::StatxFlags::MNT_ID).ok()?;
-    (found.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() != 0).then_some(found.stx_mnt_id)
+fn mount_of(dir: &OwnedFd) -> Mount {
+    if let Ok(found) =
+        rustix::fs::statx(dir, "", AtFlags::EMPTY_PATH, rustix::fs::StatxFlags::MNT_ID)
+        && found.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() != 0
+    {
+        return Mount::Id(found.stx_mnt_id);
+    }
+    mount_by_mountinfo(
+        dir,
+        std::fs::read_to_string("/proc/self/mountinfo")
+            .ok()
+            .as_deref(),
+    )
 }
 
 #[cfg(not(target_os = "linux"))]
-fn mount_id(_dir: &OwnedFd) -> Option<u64> {
-    None
+fn mount_of(_dir: &OwnedFd) -> Mount {
+    Mount::DeviceOnly
 }
+
+/// Whether `dir` is a mount point by the `mountinfo` text, found by the path
+/// the kernel gives for the open directory.
+#[cfg(target_os = "linux")]
+fn mount_by_mountinfo(dir: &OwnedFd, mountinfo: Option<&str>) -> Mount {
+    use rustix::fd::AsRawFd as _;
+    let Some(mountinfo) = mountinfo else {
+        return Mount::Unknown;
+    };
+    let Ok(path) = std::fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd())) else {
+        return Mount::Unknown;
+    };
+    // A directory removed while open, or one outside this process's root,
+    // has no path a mount point could name.
+    let bytes = path.as_os_str().as_bytes();
+    if !bytes.starts_with(b"/") || bytes.ends_with(b" (deleted)") {
+        return Mount::Unknown;
+    }
+    is_mount_point(mountinfo, bytes).map_or(Mount::Unknown, Mount::MountPoint)
+}
+
+/// Whether `path` is a mount point in the `mountinfo` text; `None` when a
+/// line of it cannot be read.
+#[cfg(target_os = "linux")]
+fn is_mount_point(mountinfo: &str, path: &[u8]) -> Option<bool> {
+    let mut found = false;
+    for line in mountinfo.lines().filter(|line| !line.is_empty()) {
+        let mount_point = unescape_mountinfo(line.split(' ').nth(4)?)?;
+        found |= mount_point == path;
+    }
+    Some(found)
+}
+
+/// A `mountinfo` field with its `\ooo` octal escapes (space, tab, newline,
+/// backslash) turned back into bytes.
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo(field: &str) -> Option<Vec<u8>> {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'\\' {
+            let digits = std::str::from_utf8(bytes.get(at + 1..at + 4)?).ok()?;
+            out.push(u8::from_str_radix(digits, 8).ok()?);
+            at += 4;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    Some(out)
+}
+
+const CANNOT_TELL_MOUNTED: &str =
+    "dux cannot tell on this system whether another filesystem is mounted in it, and dux never \
+     deletes inside one";
 
 /// The folder dux created, opened and checked, and the folder it is in.
 struct OpenedFolder {
@@ -632,8 +731,14 @@ fn open_created_folder(
         ))
     };
     let filesystem = filesystem_of(Path::new(""), &dir_fd).map_err(unreadable)?;
-    if filesystem_of(Path::new(".."), &parent_fd).map_err(unreadable)? != filesystem {
-        return Err("another filesystem is mounted on it, and dux never deletes inside one".into());
+    match filesystem.is_on(filesystem_of(Path::new(".."), &parent_fd).map_err(unreadable)?) {
+        Some(true) => {}
+        Some(false) => {
+            return Err(
+                "another filesystem is mounted on it, and dux never deletes inside one".into(),
+            );
+        }
+        None => return Err(CANNOT_TELL_MOUNTED.into()),
     }
     Ok(Some(OpenedFolder {
         parent: parent_fd,
@@ -776,6 +881,8 @@ struct Stopped {
 enum StopWhy {
     /// Another filesystem is mounted there.
     Mounted,
+    /// Whether another filesystem is mounted there cannot be told.
+    CannotTellMounted,
     Failed(rustix::io::Errno),
 }
 
@@ -821,12 +928,13 @@ impl Walk<'_> {
                     Mode::empty(),
                 )
                 .map_err(failed(&child_at))?;
-                if (self.filesystem_of)(&child_at, &child).map_err(failed(&child_at))?
-                    != self.filesystem
-                {
+                let on = (self.filesystem_of)(&child_at, &child)
+                    .map_err(failed(&child_at))?
+                    .is_on(self.filesystem);
+                if on != Some(true) {
                     return Err(Stopped {
                         at: child_at,
-                        why: StopWhy::Mounted,
+                        why: on.map_or(StopWhy::CannotTellMounted, |_| StopWhy::Mounted),
                     });
                 }
                 let mode = self.make_writable(&child);
@@ -1018,6 +1126,149 @@ mod tests {
             filesystem_of(&open("/")).unwrap(),
             filesystem_of(&open("/proc")).unwrap()
         );
+    }
+
+    /// Stands in for a kernel with no mount ids: every directory answers
+    /// `mount`, and those `mounted` names answer that a filesystem is mounted
+    /// on them.
+    fn answering(
+        mount: Mount,
+        mounted: &[&str],
+    ) -> impl Fn(&Path, &OwnedFd) -> rustix::io::Result<Filesystem> {
+        let mounted: Vec<PathBuf> = mounted.iter().map(PathBuf::from).collect();
+        move |at, dir| {
+            Ok(Filesystem {
+                device: filesystem_of(dir)?.device,
+                mount: if mounted.iter().any(|m| m == at) {
+                    Mount::MountPoint(true)
+                } else {
+                    mount
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn with_only_mount_points_known_the_deletion_stops_at_one() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::create_dir_all(created.path.join("deep/mnt")).unwrap();
+        std::fs::write(created.path.join("deep/mnt/theirs.txt"), "keep").unwrap();
+        let kept = remove_created_folder_with(
+            &created.path,
+            created.identity,
+            &answering(Mount::MountPoint(false), &["deep/mnt"]),
+        )
+        .unwrap_err();
+        let text = kept.reason.message();
+        assert!(text.contains("\"deep/mnt\""), "{text}");
+        assert!(
+            text.contains("another filesystem is mounted there"),
+            "{text}"
+        );
+        assert!(created.path.join("deep/mnt/theirs.txt").exists());
+
+        let created = create_agent_folder(tmp.path(), "badger").unwrap();
+        std::fs::create_dir_all(created.path.join("deep/plain")).unwrap();
+        assert_eq!(
+            remove_created_folder_with(
+                &created.path,
+                created.identity,
+                &answering(Mount::MountPoint(false), &[]),
+            ),
+            Ok(RemovedFolder::Removed)
+        );
+        assert!(!created.path.exists());
+    }
+
+    #[test]
+    fn when_mounts_cannot_be_told_the_folder_is_kept_whole() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::create_dir(created.path.join("inside")).unwrap();
+        std::fs::write(created.path.join("theirs.txt"), "keep").unwrap();
+        let kept = remove_created_folder_with(
+            &created.path,
+            created.identity,
+            &answering(Mount::Unknown, &[]),
+        )
+        .unwrap_err();
+        assert!(!kept.deleted_some);
+        assert!(
+            kept.reason.message().contains(
+                "dux cannot tell on this system whether another filesystem is mounted in it"
+            ),
+            "{kept:?}"
+        );
+        assert!(created.path.join("theirs.txt").exists());
+        assert!(created.path.join("inside").exists());
+    }
+
+    #[test]
+    fn a_subdirectory_whose_mount_cannot_be_told_is_not_entered() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::create_dir(created.path.join("inside")).unwrap();
+        std::fs::write(created.path.join("inside/theirs.txt"), "keep").unwrap();
+        let unknown_inside = |at: &Path, dir: &OwnedFd| {
+            Ok(Filesystem {
+                device: filesystem_of(dir)?.device,
+                mount: if at == Path::new("inside") {
+                    Mount::Unknown
+                } else {
+                    Mount::MountPoint(false)
+                },
+            })
+        };
+        let kept = remove_created_folder_with(&created.path, created.identity, &unknown_inside)
+            .unwrap_err();
+        let text = kept.reason.message();
+        assert!(text.contains("\"inside\""), "{text}");
+        assert!(text.contains("dux cannot tell on this system"), "{text}");
+        assert!(created.path.join("inside/theirs.txt").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_says_which_paths_are_mount_points() {
+        let text = "\
+22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw
+36 22 0:5 / /proc rw,nosuid shared:5 - proc proc rw
+40 22 8:2 /src /home/me/my\\040agents/mnt rw shared:1 - ext4 /dev/sda2 rw
+";
+        assert_eq!(is_mount_point(text, b"/proc"), Some(true));
+        assert_eq!(is_mount_point(text, b"/home/me/my agents/mnt"), Some(true));
+        assert_eq!(is_mount_point(text, b"/home/me/my agents"), Some(false));
+        assert_eq!(is_mount_point(text, b"/home/me/my\\040agents/mnt"), Some(false));
+        assert_eq!(is_mount_point("22 1 8:2 /\n", b"/"), None);
+        assert_eq!(is_mount_point("40 22 8:2 / /a\\04 rw\n", b"/a"), None);
+    }
+
+    /// The fallback a kernel without mount ids takes, run on this one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_mountinfo_fallback_reads_a_real_mount_point_and_an_ordinary_folder() {
+        let open = |path: &Path| {
+            rustix::fs::open(
+                path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+        let tmp = root();
+        let inside = tmp.path().join("in side");
+        std::fs::create_dir(&inside).unwrap();
+        assert_eq!(
+            mount_by_mountinfo(&open(&inside), Some(&mountinfo)),
+            Mount::MountPoint(false)
+        );
+        assert_eq!(
+            mount_by_mountinfo(&open(Path::new("/proc")), Some(&mountinfo)),
+            Mount::MountPoint(true)
+        );
+        assert_eq!(mount_by_mountinfo(&open(&inside), None), Mount::Unknown);
     }
 
     #[test]

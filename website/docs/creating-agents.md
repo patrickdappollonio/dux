@@ -935,8 +935,8 @@ and dux creates that folder and starts the agent in it.
   exception is a folder dux created for a start that was interrupted before the agent
   existed: while it holds nothing but its `.dux-agent-folder` file and nothing is using
   it, dux uses it again.
-- A name whose folder another agent already runs in is refused with that agent's name,
-  even when the folder itself is gone.
+- A name whose folder already belongs to another agent, running or stopped, is refused
+  with that agent's name, even when the folder itself is gone.
 - The folder is a plain folder: dux does not make it a git repository.
 - Renaming the agent later never moves or renames its folder.
 
@@ -1038,10 +1038,11 @@ deleting the agent may do with the folder.
 > is still working in it, or if dux cannot tell, it is kept and dux says why. If dux quits
 > before the agent has stopped, it finishes the deletion the next time it starts.
 >
-> dux never deletes inside another filesystem mounted in the folder. On macOS, and on
-> Linux older than 5.8, dux cannot tell a second mount of the same disk (a bind mount)
-> inside the folder from the folder itself, and deletes what it shows: unmount it before
-> you delete the agent. A read-only folder of yours inside it is made writable so it can
+> dux never deletes inside another filesystem mounted in the folder. On Linux that
+> includes a second mount of the same disk (a bind mount), and where dux cannot tell
+> whether anything is mounted in the folder it keeps the whole folder and says so. On
+> macOS dux cannot tell a second mount of the same disk inside the folder from the folder
+> itself, and deletes what it shows: unmount it before you delete the agent. A read-only folder of yours inside it is made writable so it can
 > be deleted, and gets its old permissions back if the deletion stops before deleting it.
 > If the deletion stops part way, dux says where it stopped and how many files are left,
 > and does not try again.
