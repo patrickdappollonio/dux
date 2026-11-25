@@ -2026,6 +2026,10 @@ impl Engine {
             self.pending_group_removals = still_pending;
         }
 
+        // A folder dux created for a deleted standalone agent is deleted once
+        // the last of that agent's processes is gone.
+        self.release_folder_removals(&reaped_ids);
+
         // Restart barrier: the tabs a recreate restarts start again only once
         // the last of their old processes is gone, which
         // `sweep_recreate_restarts` checks right after this pass.

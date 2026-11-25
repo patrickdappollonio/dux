@@ -151,6 +151,7 @@ impl Engine {
     pub(crate) fn finish_pending_worktree_removals(&mut self, abort: Option<&AtomicBool>) {
         let aborted = || abort.is_some_and(|flag| flag.load(Ordering::SeqCst));
         if self.pending_group_removals.is_empty()
+            && self.pending_folder_removals.is_empty()
             && self
                 .removal_workers
                 .iter()
@@ -159,6 +160,7 @@ impl Engine {
             return;
         }
         let waiting = self.pending_group_removals.len()
+            + self.pending_folder_removals.len()
             + self
                 .removal_workers
                 .iter()
@@ -179,7 +181,7 @@ impl Engine {
             for removal in self.reap_terminating_ptys().removals {
                 let _ = self.dispatch_deferred_worktree_removal(removal);
             }
-            if self.pending_group_removals.is_empty()
+            if (self.pending_group_removals.is_empty() && self.pending_folder_removals.is_empty())
                 || aborted()
                 || Instant::now() >= barrier_deadline
             {
@@ -198,6 +200,7 @@ impl Engine {
             std::thread::sleep(Duration::from_millis(50));
         }
         let unfinished = self.pending_group_removals.len()
+            + self.pending_folder_removals.len()
             + self
                 .removal_workers
                 .iter()

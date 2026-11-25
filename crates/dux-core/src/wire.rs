@@ -145,6 +145,11 @@ pub enum WireCommand {
         /// Absent means the caller predates them and `delete_branch` speaks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branches: Option<crate::branch_history::BranchAnswersWire>,
+        /// Whether a standalone agent's folder is deleted too. Only a folder
+        /// dux created can be: for any other the whole delete is refused.
+        /// Absent means the folder is kept.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        delete_folder: bool,
     },
     /// Replace the global `[env]` table with these variables.
     PersistGlobalEnv {
@@ -1878,15 +1883,30 @@ pub fn delete_session_status_message(
         // is exactly as it was. Said explicitly rather than left implied,
         // because "Deleted agent X." on its own reads as though something on
         // disk went with it.
-        WorktreeRemoval::NothingToRemove { folder_label } => {
-            crate::status_text![
+        WorktreeRemoval::NothingToRemove {
+            folder_label,
+            folder,
+        } => match folder {
+            crate::engine::FolderFate::KeptChosen => crate::status_text![
                 opening,
                 ". Its folder ",
                 q(folder_label),
-                " was left untouched: dux never creates, moves or removes a standalone agent's \
-                 folder. Anything the agent wrote there is still there."
-            ]
-        }
+                " was left untouched: dux never moves or removes a folder you chose for a \
+                 standalone agent. Anything the agent wrote there is still there."
+            ],
+            crate::engine::FolderFate::KeptCreated => crate::status_text![
+                opening,
+                ". Its folder ",
+                q(folder_label),
+                ", which dux created for it, was kept with everything the agent wrote there."
+            ],
+            crate::engine::FolderFate::Deleting => crate::status_text![
+                opening,
+                ". Its folder ",
+                q(folder_label),
+                ", which dux created for it, is deleted once the agent has stopped."
+            ],
+        },
         // The worktree went and the branches stayed, because they were not dux's
         // to delete. The wording names every kept branch with its own reason and
         // how to remove one by hand: once the worktree is gone, no dux surface
@@ -5928,11 +5948,13 @@ impl Engine {
                 delete_worktree,
                 delete_branch,
                 branches,
+                delete_folder,
             } => Command::BeginDeleteSession {
                 session_id,
                 delete_worktree,
                 delete_branch,
                 branches,
+                delete_folder,
             },
             // Rename, Reconnect, CheckoutProjectDefaultBranch and
             // ChangeAgentProvider are NOT reconstructible into a single
@@ -7451,6 +7473,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 delete_worktree: true,
                 delete_branch: None,
+                delete_folder: false,
             },
             "an absent branch answer must mean nobody was asked, not \"keep it\": that is what \
              keeps a caller written before the checkbox existed behaving as it always did"
@@ -7471,6 +7494,7 @@ mod tests {
                     session_id: "s1".to_string(),
                     delete_worktree: true,
                     delete_branch: expected,
+                    delete_folder: false,
                 }
             );
         }
@@ -13626,6 +13650,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 delete_worktree: false,
                 delete_branch: None,
+                delete_folder: false,
             })
             .expect("apply_wire");
         let status = outcome.status.expect("status");

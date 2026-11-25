@@ -262,6 +262,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         process_registry: dux_core::process_sessions::AgentProcessRegistry::default(),
         removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
+        pending_folder_removals: Vec::new(),
         pending_detachments: Vec::new(),
         pending_tab_restarts: Vec::new(),
         unsaved_branch_drifts: std::collections::HashMap::new(),

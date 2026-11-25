@@ -949,6 +949,7 @@ async fn delete_session(
         delete_worktree: q.delete_worktree,
         delete_branch: q.delete_branch,
         branches: body.branches,
+        delete_folder: false,
     };
     let result = match dispatch_guarded(
         &state,

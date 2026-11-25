@@ -13,6 +13,7 @@ pub mod config_saver;
 #[doc(hidden)]
 pub mod destructive_guard;
 mod events;
+mod folder_removal;
 mod followup;
 mod in_flight;
 mod lifecycle;
@@ -34,6 +35,8 @@ pub mod status_op;
 
 #[cfg(test)]
 mod classic_keys_tests;
+#[cfg(test)]
+mod folder_removal_tests;
 #[cfg(test)]
 mod races_review2_tests;
 #[cfg(test)]
@@ -93,6 +96,7 @@ pub use events::{
     FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, RemovedBranches,
     StatusUpdate, WorktreeOnDelete, WorktreeRemoval, survivors_kept_worktree_message,
 };
+pub use events::{FolderFate, FolderOnDelete};
 pub(crate) use events::{
     RemovalCoordinationInputs, cwd_keeps, end_agent_processes_before_removal, occupant_after_wait,
     perform_deferred_removal, remove_after_last_look, standalone_processes_keep,
@@ -590,6 +594,10 @@ pub struct Engine {
     /// [`GroupWorktreeRemoval`]). `reap_terminating_ptys` drains these as their
     /// members reap.
     pub pending_group_removals: Vec<lifecycle::GroupWorktreeRemoval>,
+    /// Folders dux created for deleted standalone agents, each waiting for the
+    /// agent's processes to reap before it is deleted (see
+    /// [`folder_removal::GroupFolderRemoval`]).
+    pub pending_folder_removals: Vec<folder_removal::GroupFolderRemoval>,
     /// In-flight detach requests, each waiting for every tab of one agent to
     /// reap before its one outcome sentence is emitted (see
     /// [`PendingDetach`]). `reap_terminating_ptys` drains these as their members

@@ -125,6 +125,7 @@ impl App {
             delete_worktree: worktree == WorktreeOnDelete::Remove,
             delete_branch,
             branches,
+            delete_folder: false,
         }))
     }
 

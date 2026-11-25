@@ -91,6 +91,7 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         process_registry: crate::process_sessions::AgentProcessRegistry::default(),
         removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
+        pending_folder_removals: Vec::new(),
         pending_detachments: Vec::new(),
         pending_tab_restarts: Vec::new(),
         unsaved_branch_drifts: std::collections::HashMap::new(),

@@ -1985,6 +1985,7 @@ mod tests {
                         session_id: "s1".to_string(),
                         delete_worktree: false,
                         delete_branch: None,
+                        delete_folder: false,
                     },
                     OperationKind::AgentDelete,
                 )
@@ -2111,6 +2112,7 @@ mod tests {
                         session_id: "s1".to_string(),
                         delete_worktree: true,
                         delete_branch: Some(true),
+                        delete_folder: false,
                     },
                     OperationKind::AgentDelete,
                 )
@@ -2276,6 +2278,7 @@ mod tests {
                 "a standalone agent's folder",
                 WorktreeRemoval::NothingToRemove {
                     folder_label: "~/f".to_string(),
+                    folder: crate::engine::FolderFate::KeptChosen,
                 },
                 vec![],
             ),

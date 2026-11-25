@@ -6410,6 +6410,7 @@ mod tests {
                     session_id: "s-cli".to_string(),
                     delete_worktree: false,
                     delete_branch: None,
+                    delete_folder: false,
                 }))
         });
         let deadline = Instant::now() + std::time::Duration::from_secs(15);

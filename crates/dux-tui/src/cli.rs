@@ -1146,9 +1146,13 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
             .collect();
     }
 
+    // The folders dux created for standalone agents go with the reset, as the
+    // worktrees it created do; a folder the user chose stays.
+    let created_folders = created_folders_reset_removes(&sessions, &occupied_folders);
     // Nothing is deleted until everything dux started has stopped and one last
     // look finds nothing left in the way.
-    let removing = folders_reset_removes(paths, &sessions, &occupied_folders);
+    let mut removing = folders_reset_removes(paths, &sessions, &occupied_folders);
+    removing.extend(created_folders.iter().map(|(path, _)| path.clone()));
     stop_recorded_programs(paths, &recorded, report)?;
     ensure_nothing_runs(&recorded, &removing)?;
 
@@ -1171,6 +1175,7 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         }
     }
     report.say(format_args!("{}", removed_worktrees_line(removed.len())));
+    remove_created_folders(&created_folders, report);
 
     // What the loop above could not account for goes with the root, except a folder
     // a standalone agent occupies; it stops at the first entry it cannot remove.
@@ -1196,6 +1201,54 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The folders dux created for standalone agents, with the identity each had
+/// when dux created it, except one that holds another agent's folder or a
+/// project's repository.
+fn created_folders_reset_removes(
+    sessions: &[dux_core::model::AgentSession],
+    occupied: &[PathBuf],
+) -> Vec<(PathBuf, dux_core::model::DirectoryIdentity)> {
+    sessions
+        .iter()
+        .filter_map(|session| match session.workspace.folder_removal_right() {
+            dux_core::model::FolderRemovalRight::CreatedByDux { path, identity } => {
+                Some((PathBuf::from(path), identity))
+            }
+            dux_core::model::FolderRemovalRight::ChosenByUser { .. }
+            | dux_core::model::FolderRemovalRight::NotAFolder => None,
+        })
+        .filter(|(path, _)| {
+            let own = canonical_or_original(path);
+            !occupied
+                .iter()
+                .any(|kept| *kept != own && dux_core::worktree_ops::folder_contains(&own, kept))
+        })
+        .collect()
+}
+
+/// Delete the folders dux created for standalone agents, each only while it
+/// is still the directory dux created. A folder that cannot be deleted is a
+/// warning and the reset goes on.
+fn remove_created_folders(
+    folders: &[(PathBuf, dux_core::model::DirectoryIdentity)],
+    report: &mut ResetReport,
+) {
+    let mut removed = 0_usize;
+    for (path, identity) in folders {
+        match dux_core::agent_folders::remove_created_folder(path, *identity) {
+            Ok(_) => removed += 1,
+            Err(reason) => report.warn(format_args!(
+                "warning: kept the standalone agent folder {}: {reason}",
+                path.display()
+            )),
+        }
+    }
+    report.say(format_args!(
+        "removed {}",
+        count_of(removed, "standalone agent folder dux created")
+    ));
 }
 
 /// Every left-over folder record, with the repository its project lives in.
@@ -2411,6 +2464,71 @@ mod tests {
             assert!(harness.paths.config_path.exists(), "{what}");
             assert!(harness.paths.sessions_db_path.exists(), "{what}");
         }
+    }
+
+    /// A factory reset removes the folder dux created for a standalone agent,
+    /// with everything in it, and keeps a folder the user chose.
+    #[test]
+    fn a_factory_reset_removes_the_folders_dux_created_and_keeps_chosen_ones() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+        };
+        let created =
+            dux_core::agent_folders::create_agent_folder(&tmp.path().join("agents"), "otter")
+                .expect("created");
+        fs::write(created.path.join("notes.txt"), "agent wrote this\n").expect("seed");
+        let chosen = tmp.path().join("my-notes");
+        fs::create_dir_all(&chosen).expect("chosen dir");
+        fs::write(chosen.join("notes.txt"), "mine\n").expect("seed");
+
+        let now = Utc::now();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        for (id, workspace) in [
+            (
+                "made",
+                dux_core::model::FolderWorkspace {
+                    folder_path: created.path.to_string_lossy().into_owned(),
+                    origin: dux_core::model::FolderOrigin::CreatedByDux(created.identity),
+                },
+            ),
+            (
+                "picked",
+                dux_core::model::FolderWorkspace::chosen(chosen.to_string_lossy().to_string()),
+            ),
+        ] {
+            store
+                .upsert_session(&AgentSession {
+                    id: id.to_string(),
+                    slot_tab_id: format!("{id}-slot"),
+                    provider: ProviderKind::new("claude"),
+                    workspace: dux_core::model::AgentWorkspace::Folder(workspace),
+                    title: Some(id.to_string()),
+                    started_providers: Vec::new(),
+                    desired_running: false,
+                    auto_reopen_enabled: false,
+                    status: SessionStatus::Detached,
+                    created_at: now,
+                    updated_at: now,
+                    last_focused_tab: None,
+                })
+                .expect("upsert");
+        }
+        drop(store);
+
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
+
+        assert!(!created.path.exists(), "the folder dux created goes");
+        assert_eq!(
+            fs::read_to_string(chosen.join("notes.txt")).expect("kept"),
+            "mine\n",
+            "the folder the user chose stays"
+        );
     }
 
     /// A factory reset must not remove a STANDALONE agent's folder, even when
