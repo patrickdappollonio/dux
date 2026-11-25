@@ -149,6 +149,11 @@ impl Rig {
         let received = dir.path().join("received");
         let (app, serving) = app_typing_into(&received, setup);
         let (terminal, keyboard) = UnixStream::pair().expect("a socket pair");
+        set_socket_room(&keyboard, libc::SO_SNDBUF);
+        set_socket_room(&terminal, libc::SO_RCVBUF);
+        keyboard
+            .set_nonblocking(true)
+            .expect("a keyboard that never blocks");
         let mut rig = Self {
             app,
             terminal: terminal.into(),
@@ -163,10 +168,24 @@ impl Rig {
         rig
     }
 
-    /// Bytes arriving from the terminal, in one write.
+    /// Bytes arriving from the terminal, in one write. Nothing reads the
+    /// terminal until the case's next poll, which runs on this same thread,
+    /// so a write that does not fit in the socket pair's room fails the case
+    /// at once rather than waiting for a reader that never comes.
     pub(super) fn type_bytes(&mut self, bytes: &[u8]) {
         use std::io::Write as _;
-        self.keyboard.write_all(bytes).expect("type into dux");
+        let typed = match self.keyboard.write(bytes) {
+            Ok(typed) => typed,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => 0,
+            Err(err) => panic!("type into dux: {err}"),
+        };
+        assert_eq!(
+            typed,
+            bytes.len(),
+            "typed {typed} of {} bytes in one write: the stand-in terminal, given \
+             {TYPING_ROOM} bytes of room, is full until a poll reads it",
+            bytes.len()
+        );
     }
 
     /// Read `terminal` from now on, at the descriptor number the rig's own
@@ -285,6 +304,36 @@ impl Rig {
             debugger_lines,
         }
     }
+}
+
+/// The buffer room both ends of the stand-in terminal's socket pair are
+/// given. A socket pair's own default differs by platform (8 KiB on macOS,
+/// about 208 KiB on Linux); with this room the largest write a case makes
+/// lands whole in one go on both.
+const TYPING_ROOM: usize = 64 * 1024;
+
+/// Give `socket` [`TYPING_ROOM`] bytes of the buffer `option` names.
+fn set_socket_room(socket: &impl std::os::fd::AsRawFd, option: libc::c_int) {
+    let room = libc::c_int::try_from(TYPING_ROOM).expect("the room fits a C int");
+    let size = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
+        .expect("a C int's size fits a socklen_t");
+    // SAFETY: the descriptor is a live socket, and the value pointer and its
+    // length describe `room`, which outlives the call.
+    let set = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            option,
+            (&raw const room).cast(),
+            size,
+        )
+    };
+    assert_eq!(
+        set,
+        0,
+        "size the stand-in terminal's buffer: {}",
+        std::io::Error::last_os_error()
+    );
 }
 
 fn prompt_name(prompt: &PromptState) -> String {
@@ -1987,6 +2036,10 @@ mod hand_overs_without_a_key {
         // The program reads nothing until `go` exists, so its queue fills; it
         // is full for good once a wait frees no room in it.
         loop {
+            assert!(
+                Instant::now() < deadline,
+                "the program's write queue never stayed full"
+            );
             while client.enqueue_bytes(b"q") {}
             std::thread::sleep(Duration::from_millis(50));
             if !client.enqueue_bytes(b"q") {
