@@ -29,13 +29,62 @@ fn created_agent(engine: &mut Engine, id: &str, root: &Path) -> PathBuf {
     created.path
 }
 
+/// Begin the delete and, when it runs inline, delete the record, as both
+/// surfaces do.
 fn delete(engine: &mut Engine, id: &str, folder: FolderOnDelete) -> BeginDeleteSessionOutcome {
-    engine.begin_delete_session_full(
+    let outcome = engine.begin_delete_session_full(
         id,
         WorktreeOnDelete::Keep,
         &BranchDeleteRequest::from_legacy(None),
         folder,
-    )
+    );
+    if let BeginDeleteSessionOutcome::Inline { .. } = outcome {
+        engine
+            .finish_delete_session(id)
+            .expect("the record is deleted");
+    }
+    outcome
+}
+
+/// A program in its own session whose current folder is `cwd`, killed when
+/// dropped.
+struct Sleeper(std::process::Child);
+
+impl Sleeper {
+    fn start(cwd: &Path) -> Self {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30"]).current_dir(cwd);
+        // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        Self(command.spawn().expect("spawn sleep"))
+    }
+
+    fn session(&self) -> crate::process_sessions::ProcessSession {
+        crate::process_sessions::ProcessSession::started_now(self.0.id())
+    }
+}
+
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn pending_rows(engine: &Engine) -> Vec<String> {
+    engine
+        .session_store
+        .load_pending_folder_removals()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.session_id)
+        .collect()
 }
 
 /// The final the folder removal ends on, as text.
@@ -186,7 +235,7 @@ fn a_folder_replaced_since_dux_created_it_is_kept_and_said_so() {
 fn a_folder_already_gone_is_said_to_be_gone() {
     let (mut engine, tmp) = test_engine();
     let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
-    std::fs::remove_dir(&folder).unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
     let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
     let text = folder_final(&engine);
     assert!(text.contains("was already gone"), "{text}");
@@ -204,7 +253,7 @@ fn a_folder_another_agent_works_in_is_kept() {
 
     let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
     let text = folder_final(&engine);
-    assert!(text.contains("now works in it"), "{text}");
+    assert!(text.contains("runs in"), "{text}");
     assert!(inside.exists());
 }
 
@@ -330,7 +379,7 @@ fn a_folder_another_agent_reaches_through_a_link_is_kept() {
 
     let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
     let text = folder_final(&engine);
-    assert!(text.contains("now works in it"), "{text}");
+    assert!(text.contains("runs in"), "{text}");
     assert!(folder.join("theirs.txt").exists());
 }
 
@@ -356,4 +405,165 @@ fn renaming_keeps_the_folder_and_that_dux_created_it() {
     let stored = stored.iter().find(|s| s.id == "otter").unwrap();
     assert_eq!(stored.title.as_deref(), Some("badger"));
     assert!(stored.workspace.folder_created_by_dux());
+}
+
+/// A shell dux started elsewhere and `cd`'d into the folder keeps it: the
+/// same working-directory check a worktree removal makes.
+#[test]
+fn a_process_dux_started_standing_in_the_folder_keeps_it() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    std::fs::write(folder.join("work.txt"), "keep").unwrap();
+    let shell = Sleeper::start(&folder);
+    engine
+        .process_registry
+        .register("a-terminal", shell.session(), tmp.path());
+
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("Kept the folder"), "{text}");
+    assert!(text.contains("working in it"), "{text}");
+    assert!(folder.join("work.txt").exists());
+}
+
+/// Any program working in the folder keeps it, whoever started it.
+#[test]
+fn a_program_dux_did_not_start_working_in_the_folder_keeps_it() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    let _program = Sleeper::start(&folder);
+
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("is working in it"), "{text}");
+    assert!(folder.is_dir());
+}
+
+/// An agent being created on the folder keeps it.
+#[test]
+fn an_agent_being_created_on_the_folder_keeps_it() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    engine
+        .worktree_ops()
+        .hold_as(
+            crate::worktree_ops::HoldOwner::CreateOp("op-1".to_string()),
+            &folder,
+            crate::worktree_ops::WorktreeOpKind::CreateAgent,
+        )
+        .expect("the create holds the folder");
+
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("an agent is being created in it"), "{text}");
+    assert!(folder.is_dir());
+}
+
+/// A process the deleted agent left running in the background keeps the
+/// folder: dux never ends a standalone agent's processes.
+#[test]
+fn a_process_the_agent_left_running_keeps_the_folder() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    let server = Sleeper::start(&folder);
+    engine
+        .process_registry
+        .register_standalone("otter", server.session(), &folder);
+
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("still running"), "{text}");
+    assert!(folder.is_dir());
+}
+
+/// A record that cannot be deleted keeps the folder, and the agent stays
+/// recorded with the folder it runs in.
+#[test]
+fn a_record_that_cannot_be_deleted_keeps_the_folder() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    rusqlite::Connection::open(&engine.paths.sessions_db_path)
+        .unwrap()
+        .execute_batch(
+            "create trigger refuse_session_delete before delete on agent_sessions \
+             begin select raise(abort, 'disk is full'); end",
+        )
+        .unwrap();
+
+    let outcome = engine.begin_delete_session_full(
+        "otter",
+        WorktreeOnDelete::Keep,
+        &BranchDeleteRequest::from_legacy(None),
+        FolderOnDelete::Remove,
+    );
+    assert!(matches!(outcome, BeginDeleteSessionOutcome::Inline { .. }));
+    assert!(engine.finish_delete_session("otter").is_err());
+    let _ = engine.reap_terminating_ptys();
+
+    assert!(engine.pending_folder_removals.is_empty());
+    assert!(pending_rows(&engine).is_empty());
+    assert!(engine.sessions.iter().any(|s| s.id == "otter"));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(folder.is_dir(), "the folder stays with its agent");
+    assert!(
+        !engine.worktree_ops().is_being_removed(&folder),
+        "the folder is free for the agent again"
+    );
+}
+
+/// The removal is written down with the record's deletion, so a quit while
+/// it waits for the agent's processes leaves it for the next start, which
+/// finishes it and says so.
+#[test]
+fn a_removal_left_waiting_at_a_quit_is_finished_at_the_next_start() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    engine
+        .providers
+        .insert(TabId::new("otter-slot"), spawn_cat(&folder));
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    assert_eq!(pending_rows(&engine), vec!["otter".to_string()]);
+    assert!(folder.is_dir());
+
+    // dux quits: what it held in memory is gone, and the agent's process
+    // ends with it.
+    engine.pending_folder_removals.clear();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !engine.terminating_ptys.is_empty() {
+        let _ = engine.reap_terminating_ptys();
+        assert!(Instant::now() < deadline, "the agent never reaped");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(folder.is_dir());
+
+    // The next start, on the same database.
+    let (mut next, _next_tmp) = test_engine();
+    next.session_store =
+        crate::storage::SessionStore::open(&engine.paths.sessions_db_path).unwrap();
+    next.paths.sessions_db_path = engine.paths.sessions_db_path.clone();
+    next.resume_pending_folder_removals();
+    let text = folder_final(&next);
+    assert!(text.contains("Deleted the folder"), "{text}");
+    assert!(
+        text.contains("had not finished when it last quit"),
+        "{text}"
+    );
+    assert!(!folder.exists());
+    assert!(pending_rows(&next).is_empty());
+}
+
+/// A folder recorded with no mark is kept, with the reason.
+#[test]
+fn a_folder_recorded_without_a_mark_is_kept_and_said_so() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    if let AgentWorkspace::Folder(workspace) = &mut engine.sessions[0].workspace
+        && let FolderOrigin::CreatedByDux(identity) = &mut workspace.origin
+    {
+        identity.mark = None;
+    }
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("no mark on record"), "{text}");
+    assert!(folder.is_dir());
 }

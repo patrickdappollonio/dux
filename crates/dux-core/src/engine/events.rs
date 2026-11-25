@@ -1051,12 +1051,32 @@ fn remove_by_current_names(
     .map(RemovedBranches::Outcomes)
 }
 
+/// What a removal deletes, which decides how it words a folder it keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemovalPlace {
+    /// A managed worktree: a kept one is named in a whole sentence that ends
+    /// by pointing at the worktree manager.
+    Worktree,
+    /// A folder dux created for a deleted standalone agent: only the reason,
+    /// which the folder removal's final sets in a sentence naming the folder.
+    CreatedFolder,
+}
+
 /// The final when processes a standalone agent started are still running in
 /// (or under) the folder being removed: dux never ends them, so the folder is
 /// kept. `None` when none are running. Blocking: a worker thread's call.
 pub(crate) fn standalone_processes_keep(
     registry: &crate::process_sessions::AgentProcessRegistry,
     folder: &str,
+) -> Option<String> {
+    standalone_processes_keep_in(registry, folder, RemovalPlace::Worktree)
+}
+
+/// [`standalone_processes_keep`], worded for `place`.
+pub(crate) fn standalone_processes_keep_in(
+    registry: &crate::process_sessions::AgentProcessRegistry,
+    folder: &str,
+    place: RemovalPlace,
 ) -> Option<String> {
     let sessions = registry.standalone_sessions_in(std::path::Path::new(folder));
     if sessions.is_empty() {
@@ -1066,10 +1086,13 @@ pub(crate) fn standalone_processes_keep(
         Ok(running) => running,
         // A record still being written: fail closed, the folder is kept.
         Err(reason) => {
-            return Some(format!(
-                "the worktree at {} was kept: {reason}.",
-                crate::home_path::shorten_home(std::path::Path::new(folder))
-            ));
+            return Some(match place {
+                RemovalPlace::Worktree => format!(
+                    "the worktree at {} was kept: {reason}.",
+                    crate::home_path::shorten_home(std::path::Path::new(folder))
+                ),
+                RemovalPlace::CreatedFolder => reason,
+            });
         }
     };
     if running.is_empty() {
@@ -1081,20 +1104,24 @@ pub(crate) fn standalone_processes_keep(
         .map(|folder| crate::home_path::shorten_home(&folder))
         .collect::<Vec<_>>()
         .join(", ");
-    Some(format!(
-        "the worktree at {} was kept: {} that a standalone agent started in {started_in} \
-         {} still running ({}). dux never ends a standalone agent's processes; stop {}, then \
-         remove the worktree from the worktree manager.",
-        crate::home_path::shorten_home(std::path::Path::new(folder)),
-        if running.len() == 1 {
-            "a process"
-        } else {
-            "processes"
-        },
-        if running.len() == 1 { "is" } else { "are" },
-        crate::process_sessions::describe(&running),
-        if running.len() == 1 { "it" } else { "them" },
-    ))
+    let (some, are, them) = if running.len() == 1 {
+        ("a process", "is", "it")
+    } else {
+        ("processes", "are", "them")
+    };
+    let described = crate::process_sessions::describe(&running);
+    Some(match place {
+        RemovalPlace::Worktree => format!(
+            "the worktree at {} was kept: {some} that a standalone agent started in {started_in} \
+             {are} still running ({described}). dux never ends a standalone agent's processes; \
+             stop {them}, then remove the worktree from the worktree manager.",
+            crate::home_path::shorten_home(std::path::Path::new(folder)),
+        ),
+        RemovalPlace::CreatedFolder => format!(
+            "{some} that a standalone agent started in {started_in} {are} still running \
+             ({described}), and dux never ends a standalone agent's processes; stop {them} first"
+        ),
+    })
 }
 
 /// What still occupies a folder once a removal has waited for everything it
@@ -1158,6 +1185,7 @@ const RECORD_SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(10)
 pub(crate) fn record_not_saved(
     registries: &[&crate::process_sessions::AgentProcessRegistry],
     folder: &str,
+    place: RemovalPlace,
 ) -> Option<String> {
     if registries
         .iter()
@@ -1165,13 +1193,20 @@ pub(crate) fn record_not_saved(
     {
         return None;
     }
-    Some(format!(
-        "the worktree at {} was kept: dux could not save its record of what it started there \
-         within {} seconds (the session database may be busy). Remove it from the worktree \
-         manager in a moment.",
-        crate::home_path::shorten_home(std::path::Path::new(folder)),
-        RECORD_SAVE_WAIT.as_secs()
-    ))
+    Some(match place {
+        RemovalPlace::Worktree => format!(
+            "the worktree at {} was kept: dux could not save its record of what it started there \
+             within {} seconds (the session database may be busy). Remove it from the worktree \
+             manager in a moment.",
+            crate::home_path::shorten_home(std::path::Path::new(folder)),
+            RECORD_SAVE_WAIT.as_secs()
+        ),
+        RemovalPlace::CreatedFolder => format!(
+            "dux could not save its record of what it started there within {} seconds (the \
+             session database may be busy)",
+            RECORD_SAVE_WAIT.as_secs()
+        ),
+    })
 }
 
 /// The final when a process dux started (and is not ending for this removal)
@@ -1183,12 +1218,25 @@ pub(crate) fn cwd_keeps(
     folder: &str,
     processes: &crate::engine::RemovalProcesses,
 ) -> Option<String> {
+    cwd_keeps_in(live, folder, processes, RemovalPlace::Worktree)
+}
+
+/// [`cwd_keeps`], worded for `place`.
+pub(crate) fn cwd_keeps_in(
+    live: &crate::process_sessions::AgentProcessRegistry,
+    folder: &str,
+    processes: &crate::engine::RemovalProcesses,
+    place: RemovalPlace,
+) -> Option<String> {
     let reason = live.cwd_occupant(std::path::Path::new(folder), &processes.sessions)?;
-    Some(format!(
-        "the worktree at {} was kept: {reason}, then remove the worktree from the worktree \
-         manager.",
-        crate::home_path::shorten_home(std::path::Path::new(folder))
-    ))
+    Some(match place {
+        RemovalPlace::Worktree => format!(
+            "the worktree at {} was kept: {reason}, then remove the worktree from the worktree \
+             manager.",
+            crate::home_path::shorten_home(std::path::Path::new(folder))
+        ),
+        RemovalPlace::CreatedFolder => reason,
+    })
 }
 
 /// THE order every removal keeps between holding its claim and running git,
@@ -1219,6 +1267,27 @@ pub(crate) fn wait_then_last_look(
     registries: &[&crate::process_sessions::AgentProcessRegistry],
     last_look: impl FnOnce() -> Option<String>,
 ) -> Result<(), String> {
+    wait_then_last_look_in(
+        lease,
+        folder,
+        wait,
+        on_waiting,
+        registries,
+        RemovalPlace::Worktree,
+        last_look,
+    )
+}
+
+/// [`wait_then_last_look`], worded for `place`.
+pub(crate) fn wait_then_last_look_in(
+    lease: &crate::worktree_ops::RemovalLease,
+    folder: &str,
+    wait: std::time::Duration,
+    on_waiting: impl FnOnce(&[crate::worktree_ops::WorktreeOpKind]),
+    registries: &[&crate::process_sessions::AgentProcessRegistry],
+    place: RemovalPlace,
+    last_look: impl FnOnce() -> Option<String>,
+) -> Result<(), String> {
     #[cfg(test)]
     removal_steps::note("holds");
     let holders = lease.holders();
@@ -1226,11 +1295,16 @@ pub(crate) fn wait_then_last_look(
         on_waiting(&holders);
     }
     if let Err(still) = lease.wait_for_holders(wait) {
-        return Err(crate::engine::removal::removal_wait_expired_message(
-            lease.path(),
-            wait,
-            &crate::worktree_ops::describe_holders(&still),
-        ));
+        let still = crate::worktree_ops::describe_holders(&still);
+        return Err(match place {
+            RemovalPlace::Worktree => {
+                crate::engine::removal::removal_wait_expired_message(lease.path(), wait, &still)
+            }
+            RemovalPlace::CreatedFolder => format!(
+                "dux waited {} seconds for {still} in it to finish and it had not",
+                wait.as_secs()
+            ),
+        });
     }
     // A removal of a folder around this one, or inside it, or an editor's or
     // the changes pane's delete of one, never runs at the same time as this
@@ -1239,12 +1313,18 @@ pub(crate) fn wait_then_last_look(
     #[cfg(test)]
     removal_steps::note("claims");
     if !lease.wait_for_overlapping_removals(wait) {
-        return Err(format!(
-            "the worktree at {} was kept: a removal of a folder around or inside it was still \
-             running after {}s. Remove it from the worktree manager once that has finished.",
-            crate::home_path::shorten_home(std::path::Path::new(folder)),
-            wait.as_secs()
-        ));
+        return Err(match place {
+            RemovalPlace::Worktree => format!(
+                "the worktree at {} was kept: a removal of a folder around or inside it was still \
+                 running after {}s. Remove it from the worktree manager once that has finished.",
+                crate::home_path::shorten_home(std::path::Path::new(folder)),
+                wait.as_secs()
+            ),
+            RemovalPlace::CreatedFolder => format!(
+                "a removal of a folder around or inside it was still running after {}s",
+                wait.as_secs()
+            ),
+        });
     }
     // A spawn that began before the claim registers its session in a
     // moment; nothing new can begin now that the folder is claimed.
@@ -1255,7 +1335,8 @@ pub(crate) fn wait_then_last_look(
             std::path::Path::new(folder),
             crate::process_sessions::SPAWN_WAIT,
         ) {
-            return Err(occupied_after_wait_message(
+            return Err(kept_after_wait(
+                place,
                 folder,
                 "something dux is starting in it has not finished starting",
             ));
@@ -1265,7 +1346,7 @@ pub(crate) fn wait_then_last_look(
     // already happened, the sessions just registered included.
     #[cfg(test)]
     removal_steps::note("flush");
-    if let Some(message) = record_not_saved(registries, folder) {
+    if let Some(message) = record_not_saved(registries, folder, place) {
         return Err(message);
     }
     #[cfg(test)]
@@ -1276,8 +1357,17 @@ pub(crate) fn wait_then_last_look(
     // that walked in. Anything that occupies the folder keeps it.
     let looked = last_look();
     match looked {
-        Some(occupant) => Err(occupied_after_wait_message(folder, &occupant)),
+        Some(occupant) => Err(kept_after_wait(place, folder, &occupant)),
         None => Ok(()),
+    }
+}
+
+/// [`occupied_after_wait_message`] for a worktree; the occupant alone for a
+/// folder dux created.
+fn kept_after_wait(place: RemovalPlace, folder: &str, occupant: &str) -> String {
+    match place {
+        RemovalPlace::Worktree => occupied_after_wait_message(folder, occupant),
+        RemovalPlace::CreatedFolder => occupant.to_string(),
     }
 }
 
@@ -2696,14 +2786,26 @@ impl Engine {
         session_id: &str,
     ) -> anyhow::Result<Option<FinishDeleteSessionOutcome>> {
         if !self.sessions.iter().any(|s| s.id == session_id) {
+            self.settle_held_folder_removal(session_id, false);
             return Ok(None);
         }
         // Persist the deletion FIRST so a DB failure leaves in-memory state
         // untouched and the session remains visible in the UI. If we cleared
         // in-memory state first and the DB call then failed, the session
-        // would vanish from the UI but reappear on restart.
-        self.session_store.delete_session(session_id)?;
-        Ok(self.finish_delete_session_memory(session_id))
+        // would vanish from the UI but reappear on restart. A folder dux
+        // created that goes with the agent is written down in the same
+        // transaction, and is deleted only once that has been committed.
+        let folder = self.held_folder_removal_row(session_id);
+        if let Err(err) = self
+            .session_store
+            .delete_session_with_folder_removal(session_id, folder.as_ref())
+        {
+            self.settle_held_folder_removal(session_id, false);
+            return Err(err);
+        }
+        let outcome = self.finish_delete_session_memory(session_id);
+        self.settle_held_folder_removal(session_id, true);
+        Ok(outcome)
     }
 
     /// The IN-MEMORY half of a session deletion (no DB write): tear down the
@@ -3187,7 +3289,7 @@ impl Engine {
     /// [`Self::begin_delete_session_with`] with the answer about a standalone
     /// agent's folder. Asking to delete a folder dux did not create refuses the
     /// whole delete; a folder dux created is deleted once every process of the
-    /// agent has gone (see [`Self::park_created_folder_removal`]).
+    /// agent has gone (see [`Self::hold_created_folder_removal`]).
     pub fn begin_delete_session_full(
         &mut self,
         session_id: &str,
@@ -3343,14 +3445,14 @@ impl Engine {
             crate::engine::lifecycle::RestartsStop::AgentDeleted,
         );
         // The processes that run in a folder dux created, gathered before the
-        // shutdown moves them into the terminating set.
-        let folder_waits_for = folder_removal
-            .as_ref()
-            .map(|_| self.session_pty_ids(&session.id));
-        self.begin_session_tab_shutdown(&session, worktree_removal);
-        if let (Some(removal), Some(pty_ids)) = (folder_removal, folder_waits_for) {
-            self.park_created_folder_removal(removal, &pty_ids);
+        // shutdown moves them into the terminating set. The folder is claimed
+        // now and deleted only once `finish_delete_session` has deleted the
+        // record and those processes have gone.
+        if let Some(removal) = folder_removal {
+            let pty_ids = self.session_pty_ids(&session.id);
+            self.hold_created_folder_removal(removal, pty_ids);
         }
+        self.begin_session_tab_shutdown(&session, worktree_removal);
 
         if let Some(busy_message) = busy_message {
             logger::info(&format!(

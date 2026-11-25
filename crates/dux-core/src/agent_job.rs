@@ -3815,10 +3815,10 @@ fn roll_back_failed_create(request: &AgentLaunchRequest, rollback: Option<&Rollb
     // A create's folder that dux created was created by this very create, so
     // the failed launch takes it back, and only while nothing is in it.
     if let AgentLaunchKind::Create { .. } = &request.kind
-        && let crate::model::FolderRemovalRight::CreatedByDux { path, .. } =
+        && let crate::model::FolderRemovalRight::CreatedByDux { path, identity } =
             request.session.workspace.folder_removal_right()
     {
-        crate::agent_folders::remove_if_empty(Path::new(path));
+        crate::agent_folders::remove_if_unused(Path::new(path), identity);
     }
     if let AgentLaunchKind::Create {
         repo_path,
@@ -4443,13 +4443,20 @@ mod tests {
         assert!(folder.is_dir());
         assert_eq!(session.folder_path(), Some(folder.to_str().unwrap()));
         assert_eq!(session.title.as_deref(), Some("brave-otter"));
+        let crate::model::FolderRemovalRight::CreatedByDux { path, identity } =
+            session.workspace.folder_removal_right()
+        else {
+            panic!("the record says dux created the folder");
+        };
+        assert_eq!(path, folder.to_str().unwrap());
+        let numbers = crate::model::DirectoryIdentity::of(&folder).unwrap();
         assert_eq!(
-            session.workspace.folder_removal_right(),
-            crate::model::FolderRemovalRight::CreatedByDux {
-                path: folder.to_str().unwrap(),
-                identity: crate::model::DirectoryIdentity::of(&folder).unwrap(),
-            }
+            (identity.device, identity.inode),
+            (numbers.device, numbers.inode)
         );
+        let marker =
+            std::fs::read_to_string(folder.join(crate::agent_folders::MARKER_FILE_NAME)).unwrap();
+        assert!(marker.contains(&identity.mark.expect("a mark").to_hex()));
     }
 
     /// A name whose folder is already there is refused, and what is there is

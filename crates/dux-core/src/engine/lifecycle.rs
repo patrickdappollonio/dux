@@ -2144,6 +2144,9 @@ impl Engine {
         );
         // A worktree removal the last run accepted and never finished.
         self.resume_pending_worktree_removals();
+        // A folder dux created that the last run was to delete with its
+        // agent and never did.
+        self.resume_pending_folder_removals();
     }
 
     /// Classify the directory every agent lives in, one off-thread probe each.

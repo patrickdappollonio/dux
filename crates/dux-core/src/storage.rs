@@ -156,6 +156,21 @@ fn stored_u64(value: u64) -> i64 {
     i64::from_ne_bytes(value.to_ne_bytes())
 }
 
+/// A folder dux created for a standalone agent, to delete once that agent's
+/// processes are gone, kept in the database from the moment the agent's record
+/// is deleted until the folder removal has ended either way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingFolderRemoval {
+    /// The deleted agent.
+    pub session_id: String,
+    /// The agent's name at the time, for the status that reports it.
+    pub label: String,
+    /// The folder.
+    pub path: String,
+    /// The identity it had when dux created it.
+    pub identity: crate::model::DirectoryIdentity,
+}
+
 /// A worktree removal the user asked for that dux has not finished yet, kept
 /// in the database so a quit or a crash in the middle of it does not leave a
 /// worktree and a branch behind that no agent owns.
@@ -413,6 +428,10 @@ impl SessionStore {
         )?;
         ensure_column(&self.conn, "agent_sessions", "folder_device", "integer")?;
         ensure_column(&self.conn, "agent_sessions", "folder_inode", "integer")?;
+        // The mark in the marker file dux writes into a folder it creates, as
+        // 32 hex digits. A 'created' row without one keeps its folder: dux
+        // deletes a folder only when its marker file holds this mark.
+        ensure_column(&self.conn, "agent_sessions", "folder_mark", "text")?;
         // Only the backfill UPDATEs run in a transaction so a crash mid-backfill
         // rolls them back and the step is retried cleanly on the next boot (the
         // idempotent/ungated portion below self-heals a partially-applied run).
@@ -713,6 +732,24 @@ impl SessionStore {
                 process_sessions text not null default '',
                 process_snapshot text not null default '',
                 process_registry text not null default '',
+                created_at text not null
+            );
+            ",
+        )?;
+        // A folder dux created for a standalone agent that was deleted with
+        // it, written in the same transaction that deletes the agent's record
+        // and cleared once the folder removal has ended either way, so a quit
+        // or a crash in between leaves something the next start finishes.
+        // Additive: existing databases start with zero rows.
+        self.conn.execute_batch(
+            r"
+            create table if not exists pending_folder_removals (
+                session_id text primary key,
+                label text not null,
+                folder_path text not null,
+                folder_device integer not null,
+                folder_inode integer not null,
+                folder_mark text,
                 created_at text not null
             );
             ",
@@ -2169,6 +2206,55 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Forget a pending folder removal once it has ended, whichever way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the row cannot be deleted.
+    pub fn delete_pending_folder_removal(&self, session_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "delete from pending_folder_removals where session_id = ?1",
+                params![session_id],
+            )
+            .context("failed to clear a pending folder removal")?;
+        Ok(())
+    }
+
+    /// Every folder removal still waiting to be finished, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the table cannot be read.
+    pub fn load_pending_folder_removals(&self) -> Result<Vec<PendingFolderRemoval>> {
+        let mut stmt = self.conn.prepare(
+            "select session_id, label, folder_path, folder_device, folder_inode, folder_mark \
+             from pending_folder_removals order by created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let device: i64 = row.get(3)?;
+            let inode: i64 = row.get(4)?;
+            let mark: Option<String> = row.get(5)?;
+            #[expect(
+                clippy::cast_sign_loss,
+                reason = "the identity was stored bit for bit from the same unsigned values"
+            )]
+            let identity = crate::model::DirectoryIdentity {
+                device: device as u64,
+                inode: inode as u64,
+                mark: mark.as_deref().and_then(crate::model::FolderMark::from_hex),
+            };
+            Ok(PendingFolderRemoval {
+                session_id: row.get(0)?,
+                label: row.get(1)?,
+                path: row.get(2)?,
+                identity,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to read the pending folder removals")
+    }
+
     /// Every worktree removal still waiting to be finished, oldest first.
     pub(crate) fn load_pending_worktree_removals(&self) -> Result<Vec<PendingWorktreeRemoval>> {
         let mut stmt = self.conn.prepare(
@@ -3250,6 +3336,9 @@ impl SessionStore {
             folder_identity.map(|identity| identity.device as i64),
             folder_identity.map(|identity| identity.inode as i64),
         );
+        let folder_mark = folder_identity
+            .and_then(|identity| identity.mark)
+            .map(crate::model::FolderMark::to_hex);
         // UPDATE first: existing sessions are re-upserted constantly (status
         // changes, provider starts), and that hot path must not pay the
         // min(sort_order) placement query below. Three columns are therefore
@@ -3323,9 +3412,9 @@ impl SessionStore {
         conn.execute(
             r"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance, workspace_kind, folder_path, slot_tab_id, folder_origin, folder_device, folder_inode)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance, workspace_kind, folder_path, slot_tab_id, folder_origin, folder_device, folder_inode, folder_mark)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
             ",
             params![
                 session.id,
@@ -3351,6 +3440,7 @@ impl SessionStore {
                 folder_origin,
                 folder_device,
                 folder_inode,
+                folder_mark,
             ],
         )?;
         Ok(())
@@ -3470,7 +3560,7 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance, workspace_kind, folder_path, slot_tab_id, folder_origin, folder_device, folder_inode
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance, workspace_kind, folder_path, slot_tab_id, folder_origin, folder_device, folder_inode, folder_mark
             from agent_sessions
             order by sort_order asc, updated_at desc
             ",
@@ -3617,6 +3707,22 @@ impl SessionStore {
     ///
     /// Fails when the transaction fails; nothing is deleted then.
     pub fn delete_session(&self, id: &str) -> Result<()> {
+        self.delete_session_with_folder_removal(id, None)
+    }
+
+    /// [`Self::delete_session`], recording `folder` as a pending folder
+    /// removal in the same transaction: the agent's record goes exactly when
+    /// the intent to delete its folder is written, or neither happens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session's rows cannot be deleted or the
+    /// folder removal cannot be recorded; nothing is changed then.
+    pub fn delete_session_with_folder_removal(
+        &self,
+        id: &str,
+        folder: Option<&PendingFolderRemoval>,
+    ) -> Result<()> {
         // Delete the session and all of its dependent rows atomically. These
         // tables declare ON DELETE CASCADE FKs to `agent_sessions`, but the
         // connection never enables `PRAGMA foreign_keys`, so those cascades do
@@ -3624,6 +3730,9 @@ impl SessionStore {
         // mid-sequence failure leaves either all of the session's rows or none,
         // never a half-deleted session (e.g. tabs gone but the session surviving).
         let tx = immediate_tx(&self.conn)?;
+        if let Some(folder) = folder {
+            insert_pending_folder_removal(&tx, folder)?;
+        }
         tx.execute("delete from session_prs where session_id = ?1", params![id])?;
         tx.execute(
             "delete from session_pr_overrides where session_id = ?1",
@@ -3987,13 +4096,46 @@ fn test_tab(id: &str, session_id: &str, sort_order: i64) -> crate::model::AgentT
     }
 }
 
-/// A folder row's origin, from columns 20 to 22 of the session read. Only
-/// `created` with both identity columns present reads as created by dux;
-/// anything else reads as the user's folder, under which dux never removes it.
+/// Write a pending folder removal inside the transaction that deletes its
+/// agent's record. Replaces an earlier row for the same agent.
+fn insert_pending_folder_removal(
+    tx: &rusqlite::Transaction<'_>,
+    folder: &PendingFolderRemoval,
+) -> Result<()> {
+    // SQLite integers are signed; the identity is stored bit for bit.
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "a device or inode number is stored bit for bit and read back the same way"
+    )]
+    let (device, inode) = (folder.identity.device as i64, folder.identity.inode as i64);
+    tx.execute(
+        "insert or replace into pending_folder_removals \
+         (session_id, label, folder_path, folder_device, folder_inode, folder_mark, created_at) \
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            folder.session_id,
+            folder.label,
+            folder.path,
+            device,
+            inode,
+            folder.identity.mark.map(crate::model::FolderMark::to_hex),
+            Utc::now().to_rfc3339(),
+        ],
+    )
+    .context("failed to record the folder to delete with the agent")?;
+    Ok(())
+}
+
+/// A folder row's origin, from columns 20 to 23 of the session read. Only
+/// `created` with both numbers present reads as created by dux; anything else
+/// reads as the user's folder, under which dux never removes it. A `created`
+/// row without a readable mark keeps its mark empty, and dux keeps its folder.
 fn folder_origin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::FolderOrigin> {
     let origin: Option<String> = row.get(20)?;
     let device: Option<i64> = row.get(21)?;
     let inode: Option<i64> = row.get(22)?;
+    let mark: Option<String> = row.get(23)?;
+    let mark = mark.as_deref().and_then(crate::model::FolderMark::from_hex);
     Ok(match (origin.as_deref(), device, inode) {
         #[expect(
             clippy::cast_sign_loss,
@@ -4003,6 +4145,7 @@ fn folder_origin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::mo
             crate::model::FolderOrigin::CreatedByDux(crate::model::DirectoryIdentity {
                 device: device as u64,
                 inode: inode as u64,
+                mark,
             })
         }
         (Some("created"), ..) => {
@@ -4378,6 +4521,7 @@ mod tests {
             origin: crate::model::FolderOrigin::CreatedByDux(crate::model::DirectoryIdentity {
                 device: u64::MAX - 1,
                 inode: 4242,
+                mark: Some(crate::model::FolderMark([0x5a; 16])),
             }),
         });
         session
@@ -4405,6 +4549,7 @@ mod tests {
                 identity: crate::model::DirectoryIdentity {
                     device: u64::MAX - 1,
                     inode: 4242,
+                    mark: Some(crate::model::FolderMark([0x5a; 16])),
                 },
             }
         );
@@ -4446,6 +4591,33 @@ mod tests {
         let loaded = reopened.load_sessions().unwrap();
         assert!(!loaded[0].workspace.folder_created_by_dux());
         assert_eq!(loaded[0].folder_path(), Some("/x/agents/otter"));
+    }
+
+    /// A `created` row with its numbers but no mark still reads as a folder
+    /// dux created, with no mark, which keeps the folder when the agent is
+    /// deleted.
+    #[test]
+    fn a_created_row_without_a_mark_reads_with_no_mark() {
+        let (dir, store) = temp_store();
+        store
+            .upsert_session(&created_folder_session("sa1", "/x/agents/otter"))
+            .unwrap();
+        drop(store);
+        let conn = Connection::open(dir.path().join("sessions.sqlite3")).unwrap();
+        conn.execute(
+            "update agent_sessions set folder_mark = null where id = 'sa1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let reopened = SessionStore::open(&dir.path().join("sessions.sqlite3")).unwrap();
+        let loaded = reopened.load_sessions().unwrap();
+        match loaded[0].workspace.folder_removal_right() {
+            crate::model::FolderRemovalRight::CreatedByDux { identity, .. } => {
+                assert_eq!(identity.mark, None);
+            }
+            other => panic!("expected a folder dux created, got {other:?}"),
+        }
     }
 
     /// The git COLUMNS of a standalone row are empty on disk, read straight from

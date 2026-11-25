@@ -1,18 +1,33 @@
 //! Deleting the folder dux created for a standalone agent, once the agent has
 //! been deleted and every process it ran there has gone.
 //!
-//! The delete itself removes the agent's record at once. The folder waits on a
-//! barrier over the agent's tabs and terminals, which the reaper releases;
-//! then a worker deletes it through [`crate::agent_folders::remove_created_folder`],
-//! with a busy status and a final on the shared status lane, so both surfaces
-//! hear the outcome.
+//! In order:
+//!
+//! 1. When the delete begins, the folder is claimed, so nothing new starts in
+//!    it, and the removal is held.
+//! 2. The agent's record is deleted in the same transaction that writes the
+//!    removal down (`pending_folder_removals`); a record that could not be
+//!    deleted lets the removal go and the folder stays with its agent.
+//! 3. The removal waits for the agent's tabs and terminals to reap.
+//! 4. A worker asks every question a worktree removal asks before git runs
+//!    (processes the agent left running, a shell standing in the folder, an
+//!    operation or a create holding it, a removal around it, an agent or a
+//!    project in it), then whether any program at all is working in it, and
+//!    deletes it through [`crate::agent_folders::remove_created_folder`],
+//!    which checks it is still the folder dux created.
+//! 5. The written-down removal is forgotten, whatever the outcome, and the
+//!    outcome is said on the shared status lane.
+//!
+//! A removal still written down when dux starts is finished then, the same
+//! way, with a status saying so.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::engine::events::RemovalPlace;
 use crate::engine::{Engine, Final};
 use crate::model::DirectoryIdentity;
-use crate::status_text::StatusText;
+use crate::storage::PendingFolderRemoval;
 use crate::worker::WorkerEvent;
 
 /// One folder dux created, to delete once its agent's processes are gone.
@@ -28,13 +43,29 @@ pub struct CreatedFolderRemoval {
     pub label: String,
 }
 
-/// A folder removal waiting for the PTYs in `pending_ids` to reap.
+impl CreatedFolderRemoval {
+    fn row(&self) -> PendingFolderRemoval {
+        PendingFolderRemoval {
+            session_id: self.session_id.clone(),
+            label: self.label.clone(),
+            path: self.path.to_string_lossy().into_owned(),
+            identity: self.identity,
+        }
+    }
+}
+
+/// A folder removal held from the start of its agent's delete until it runs.
 #[derive(Debug)]
 pub struct GroupFolderRemoval {
     /// The tabs and terminals of the deleted agent still terminating.
     pub pending_ids: HashSet<String>,
     /// The removal to run once they are all gone.
     pub removal: CreatedFolderRemoval,
+    /// Whether the agent's record is gone and the removal written down in
+    /// its place. Nothing is deleted before.
+    pub record_gone: bool,
+    /// The claim on the folder, taken when the delete began.
+    claim: crate::worktree_ops::RemovalClaim,
 }
 
 impl Engine {
@@ -67,27 +98,69 @@ impl Engine {
         ids
     }
 
-    /// Wait for the PTYs of `pty_ids` still terminating, then delete the
-    /// folder; with none left, delete it now.
-    pub(crate) fn park_created_folder_removal(
+    /// Hold the removal of the folder of an agent whose delete has begun:
+    /// the folder is claimed now, so nothing new can start in it, and nothing
+    /// is deleted until [`Self::settle_held_folder_removal`] says the record
+    /// is gone.
+    pub(crate) fn hold_created_folder_removal(
         &mut self,
         removal: CreatedFolderRemoval,
-        pty_ids: &HashSet<String>,
+        pty_ids: HashSet<String>,
     ) {
-        let pending_ids: HashSet<String> = self
+        self.pending_folder_removals
+            .retain(|group| group.removal.session_id != removal.session_id);
+        let claim = self
+            .removal_coordination
+            .ops
+            .announce_removal(&removal.path);
+        self.pending_folder_removals.push(GroupFolderRemoval {
+            pending_ids: pty_ids,
+            removal,
+            record_gone: false,
+            claim,
+        });
+    }
+
+    /// The row to write down with the deletion of `session_id`'s record, when
+    /// a removal of its folder is held.
+    pub(crate) fn held_folder_removal_row(&self, session_id: &str) -> Option<PendingFolderRemoval> {
+        self.pending_folder_removals
+            .iter()
+            .find(|group| !group.record_gone && group.removal.session_id == session_id)
+            .map(|group| group.removal.row())
+    }
+
+    /// The deletion of `session_id`'s record has ended: when the record is
+    /// gone the held removal waits only for the agent's processes; when it is
+    /// not, the removal is let go and the folder stays with its agent.
+    pub(crate) fn settle_held_folder_removal(&mut self, session_id: &str, record_gone: bool) {
+        if !record_gone {
+            self.pending_folder_removals
+                .retain(|group| group.record_gone || group.removal.session_id != session_id);
+            return;
+        }
+        let terminating: HashSet<&str> = self
             .terminating_ptys
             .iter()
-            .filter(|entry| pty_ids.contains(&entry.id))
-            .map(|entry| entry.id.clone())
+            .map(|entry| entry.id.as_str())
             .collect();
-        if pending_ids.is_empty() {
-            self.dispatch_created_folder_removal(removal);
-        } else {
-            self.pending_folder_removals.push(GroupFolderRemoval {
-                pending_ids,
-                removal,
-            });
+        for group in &mut self.pending_folder_removals {
+            if group.removal.session_id == session_id {
+                group.record_gone = true;
+                group
+                    .pending_ids
+                    .retain(|id| terminating.contains(id.as_str()));
+            }
         }
+        self.release_folder_removals(&[]);
+    }
+
+    /// How many folder removals are waiting for their agent's processes.
+    pub(crate) fn folder_removals_waiting(&self) -> usize {
+        self.pending_folder_removals
+            .iter()
+            .filter(|group| group.record_gone)
+            .count()
     }
 
     /// Release the folder removals whose last PTY is among `reaped_ids`.
@@ -102,107 +175,101 @@ impl Engine {
         }
         let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_folder_removals)
             .into_iter()
-            .partition(|group| group.pending_ids.is_empty());
+            .partition(|group| group.record_gone && group.pending_ids.is_empty());
         self.pending_folder_removals = waiting;
         for group in ready {
-            self.dispatch_created_folder_removal(group.removal);
+            self.dispatch_created_folder_removal(group.removal, group.claim, Resumed::No);
         }
     }
 
-    /// Every other agent's folder and every project's path, each with the
-    /// words that name it in the status, for the worker's occupant check.
-    fn created_folder_candidates(&self, deleted: &str) -> Vec<(PathBuf, StatusText)> {
-        let agents = self
-            .sessions
-            .iter()
-            .filter(|session| session.id != deleted)
-            .map(|session| {
-                (
-                    PathBuf::from(session.directory()),
-                    crate::status_text!["agent ", q(session.display_label()), " now works in it"],
-                )
-            });
-        let projects = self.projects.iter().map(|project| {
-            (
-                PathBuf::from(&project.path),
-                crate::status_text!["project ", q(project.name.clone()), " is in it"],
-            )
-        });
-        agents.chain(projects).collect()
+    /// Finish the folder removals an earlier run wrote down and never
+    /// finished, each the way a delete runs it, with a status saying so.
+    pub(crate) fn resume_pending_folder_removals(&mut self) {
+        let rows = match self.session_store.load_pending_folder_removals() {
+            Ok(rows) => rows,
+            Err(err) => {
+                crate::logger::error(&format!(
+                    "could not read the folder deletions left from the last run: {err:#}"
+                ));
+                return;
+            }
+        };
+        for row in rows {
+            // Written in the transaction that deleted the record, so an agent
+            // with this id is a different one, and its folder is not this
+            // removal's to take.
+            if self.sessions.iter().any(|s| s.id == row.session_id) {
+                self.forget_pending_folder_removal(&row.session_id);
+                continue;
+            }
+            let removal = CreatedFolderRemoval {
+                session_id: row.session_id,
+                path: PathBuf::from(row.path),
+                identity: row.identity,
+                label: row.label,
+            };
+            let claim = self
+                .removal_coordination
+                .ops
+                .announce_removal(&removal.path);
+            self.dispatch_created_folder_removal(removal, claim, Resumed::Yes);
+        }
+    }
+
+    fn forget_pending_folder_removal(&self, session_id: &str) {
+        if let Err(err) = self.session_store.delete_pending_folder_removal(session_id) {
+            crate::logger::warn(&format!(
+                "could not clear the folder deletion of agent {session_id}: {err:#}"
+            ));
+        }
     }
 
     /// Delete the folder on a worker, with a busy status and a final. A folder
-    /// another agent or a project has come to use meanwhile is kept, with a
-    /// warning saying why.
-    pub(crate) fn dispatch_created_folder_removal(&mut self, removal: CreatedFolderRemoval) {
-        let shown = crate::home_path::shorten_home(&removal.path);
-        let label = removal.label.clone();
-        let candidates = self.created_folder_candidates(&removal.session_id);
-        let (success_label, success_path) = (label.clone(), shown.clone());
-        let (failure_label, failure_path) = (label.clone(), shown.clone());
-        let op = crate::engine::status_op(crate::status_text![
-            "Deleting the folder ",
-            q(shown),
-            " that dux created for deleted agent ",
-            q(label),
-            "\u{2026}"
-        ])
-        .on_success(move |outcome: &FolderRemovalOutcome| match outcome {
-            FolderRemovalOutcome::Removed => Final::info(crate::status_text![
-                "Deleted the folder ",
-                q(success_path.clone()),
-                " that dux created for agent ",
-                q(success_label.clone()),
-                ", with everything in it."
-            ]),
-            FolderRemovalOutcome::AlreadyGone => Final::info(crate::status_text![
-                "The folder ",
-                q(success_path.clone()),
-                " of deleted agent ",
-                q(success_label.clone()),
-                " was already gone, so there was nothing to delete."
-            ]),
-            FolderRemovalOutcome::Occupied(occupant) => Final::warning(crate::status_text![
-                "Kept the folder ",
-                q(success_path.clone()),
-                " of deleted agent ",
-                q(success_label.clone()),
-                ", because ",
-                occupant.clone(),
-                "."
-            ]),
-        })
-        .on_failure(move |reason: &String| {
-            // STICKY: a folder is left on disk that the user has to deal with.
-            Final::warning(crate::status_text![
-                "Kept the folder ",
-                q(failure_path.clone()),
-                " of deleted agent ",
-                q(failure_label.clone()),
-                format!(": {reason}. Delete it yourself if you no longer need it.")
-            ])
-            .sticky()
-        });
+    /// anything is found in, or that is no longer the one dux created, is kept,
+    /// with a warning saying why.
+    fn dispatch_created_folder_removal(
+        &mut self,
+        removal: CreatedFolderRemoval,
+        claim: crate::worktree_ops::RemovalClaim,
+        resumed: Resumed,
+    ) {
+        let op = folder_removal_op(&removal, resumed);
         let pending = self.begin_status_op(&op);
         let _ = self.worker_tx.send(WorkerEvent::PollerStatus(pending));
+        // What the engine is running is known only here: a terminal or an
+        // agent in the folder, one still stopping there, an agent on its way to
+        // it, a project in it.
+        if let Some(occupant) = self.folder_occupant(
+            &removal.path,
+            Some(&removal.session_id),
+            crate::engine::StoppingProcesses::Occupy,
+        ) {
+            self.forget_pending_folder_removal(&removal.session_id);
+            drop(claim);
+            let _ = self.worker_tx.send(WorkerEvent::StatusOpCompleted {
+                resolved: op.resolve(&Err(occupant.reason())),
+            });
+            return;
+        }
         let key = op.status_key().to_string();
         let tx = self.worker_tx.clone();
-        let CreatedFolderRemoval { path, identity, .. } = removal;
+        let inputs = FolderRemovalInputs {
+            claim,
+            wait: self.removal_wait(),
+            registry: self.process_registry.clone(),
+            db_path: self.paths.sessions_db_path.clone(),
+        };
+        let CreatedFolderRemoval {
+            session_id,
+            path,
+            identity,
+            label,
+        } = removal;
+        let (unstarted, unstarted_path) = (session_id.clone(), path.clone());
         let spawned = super::spawn_worker::spawn_engine_thread("dux-folder-remove", move || {
-            let result =
-                match created_folder_occupant(&path, &candidates) {
-                    Some(occupant) => Ok(FolderRemovalOutcome::Occupied(occupant)),
-                    None => crate::agent_folders::remove_created_folder(&path, identity).map(
-                        |removed| match removed {
-                            crate::agent_folders::RemovedFolder::Removed => {
-                                FolderRemovalOutcome::Removed
-                            }
-                            crate::agent_folders::RemovedFolder::AlreadyGone => {
-                                FolderRemovalOutcome::AlreadyGone
-                            }
-                        },
-                    ),
-                };
+            let db_path = inputs.db_path.clone();
+            let result = perform_created_folder_removal(&session_id, &path, identity, inputs);
+            forget_pending_folder_removal_in(&db_path, &session_id);
             let _ = tx.send(WorkerEvent::StatusOpCompleted {
                 resolved: op.resolve(&result),
             });
@@ -212,20 +279,17 @@ impl Engine {
             Ok(handle) => self.removal_workers.push(handle),
             Err(err) => {
                 crate::logger::error(&format!("could not start the folder removal: {err}"));
+                self.forget_pending_folder_removal(&unstarted);
                 let _ = self.worker_tx.send(WorkerEvent::StatusOpCompleted {
                     resolved: crate::engine::ResolvedFinal::new(
                         key,
-                        Final::warning(crate::status_text![
-                            "Kept the folder ",
-                            q(shown),
-                            " of deleted agent ",
-                            q(label),
-                            format!(
-                                ": dux could not start the background work that deletes it \
-                                 ({err}). Delete it yourself if you no longer need it."
-                            )
-                        ])
-                        .sticky(),
+                        kept_final(
+                            &label,
+                            &unstarted_path,
+                            &format!(
+                                "dux could not start the background work that deletes it ({err})"
+                            ),
+                        ),
                     ),
                 });
             }
@@ -233,30 +297,202 @@ impl Engine {
     }
 }
 
-/// What the folder removal's worker did.
-#[derive(Clone, Debug)]
-enum FolderRemovalOutcome {
-    /// The folder and everything in it were deleted.
-    Removed,
-    /// Nothing was at the folder's path any more.
-    AlreadyGone,
-    /// Another agent or a project is in the folder, so it was kept; the text
-    /// names which.
-    Occupied(StatusText),
+/// Whether a removal is finished at a start, after an earlier run of dux
+/// quit before finishing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Resumed {
+    No,
+    Yes,
 }
 
-/// The first of `candidates` at or inside `folder`, compared with symbolic links
-/// resolved; a path that no longer resolves is compared as written.
-fn created_folder_occupant(
+/// The status op of one folder removal: its busy, and its final for each
+/// outcome.
+fn folder_removal_op(
+    removal: &CreatedFolderRemoval,
+    resumed: Resumed,
+) -> crate::engine::StatusOp<crate::agent_folders::RemovedFolder, String> {
+    let shown = crate::home_path::shorten_home(&removal.path);
+    let label = removal.label.clone();
+    let (success_label, success_path) = (label.clone(), shown.clone());
+    let (failure_label, failure_path) = (label.clone(), removal.path.clone());
+    let since = match resumed {
+        Resumed::No => "",
+        Resumed::Yes => ", which dux had not finished when it last quit",
+    };
+    crate::engine::status_op(crate::status_text![
+        "Deleting the folder ",
+        q(shown),
+        " that dux created for deleted agent ",
+        q(label),
+        format!("{since}\u{2026}")
+    ])
+    .on_success(
+        move |outcome: &crate::agent_folders::RemovedFolder| match outcome {
+            crate::agent_folders::RemovedFolder::Removed => Final::info(crate::status_text![
+                "Deleted the folder ",
+                q(success_path.clone()),
+                " that dux created for agent ",
+                q(success_label.clone()),
+                format!(", with everything in it{since}.")
+            ]),
+            crate::agent_folders::RemovedFolder::AlreadyGone => Final::info(crate::status_text![
+                "The folder ",
+                q(success_path.clone()),
+                " of deleted agent ",
+                q(success_label.clone()),
+                " was already gone, so there was nothing to delete."
+            ]),
+        },
+    )
+    .on_failure(move |reason: &String| kept_final(&failure_label, &failure_path, reason))
+}
+
+/// The final for a folder that was kept, saying why.
+fn kept_final(label: &str, path: &Path, reason: &str) -> Final {
+    // STICKY: a folder the user asked to delete is still on disk, and only
+    // they can deal with it.
+    Final::warning(crate::status_text![
+        "Kept the folder ",
+        q(crate::home_path::shorten_home(path)),
+        " that dux created for deleted agent ",
+        q(label.to_string()),
+        format!(": {reason}. Delete it yourself if you no longer need it.")
+    ])
+    .sticky()
+}
+
+/// What the folder removal's worker takes from the engine.
+struct FolderRemovalInputs {
+    /// The claim taken when the delete began.
+    claim: crate::worktree_ops::RemovalClaim,
+    /// How long to wait for operations holding the folder.
+    wait: std::time::Duration,
+    /// Every session dux follows, the deleted agent's included.
+    registry: crate::process_sessions::AgentProcessRegistry,
+    /// The session database, for the last look over agents and projects.
+    db_path: PathBuf,
+}
+
+/// The removal itself, on a worker thread: every check a worktree removal
+/// makes before git runs, then whether any program is working in the folder,
+/// then the deletion, which checks the folder is still the one dux created.
+/// Nothing is ended: a standalone agent's processes never are. The claim is
+/// finished on every exit. A panic becomes an `Err`.
+fn perform_created_folder_removal(
+    session_id: &str,
     folder: &Path,
-    candidates: &[(PathBuf, StatusText)],
-) -> Option<StatusText> {
-    let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let folder = resolve(folder);
-    candidates
-        .iter()
-        .find(|(path, _)| resolve(path).starts_with(&folder))
-        .map(|(_, occupant)| occupant.clone())
+    identity: DirectoryIdentity,
+    inputs: FolderRemovalInputs,
+) -> Result<crate::agent_folders::RemovedFolder, String> {
+    use std::panic::AssertUnwindSafe;
+    let FolderRemovalInputs {
+        claim,
+        wait,
+        registry,
+        db_path,
+    } = inputs;
+    let folder_text = folder.to_string_lossy().into_owned();
+    let nothing_ended = crate::engine::RemovalProcesses::none();
+    let mut lease = None;
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let leading = match claim {
+            crate::worktree_ops::RemovalClaim::Lead(leading) => lease.insert(leading),
+            crate::worktree_ops::RemovalClaim::Join(_) => {
+                return Err("dux is already deleting it".to_string());
+            }
+        };
+        if let Some(reason) = super::events::standalone_processes_keep_in(
+            &registry,
+            &folder_text,
+            RemovalPlace::CreatedFolder,
+        ) {
+            return Err(reason);
+        }
+        if let Some(reason) = super::events::cwd_keeps_in(
+            &registry,
+            &folder_text,
+            &nothing_ended,
+            RemovalPlace::CreatedFolder,
+        ) {
+            return Err(reason);
+        }
+        let leading: &crate::worktree_ops::RemovalLease = leading;
+        super::events::wait_then_last_look_in(
+            leading,
+            &folder_text,
+            wait,
+            |_| {},
+            &[&registry],
+            RemovalPlace::CreatedFolder,
+            || {
+                super::events::occupant_after_wait(
+                    leading,
+                    &registry,
+                    &registry,
+                    &nothing_ended,
+                    Some((&db_path, Some(session_id))),
+                )
+                .or_else(|| program_working_in(folder))
+            },
+        )?;
+        crate::agent_folders::remove_created_folder(folder, identity)
+    }))
+    .unwrap_or_else(|payload| {
+        let reason = crate::engine::spawn_worker::format_panic_payload(&*payload);
+        crate::logger::error(&format!(
+            "the folder removal of deleted agent {session_id} panicked: {reason}"
+        ));
+        Err(format!(
+            "the work that deletes it stopped unexpectedly ({reason})"
+        ))
+    });
+    if let Some(lease) = lease {
+        lease.finish(
+            result
+                .clone()
+                .map(|_| crate::engine::RemovedBranches::Outcomes(Vec::new())),
+        );
+    }
+    result
+}
+
+/// Any program of this user, dux-started or not, whose current folder is the
+/// folder or one inside it, as the reason to keep it. A process list that
+/// cannot be read keeps it too.
+fn program_working_in(folder: &Path) -> Option<String> {
+    let table = match crate::process_sessions::read_process_table_strict() {
+        Ok(table) => table,
+        Err(why) => {
+            return Some(format!(
+                "dux could not read the process list to check that no program is working in it \
+                 ({why})"
+            ));
+        }
+    };
+    match crate::process_sessions::occupants_of(&table, &[folder.to_path_buf()]) {
+        Ok(found) => found.first().map(|who| {
+            format!(
+                "{} (pid {}) is working in it; close it or make it leave that folder first",
+                who.command, who.pid
+            )
+        }),
+        Err(why) => Some(format!(
+            "dux could not check which programs are working in it ({why})"
+        )),
+    }
+}
+
+/// Forget a written-down folder removal from a worker thread, on a connection
+/// of its own. A failure is logged: the next start then runs the removal
+/// again, which finds the folder gone or keeps it with the same reason.
+fn forget_pending_folder_removal_in(db_path: &Path, session_id: &str) {
+    let cleared = crate::storage::SessionStore::open_live(db_path)
+        .and_then(|store| store.delete_pending_folder_removal(session_id));
+    if let Err(err) = cleared {
+        crate::logger::warn(&format!(
+            "could not clear the finished folder deletion of agent {session_id}: {err:#}"
+        ));
+    }
 }
 
 use crate::engine::status_op::PendingStatusOp as _;

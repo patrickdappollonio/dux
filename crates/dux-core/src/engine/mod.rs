@@ -117,11 +117,11 @@ pub use lifecycle::{
     detach_confirm_prose, detach_forced_final, detach_not_running_message, detach_status_key,
     detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
-pub use pending_removals::recorded_at_or_through_link;
 pub(crate) use pending_removals::{
     OccupancyFacts, Occupant, StoppingProcesses, is_symlink, link_occupant_in, occupant_in,
     stored_occupant,
 };
+pub use pending_removals::{created_folder_occupant, recorded_at_or_through_link};
 pub use pr_sync_control::PrSyncControl;
 pub use pull_requests::UNKNOWN_PULL_REQUEST_MARKER;
 pub use removal::{

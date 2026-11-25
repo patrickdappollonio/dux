@@ -808,19 +808,27 @@ impl FolderOrigin {
     }
 }
 
-/// The device and inode a directory had when dux created it, which tell that
-/// directory apart from anything later put at the same path.
+/// What tells the directory dux created apart from anything later put at the
+/// same path: its device and inode numbers, and the random mark dux wrote
+/// into the marker file inside it (see [`crate::agent_folders::MARKER_FILE_NAME`]).
+///
+/// The numbers alone are not enough, because a filesystem hands a freed inode
+/// number to the next directory it creates; a new folder at the same path
+/// does not carry the mark. dux deletes the folder only when all three match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectoryIdentity {
     /// The device the directory is on.
     pub device: u64,
     /// The directory's inode on that device.
     pub inode: u64,
+    /// The mark in the folder's marker file. `None` for a record that has no
+    /// mark, whose folder dux never deletes.
+    pub mark: Option<FolderMark>,
 }
 
 impl DirectoryIdentity {
-    /// The identity of the directory at `path`, read without following a
-    /// symbolic link at its last component.
+    /// The device and inode numbers of the directory at `path`, read without
+    /// following a symbolic link at its last component, with no mark.
     ///
     /// # Errors
     ///
@@ -831,7 +839,37 @@ impl DirectoryIdentity {
         Ok(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
+            mark: None,
         })
+    }
+}
+
+/// A random 128-bit mark, written as 32 lowercase hex digits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FolderMark(pub [u8; 16]);
+
+impl FolderMark {
+    /// The mark as 32 lowercase hex digits.
+    pub fn to_hex(self) -> String {
+        use std::fmt::Write as _;
+        self.0
+            .iter()
+            .fold(String::with_capacity(32), |mut out, byte| {
+                let _ = write!(out, "{byte:02x}");
+                out
+            })
+    }
+
+    /// Read a mark written by [`Self::to_hex`]; `None` for anything else.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        if text.len() != 32 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut bytes = [0_u8; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
+        }
+        Some(Self(bytes))
     }
 }
 

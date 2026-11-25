@@ -151,7 +151,7 @@ impl Engine {
     pub(crate) fn finish_pending_worktree_removals(&mut self, abort: Option<&AtomicBool>) {
         let aborted = || abort.is_some_and(|flag| flag.load(Ordering::SeqCst));
         if self.pending_group_removals.is_empty()
-            && self.pending_folder_removals.is_empty()
+            && self.folder_removals_waiting() == 0
             && self
                 .removal_workers
                 .iter()
@@ -160,7 +160,7 @@ impl Engine {
             return;
         }
         let waiting = self.pending_group_removals.len()
-            + self.pending_folder_removals.len()
+            + self.folder_removals_waiting()
             + self
                 .removal_workers
                 .iter()
@@ -181,7 +181,7 @@ impl Engine {
             for removal in self.reap_terminating_ptys().removals {
                 let _ = self.dispatch_deferred_worktree_removal(removal);
             }
-            if (self.pending_group_removals.is_empty() && self.pending_folder_removals.is_empty())
+            if (self.pending_group_removals.is_empty() && self.folder_removals_waiting() == 0)
                 || aborted()
                 || Instant::now() >= barrier_deadline
             {
@@ -200,7 +200,7 @@ impl Engine {
             std::thread::sleep(Duration::from_millis(50));
         }
         let unfinished = self.pending_group_removals.len()
-            + self.pending_folder_removals.len()
+            + self.folder_removals_waiting()
             + self
                 .removal_workers
                 .iter()
@@ -562,6 +562,33 @@ pub(crate) fn occupant_in(
             !terminating || matches!(stopping, StoppingProcesses::Occupy)
         })
         .map(|(_, _, what, _)| Occupant::Process(what))
+}
+
+/// What keeps the folder dux created for standalone agent `owner` from being
+/// deleted, judged by [`occupant_in`] over `agents` and `projects` (each
+/// project as its name and repository path) as recorded: another agent whose
+/// folder is it or inside it, or a project whose repository is it or inside
+/// it. A factory reset asks this; the engine asks [`occupant_in`] with the
+/// same agents and projects and what it is running besides, so the two never
+/// disagree about a record.
+pub fn created_folder_occupant(
+    folder: &std::path::Path,
+    owner: &str,
+    agents: &[crate::model::AgentSession],
+    projects: &[(String, String)],
+) -> Option<String> {
+    occupant_in(
+        folder,
+        Some(owner),
+        StoppingProcesses::Occupy,
+        &OccupancyFacts {
+            agents,
+            projects,
+            ops: &crate::worktree_ops::WorktreeOps::new(),
+            ptys: Vec::new(),
+        },
+    )
+    .map(|occupant| occupant.reason())
 }
 
 /// The spellings a path can be stored or typed under, without following a
