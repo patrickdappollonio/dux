@@ -453,12 +453,28 @@ describe("FormGroup", () => {
     expect(gap("Regular")).toContain("gap-2")
   })
 
+  it("draws a bare stacked field's help under its control, or above it when asked, tied to the control either way", () => {
+    const draw = (helpAt?: "above" | "below") => (
+      <FormGroup layout="stacked" control="single" spokenName="Path" help="Help words." helpAt={helpAt}>
+        {(field) => <Input {...field} />}
+      </FormGroup>
+    )
+    const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+    const { rerender } = render(draw())
+    expect(follows(screen.getByRole("textbox"), screen.getByText("Help words."))).toBe(true)
+    rerender(draw("above"))
+    const box = screen.getByRole("textbox", { name: "Path" })
+    expect(follows(screen.getByText("Help words."), box)).toBe(true)
+    expect(descriptions(box)).toEqual(["Help words."])
+  })
+
   // Each choice a caller can flip while the field is on screen. The control must stay
   // the same element, with focus, or a keyboard, a caret and an undo history are lost.
-  const FLIPS: { name: string; stacked: boolean; props: (on: boolean) => Record<string, unknown>; phone?: boolean }[] = [
+  const FLIPS: { name: string; stacked: boolean; props: (on: boolean) => Record<string, unknown>; phone?: boolean; bare?: boolean }[] = [
     { name: "height", stacked: true, props: (on) => ({ height: on ? "fill" : "content" }) },
     { name: "density", stacked: true, props: (on) => ({ density: on ? "compact" : "regular" }) },
     { name: "help", stacked: true, props: (on) => ({ help: on ? "Help." : undefined }) },
+    { name: "where a bare field's help sits", stacked: true, props: (on) => ({ help: "Help.", helpAt: on ? "above" : "below" }), bare: true },
     { name: "notes", stacked: true, props: (on) => ({ notes: on ? [{ words: "Note." }] : undefined }) },
     { name: "error", stacked: true, props: (on) => ({ error: on ? "Refused." : null }) },
     { name: "changed mark", stacked: true, props: (on) => ({ changed: on ? "Changed:" : null }) },
@@ -477,7 +493,7 @@ describe("FormGroup", () => {
         <FormGroup
           layout={flip.stacked ? "stacked" : "side"}
           control="single"
-          label="Text"
+          {...(flip.bare ? { spokenName: "Text" } : { label: "Text" })}
           {...(flip.props(on) as object)}
         >
           {(field) => <Textarea {...field} />}

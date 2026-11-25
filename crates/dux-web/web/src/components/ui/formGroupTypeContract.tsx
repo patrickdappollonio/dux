@@ -56,6 +56,17 @@ export function FormGroupTypeContract({ name }: { name: string | undefined }) {
       <FormGroup layout="stacked" control="single" spokenName="Name" optional>
         {(field) => <input {...field} />}
       </FormGroup>
+      <FormGroup layout="stacked" control="single" spokenName="Path" help="Help." helpAt="above">
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a labelled field's help already sits above its control */}
+      <FormGroup layout="stacked" control="single" label="Path" help="Help." helpAt="above">
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error where help sits is a stacked field's choice */}
+      <FormGroup layout="side" control="single" spokenName="Path" help="Help." helpAt="above">
+        {(field) => <input {...field} />}
+      </FormGroup>
       <FormGroup layout="stacked" density="compact" control="single" label="New password">
         {(field) => <input {...field} />}
       </FormGroup>

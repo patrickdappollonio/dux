@@ -45,9 +45,11 @@ type WiringFor<C extends FieldControl> = C extends "named" ? NamedWiring : Field
 // an element, so a value that may be undefined, null or false does not compile.
 // The compiler cannot see an empty string, so the group reports one when drawn.
 // `optional` says after the label, and in the name, that the field may be left empty.
+// `helpAt` says where a bare field's help sits, "below" its control (the default) or
+// "above" it; a labelled field's help always sits between its label and its control.
 type FieldName =
-  | { label: ReactElement | string; optional?: true; spokenName?: never }
-  | { spokenName: string; label?: never; optional?: never }
+  | { label: ReactElement | string; optional?: true; spokenName?: never; helpAt?: never }
+  | { spokenName: string; label?: never; optional?: never; helpAt?: "above" | "below" }
 
 // One line about the current value. A "warning" one reads as the warning it is;
 // a `setting` one is that setting's config key in monospace, `lit` marking the
@@ -65,7 +67,7 @@ export type NoteLine =
 // the group and its control take the height left in a column, and "compact"
 // sets the label 4px above its control instead of 8px, for the fields of a `FormSection`.
 type FieldLayout =
-  | { layout: "side"; width?: "compact" | "wide"; height?: never; density?: never }
+  | { layout: "side"; width?: "compact" | "wide"; height?: never; density?: never; helpAt?: never }
   | { layout: "stacked"; height?: "content" | "fill"; density?: "regular" | "compact"; width?: never }
 
 export type FormGroupProps<C extends FieldControl = FieldControl> = FieldName &
@@ -236,8 +238,9 @@ export function FormGroup<C extends FieldControl>(props: FormGroupProps<C>) {
     >
       {header}
       <div className={cn("flex flex-col gap-1.5", fill && "flex-1")}>
+        {labelLine === null && props.helpAt === "above" ? helpEl : null}
         {row}
-        {labelLine === null ? helpEl : null}
+        {labelLine === null && props.helpAt !== "above" ? helpEl : null}
         {noteEl}
         {errorEl}
       </div>
