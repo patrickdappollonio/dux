@@ -5,7 +5,14 @@
 //! (disambiguate) on the alternate screen. Inside tmux it never asks for Kitty:
 //! it reads tmux's own settings with the tmux command line and asks tmux for its
 //! extended keys (modifyOtherKeys level 2) only when tmux will send them in the
-//! `csi-u` format dux reads.
+//! `csi-u` format dux reads. `[ui] extended_keys` is read when the terminal UI
+//! starts: `auto` asks and switches on when the host answers, `on` switches on
+//! outside tmux without asking, `off` asks nothing and reads classic keys.
+//!
+//! A punctuation key reported as its base key plus Shift with no shifted key
+//! (`CSI 47;2u` for `?`) reaches a program unshifted, because dux never guesses
+//! a keyboard layout. Asking the host for more than the disambiguate level
+//! therefore needs the host to report shifted keys as well.
 //!
 //! What dux switched on is kept in a [`HostKeysRecord`], two bits in one
 //! atomic, so the panic hook can read it without waiting on a lock the

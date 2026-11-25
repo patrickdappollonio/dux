@@ -14,7 +14,7 @@
 //! holding the two surfaces together.
 //!
 //! When you add a command here, decide explicitly whether it also warrants an
-//! entry in the web app menu (see CLAUDE.md); nothing will fail if you skip it.
+//! entry in the web app menu (see `AGENTS.md`); nothing will fail if you skip it.
 //! Commands that are per-project, per-session or per-terminal live on the web as
 //! parameterized row, menu or dialog actions rather than global menu entries.
 //! The exhaustiveness test in `keybindings.rs` guarantees every command in this
@@ -776,5 +776,5 @@ mod tests {
     // (`crates/dux-web/web/src/lib/appMenu.ts`) is now an independent,
     // client-owned surface with its own titles, its own item set, and submenus,
     // so a pin claiming a relationship between the two would be a false record.
-    // Keeping the surfaces in step is a deliberate human step; see CLAUDE.md.
+    // Keeping the surfaces in step is a human step; see `AGENTS.md`.
 }

@@ -163,7 +163,7 @@ pub(crate) const TYPING_GLYPH: &str = "▍";
 /// Private Use Areas, whose East Asian Width is ambiguous, which that
 /// machinery (like the plain set's own `※`) counts as one.
 ///
-/// Deliberately NOT here, because they are the same in both sets: the
+/// Not here, because they are the same in both sets: the
 /// working spinner, the status and attention dots, the typing caret, scroll
 /// markers, the ellipsis and box drawing. Those are state cues whose shape
 /// the working-cue and attention tenets pin, not icons.

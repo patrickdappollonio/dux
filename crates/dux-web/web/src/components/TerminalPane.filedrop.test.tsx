@@ -1141,7 +1141,7 @@ describe("when a file cannot be pasted", () => {
 // between then and the report there was nothing on screen at all. The permit
 // wait is bounded but real, uploads are sequential, and a multi-file drop
 // multiplies it, so a drop could look like nothing had happened for a long
-// time. CLAUDE.md: prefer explicit failure over silent waiting.
+// time. dux fails out loud rather than waiting silently.
 describe("what the user sees while a drop is uploading", () => {
   /// An upload the test releases by hand, so the in-flight window is a state
   /// the assertions can stand in rather than a race to catch.

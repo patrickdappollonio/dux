@@ -153,7 +153,7 @@ export function AccessoryBar({
           keyboard; see onScroll) do OPPOSITE things to focus, so a divider with
           breathing room separates the two clusters: a mistap on PgUp while
           aiming for → would otherwise yank the keyboard away (misclick-safe
-          spacing, per the CLAUDE.md tenet). */}
+          spacing). */}
       <div className="flex items-center gap-1">
         <KeyButton ariaLabel="Left" onActivate={() => onArrow("left")}>
           <ArrowLeft />

@@ -972,7 +972,7 @@ pub(crate) struct LinkPressDecision {
 /// carries no link or hyperlinks are off), and `mouse_reporting` says whether
 /// the child has mouse reporting on.
 ///
-/// Shift is deliberately absent from the rule on this surface, unlike the web:
+/// Shift is absent from the rule on this surface, unlike the web:
 /// Shift is the terminal UI's force-a-local-selection modifier and the host
 /// terminal's own link gesture while dux holds the mouse, so a Shift gesture
 /// must never end in a browser tab.
@@ -10316,7 +10316,7 @@ impl App {
         }
         // The commit runs on a worker (it can invoke slow filesystem/lock work);
         // completion posts `InitialCommitCreated`, whose reaction registers the
-        // project. Keeps the UI thread free per the CLAUDE.md workers tenet.
+        // project. Keeps the UI thread free.
         self.dispatch_create_initial_commit(&path, name);
         false
     }
@@ -12890,6 +12890,8 @@ impl App {
         self.handle_pending_pr_banner_mouse(mouse)
     }
 
+    /// A left press on the band, whatever modifiers are held, arms the open for
+    /// its release, and nothing of it is forwarded to the child.
     fn handle_pr_banner_press(&mut self, mouse: MouseEvent, layout: PaneLayout) -> bool {
         if layout == PaneLayout::Windowed
             && let Some(band) = self.mouse_layout.pr_banner

@@ -14,7 +14,7 @@
 //! database, or refuse to start. And dux never chmods through a symlink, because
 //! the mode it would change belongs to somebody else's file.
 //!
-//! Unix-only, deliberately: dux targets macOS and Linux, so there is no
+//! Unix-only: dux targets macOS and Linux, so there is no
 //! `cfg(windows)` branch here.
 
 use std::fs;

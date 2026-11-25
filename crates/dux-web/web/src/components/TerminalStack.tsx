@@ -125,7 +125,10 @@ export type StackArrange = (
 ///
 /// The typing target is the caller's when it passes one (the agent's stack
 /// keeps it in the store, where the header and the top menu read it), and the
-/// stack's own otherwise.
+/// stack's own otherwise. A press into a part makes it the target, and a part
+/// off screen never is one, so on a phone the target is the part on screen.
+/// The stack sends through the target's own connection, and a paste, upload or
+/// file pick runs in the pipeline of the part that was the target when it began.
 export function TerminalStack({
   parts,
   overlay,

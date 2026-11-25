@@ -6,9 +6,12 @@
 // The automatic answer: a window narrower than the breakpoint is a phone, and
 // so is a touch device whose screen is short, sideways included, because a
 // landscape phone is wide enough to pass for a computer and too short to use
-// one's layout (the user's decision of 2026-11-21). A person's explicit choice
-// on this device wins over both. That choice is per-device view state: kept in
-// this browser's storage, never in config and never on the server.
+// one's layout. A person's explicit choice on this device wins over both. That
+// choice is per-device view state: kept in this browser's storage, never in
+// config and never on the server. The computer layout chosen on a window
+// narrower than the breakpoint keeps the sidebar at its rail, floats it when
+// expanded, and starts the Changes pane closed without writing its stored
+// preference.
 
 /** Narrower than this is the phone layout, whatever the pointer. */
 export const MOBILE_BREAKPOINT = 768

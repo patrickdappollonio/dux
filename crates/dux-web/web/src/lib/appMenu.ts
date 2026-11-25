@@ -3,7 +3,7 @@
 //
 // - This file is the source of truth for the menu. `dux_core::palette` is the
 //   TUI palette's, and nothing holds the two together, so a new palette command
-//   warrants an entry here only by a deliberate decision (see CLAUDE.md).
+//   warrants an entry here only by an explicit decision (see `AGENTS.md`).
 // - The menu has no keyboard shortcut: it is reached by Tab and driven with
 //   Enter, Space and the arrow keys.
 // - The module is pure data, so the menu is assertable without mounting React,

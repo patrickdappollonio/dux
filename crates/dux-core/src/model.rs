@@ -770,7 +770,9 @@ pub struct ManagedWorkspace {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderWorkspace {
     /// The directory the user pointed the agent at. dux runs the provider here
-    /// and never creates, moves or removes it.
+    /// and never creates, moves or removes it: a factory reset leaves it, the
+    /// worktree manager lists a worktree it is in as busy, and dux's hidden
+    /// upload directory inside it stays after the agent is deleted.
     pub folder_path: String,
 }
 
@@ -1073,8 +1075,8 @@ impl AgentSession {
     ///
     /// Creation always gives a standalone agent a title, but the folder-name
     /// fallback below is genuinely reachable: the web's rename CLEARS the title
-    /// when it is submitted empty (deliberately, so a managed agent's row goes
-    /// back to tracking its branch), and for a standalone agent the folder's own
+    /// when it is submitted empty (so a managed agent's row goes back to
+    /// tracking its branch), and for a standalone agent the folder's own
     /// name is what the row falls back to. That fallback is the reason clearing
     /// a standalone title is allowed at all rather than being a way to make an
     /// agent nameless.
@@ -1618,14 +1620,11 @@ impl TerminalOwner {
 
     /// Teardown: does deleting the agent session `session_id` close this
     /// terminal? Deleting an agent tears down the terminals spawned in its
-    /// worktree; a project terminal is untouched by it.
+    /// worktree; a project terminal is untouched by it, and detaching an agent
+    /// closes none of its terminals.
     ///
-    /// A STANDALONE terminal answers `false`, and the omission is deliberate
-    /// rather than an oversight to be tidied up later. It belongs to no agent,
-    /// so deleting an agent has nothing to do with it: it opened in the user's
-    /// home directory and it ends when the user closes it or dux shuts down.
-    /// Nothing closes it automatically. The same note sits on
-    /// [`Self::closed_by_project_removal`].
+    /// A STANDALONE terminal answers `false`: it belongs to no agent, and it
+    /// ends only when the user closes it or dux shuts down.
     pub fn closed_by_session_delete(&self, session_id: &str) -> bool {
         match self {
             Self::Session(owner) => owner == session_id,
@@ -1639,11 +1638,8 @@ impl TerminalOwner {
     /// removal deletes that project's agents, and each agent's own delete is
     /// what closes its terminals, so answering `true` would close them twice.
     ///
-    /// A STANDALONE terminal answers `false`, and the omission is deliberate
-    /// rather than an oversight to be tidied up later. It belongs to no project,
-    /// so removing a project has nothing to do with it: it ends when the user
-    /// closes it or dux shuts down. Nothing closes it automatically. The same
-    /// note sits on [`Self::closed_by_session_delete`].
+    /// A STANDALONE terminal answers `false`: it belongs to no project, and it
+    /// ends only when the user closes it or dux shuts down.
     pub(crate) fn closed_by_project_removal(&self, project_id: &str) -> bool {
         match self {
             Self::Project(owner) => owner == project_id,

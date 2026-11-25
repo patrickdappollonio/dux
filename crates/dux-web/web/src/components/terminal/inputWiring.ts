@@ -1,3 +1,8 @@
+// The pane owns the clipboard in place of xterm's defaults, which would send the
+// paste chord to the remote machine: chords are classified by physical key
+// (`classifyClipboardKey`), a finished mouse selection copies, and a right click
+// pastes (`inputSurface.ts`) with no context menu. Under mouse reporting a drag
+// goes to the app, and a one-time hint names the force-local-selection modifier.
 import type { Terminal } from "@xterm/xterm"
 
 import { copyTermSelection } from "@/lib/termClipboard"
@@ -147,6 +152,8 @@ function registerMouseCopy(
 function registerPasteGuards(
   options: TerminalInputWiringOptions,
 ): Disposable {
+  // xterm puts the selection into its hidden textarea on a context menu; the
+  // pane suppresses that menu, so the text is wiped.
   const onContextMenu = () => {
     if (!options.term.textarea) return
     options.term.textarea.value = ""

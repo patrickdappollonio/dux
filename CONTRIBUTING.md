@@ -1,9 +1,11 @@
 # Contributing to dux
 
 Thanks for looking. This file covers building dux from source and the checks a
-pull request has to pass. For how the app is *designed*, read `CLAUDE.md` at the
-repo root: it holds the design tenets, and if a change conflicts with a tenet,
-the tenet wins.
+pull request has to pass. For how the app is *designed*, read `AGENTS.md` at the
+repo root and the `AGENTS.md` in each area directory (`crates/dux-web/web/`,
+`crates/dux-web/`, `crates/dux-tui/`, `website/`): they hold the rules a change
+must follow, and if a change conflicts with a rule, the rule wins. Each
+`CLAUDE.md` beside them only imports its `AGENTS.md`.
 
 ## What you need
 
@@ -344,5 +346,5 @@ check in the same change when your change alters the behaviour it covers (see
 - **Keep docs in step.** `README.md`, the marketing site in `website/`, and the
   docs pages in `website/docs/` are part of the change, not a follow-up.
 
-`CLAUDE.md` is the long form of all of the above and quite a lot more. It is worth
-reading before a substantial change.
+The `AGENTS.md` files hold the rest of the rules. They are worth reading
+before a substantial change.

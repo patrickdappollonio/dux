@@ -95,10 +95,8 @@ export function createLinkPress(deps: LinkPressDeps): LinkPress {
   // open the page twice: dux's `window.open` here, plus the forwarded mouse
   // report, which an agent CLI answers by opening the url on the server's
   // machine. Only the first reaches the clicker, so dux is the sole opener and
-  // the click that dispatched a link is withheld from the app entirely. This
-  // diverges from iTerm2, Ghostty and kitty, which give the click to the app and
-  // reserve links for a modifier; the hatch in `linkHatchHeld` forwards the
-  // click and refuses dux's open.
+  // the click that dispatched a link is withheld from the app entirely. The
+  // hatch in `linkHatchHeld` forwards the click and refuses dux's open.
   //
   // Mechanism, measured against the installed xterm: mouse reports come from DOM
   // mouse listeners only, through `bindMouse` in `CoreBrowserTerminal`, which

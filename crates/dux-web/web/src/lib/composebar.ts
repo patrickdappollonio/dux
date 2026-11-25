@@ -1,7 +1,9 @@
 // Pure send rules for the compose bar's Send action, and the rules deciding
 // which typing surface a pane gets. This module owns what a send looks like on
-// the wire; `ComposeBar.tsx` owns the input surface and `TerminalStack.tsx` owns
-// the PTY write.
+// the wire; `ComposeBar.tsx` owns the input surface and
+// `components/terminal/inputSurface.ts` owns the PTY write, the delayed Enter
+// included. Drafts are kept in the store by typing target, so they outlive the
+// bar.
 
 import { macroPayloadBytes } from "./macros"
 
@@ -33,7 +35,7 @@ export const COMPOSE_SUBMIT_DELAY_MS = 150
 /**
  * The ordered PTY writes a compose-bar Send performs: the message as a
  * macro-style keystroke stream through [`macroPayloadBytes`], submitted by an
- * Enter that travels alone. Deliberately not bracketed paste, so the wire keeps
+ * Enter that travels alone. Not bracketed paste, so the wire keeps
  * "line break" and "Enter" distinct without negotiating a paste protocol.
  *
  * Two elements mean the caller writes the body immediately and the bare-CR

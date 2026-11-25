@@ -1,7 +1,9 @@
 //! Reordering the selected agent's provider tabs: a mouse drag along the strip
 //! and the `move-tab-left` / `move-tab-right` palette commands. The order is the
 //! agent's own and is stored by the engine, so it survives a restart; which tab
-//! holds the agent's first-tab slot never changes here.
+//! holds the agent's first-tab slot never changes here. The drag also reorders
+//! the terminal dock's strip; a strip reorders within itself only, and the
+//! terminals' order lives in runtime memory only.
 //!
 //! The drag is keyed by tab id and checked against the strip again on release,
 //! because the strip is rebuilt whenever a tab arrives or closes, and a release

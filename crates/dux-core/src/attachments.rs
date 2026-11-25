@@ -13,7 +13,10 @@
 //! the way, or installs a **reservation** that refuses every new attachment to
 //! what it covers until the change has finished. An attach and a reservation
 //! take the same lock, so of an attach and a reservation racing, exactly one
-//! wins.
+//! wins. A change is judged against everybody with any part of the row open
+//! ([`Attachments::reserve_judging`]) and reserves only the tab or terminal it
+//! ends. A forced change (`force_connected` on the web's routes) skips the
+//! refusal and still installs the reservation.
 //!
 //! Only the asking connection's own attachments are exempt: the terminal UI
 //! deleting what it shows, or the browser tab that sent the request. Driving

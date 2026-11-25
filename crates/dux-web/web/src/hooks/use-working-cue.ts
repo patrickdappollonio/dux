@@ -9,9 +9,10 @@ import {
 
 // The glyph's working cue, shared by every surface that bounces a working
 // glyph (the sidebar list's agent and terminal rows, the collapsed rail and the
-// agent tab strip) through `WorkingGlyph`: the pulse on the glyph plus four
-// bounces per pulse on a frame around it, on the shared clock. The bounce is a
-// user-locked decision (CLAUDE.md, "Locked by the user").
+// tab strips) through `WorkingGlyph`: the pulse on the glyph plus four bounces
+// per pulse on a frame around it, on the shared clock. The tests titled
+// `USER-LOCKED: working glyph bounces with the pulse and settles at rest` pin
+// the bounce.
 //
 // The two ride separate elements on purpose. Every stop, a plain one or a
 // higher state (typing, needs-you) taking over, is the same stop: the pulse

@@ -3,7 +3,8 @@ import { foldForDivider, type ComputerLayout } from "@/lib/layoutModel"
 // The smallest share either part keeps in the split before a drag folds it.
 export const STACK_PART_MIN_PERCENT = 15
 
-/// The class a part's box wears when it is the one typing does not go to.
+/// The class a part's box wears when it is the one typing does not go to. Its
+/// strip keeps its colour, and a phone, with one part on screen, greys nothing.
 export const NOT_TYPING_CLASS = "grayscale opacity-80"
 
 /// The panel sizes, in percent of the stack, for a layout: the split at its

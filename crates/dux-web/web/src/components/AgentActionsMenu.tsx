@@ -259,7 +259,7 @@ export function AgentActionsMenu({
       <DropdownMenuGroup>
         <DropdownMenuLabel>{MENU_GROUP_LABELS.remove}</DropdownMenuLabel>
         {/* The one deliberate red-tinted destructive menu item (dim at rest, bright
-            on hover), per the CLAUDE.md web-UI menu tenet; the confirm dialog gates it. */}
+            on hover), per the menu rules in `web/AGENTS.md`; the confirm dialog gates it. */}
         <DropdownMenuItem
           variant="destructive"
           className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"

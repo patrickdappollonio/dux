@@ -70,7 +70,10 @@ import { theaterPillBox } from "./theaterPillBox"
 // One cluster, one look, both form factors: the phone's handoff overlays the
 // pill on the docked flap and translates, so any difference tears the flight.
 // Rendered inside the terminal surface's own positioned box, never beside it,
-// so an input row appearing cannot move the pill onto a tap target.
+// so an input row appearing cannot move the pill onto a tap target. Over a live
+// pane that box is the stack's overlay layer, which admits the band's hairline
+// above the pane and clips every other edge (`TerminalStack`). Under reduced
+// motion, and on a page that opens in theater, no flight runs (`useTheaterFlight`).
 export function TheaterPill({
   target,
   session,

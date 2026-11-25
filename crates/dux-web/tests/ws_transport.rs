@@ -727,8 +727,7 @@ async fn saw_status_tone(ws: &mut ClientWs, tone: &str, timeout: Duration) -> Op
 
 /// Boot with `p1` carrying a startup command that BLOCKS on a FIFO the caller
 /// controls, so a keyed `Busy` stays provably up for exactly as long as the test
-/// wants. This is the "hold the window open with a real dependency" technique
-/// CLAUDE.md mandates: no sleep, no polling for a race, just a process parked on
+/// wants: no sleep, no polling for a race, just a process parked on
 /// a read that nothing but the test can satisfy.
 ///
 /// Returns the FIFO path; writing anything to it lets the command exit and the

@@ -164,6 +164,7 @@ function WorkingCopyMissingTag() {
 
 // The standalone identity tag, on an agent's row and a terminal's row alike: an
 // aria-hidden ✷ plus an sr-only word, in the identity-only dux-standalone token.
+// The folder it names is part of the list's search haystack.
 function StandaloneTag({ label, query }: { label: string; query: string }) {
   return (
     <span className="flex min-w-0 shrink items-baseline gap-1 text-dux-standalone">

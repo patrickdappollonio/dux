@@ -28,9 +28,8 @@ function cueAnimations(el: Element): CSSAnimation[] {
  * Keeps a working pill on the shared working-cue clock when its strip is
  * reordered. Moving an element in the DOM ends and restarts its CSS animations
  * (measured in Chromium: the moved pill's bounce and pulse start over while its
- * unmoved neighbours run on), which would put the bounce, a user-locked cue, off
- * the shared clock. So the start time each pill's cue was on is remembered at
- * every commit, and when the order changes it is handed back to the pill that
+ * unmoved neighbours run on), which would put the bounce off the shared clock.
+ * So the start time each pill's cue was on is remembered at every commit, and when the order changes it is handed back to the pill that
  * moved, the way the collapsed sidebar hands the clocks across its own swap.
  *
  * Only while the pill is still in the working cycle the clock was read from: a

@@ -112,6 +112,10 @@ function editorSelectionActive(
   }
 }
 
+// Questions the open buffer against disk when the changes broadcast moves its
+// file's signal, on a revisit, and when its tab becomes active, mount included.
+// Each trigger is one metadata check, never a read: a clean buffer reloads in
+// place, a dirty one, or one with a selection, gets a banner instead.
 export function useEditorDiskFreshness({
   root,
   activeTab,
