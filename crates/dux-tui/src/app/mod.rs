@@ -6586,9 +6586,12 @@ impl App {
     }
 
     /// The same for `begun`, the start of a key a reader stopped reading, when
-    /// it begins the paste start marker and so may be a paste.
+    /// it may be a paste whose start marker was cut in two
+    /// ([`crate::raw_input::is_cut_paste_start`]). Any other start of a key,
+    /// a hand-typed Escape or Alt-[ included, is dropped with nothing after
+    /// it.
     pub(crate) fn cut_key_start_off(&mut self, begun: &[u8]) {
-        if crate::raw_input::begins_paste_start(begun) {
+        if crate::raw_input::is_cut_paste_start(begun) {
             self.paste_remainder = Some(CutPaste {
                 rest: crate::raw_input::PasteRemainder::after_start_of_marker(
                     begun,

@@ -7,9 +7,11 @@
 //! program selected) ends what the reader held unfinished: the start of a key
 //! is dropped, and a paste is closed for the program it was going to and its
 //! rest dropped up to its end marker, so it never acts as keys. A held start
-//! of the paste start marker counts as a paste once the bytes after it
-//! complete the marker. The end marker goes through the typing gate, so a
-//! program in a row another device drives stays in the paste. The windowed
+//! of the paste start marker three bytes or longer (`ESC [ 2` on) counts as a
+//! paste once the bytes after it complete the marker; a held Escape or Alt-[
+//! is a key typed by hand and is dropped alone. The end marker goes through
+//! the typing gate, so a program in a row another device drives stays in the
+//! paste. The windowed
 //! interface ends what it holds the same way when its keys move between
 //! polls, which no key it read did: a dialog a worker opens over it, or its
 //! program exiting, although it stays the reader. The
@@ -2022,6 +2024,67 @@ mod hand_overs_without_a_key {
         rig.type_bytes(b"x");
         rig.settle();
         assert_eq!(rig.outcome().received, "abcx");
+    }
+
+    /// Alt-[ typed at one maximized program and held for the key that may
+    /// follow, then another program maximized: a 2 typed next reaches the
+    /// new program, because a hand-typed Alt-[ is never taken for the start
+    /// of a paste.
+    #[test]
+    fn a_key_typed_after_a_dropped_alt_bracket_reaches_the_next_program() {
+        let mut rig = Rig::new(WINDOWED);
+        let elsewhere = rig.received.with_file_name("terminal received");
+        maximize_a_dock_terminal(&mut rig, &elsewhere, Program::Plain);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+        rig.type_bytes(b"2x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "2x");
+    }
+
+    /// The same for Escape, held while a program loads, then another program
+    /// maximized: a `[` typed next reaches the new program.
+    #[test]
+    fn a_key_typed_after_a_dropped_escape_reaches_the_next_program() {
+        let mut rig = Rig::new(Setup {
+            program: Program::Silent,
+            ..MAXIMIZED
+        });
+        rig.type_bytes(b"\x1b");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b");
+        let elsewhere = rig.received.with_file_name("terminal received");
+        let id = maximize_a_dock_terminal(&mut rig, &elsewhere, Program::Plain);
+        rig.type_bytes(b"[x");
+        rig.settle();
+        assert_eq!(
+            everything_received(&rig.app.engine.companion_terminals[&id].client, &elsewhere),
+            "[x"
+        );
+    }
+
+    /// The shortest held start of the paste start marker that is taken for a
+    /// paste, `ESC [ 2`, held when a worker opens a dialog: the rest of the
+    /// paste never acts on the dialog.
+    #[test]
+    fn a_paste_whose_start_marker_a_dialog_cuts_after_its_third_byte_never_acts_on_the_dialog() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[2");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[2");
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"00~de\r\x1b[201~");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
     }
 }
 

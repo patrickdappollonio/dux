@@ -26,9 +26,17 @@ pub(crate) fn last_paste_marker_opens(bytes: &[u8]) -> Option<bool> {
         })
 }
 
-/// Whether `bytes` is a proper, non-empty start of the paste start marker.
-pub(crate) fn begins_paste_start(bytes: &[u8]) -> bool {
-    !bytes.is_empty()
+/// The longest held start of the paste start marker that is a whole key a
+/// person types by hand: `ESC` (Escape) and `ESC [` (Alt-[), held only for
+/// the key that may follow. `ESC [ 2` and longer are the start of a sequence
+/// the terminal sends in one write (Insert, F9 to F12, the paste marker).
+const HAND_TYPED_MARKER_START: usize = 2;
+
+/// Whether `bytes`, held when its reader ended, is a start of the paste start
+/// marker that cannot be a key typed by hand, and so may be a paste cut in
+/// two.
+pub(crate) fn is_cut_paste_start(bytes: &[u8]) -> bool {
+    bytes.len() > HAND_TYPED_MARKER_START
         && bytes.len() < BRACKET_PASTE_START.len()
         && BRACKET_PASTE_START.starts_with(bytes)
 }
@@ -63,12 +71,13 @@ impl PasteRemainder {
         remainder
     }
 
-    /// What follows a reader that ended at `now` holding `begun`, a proper
-    /// start of the paste start marker: a paste when the bytes after it
-    /// complete the marker, dropped with them. The first byte that does not
-    /// is read as usual, and the marker bytes before it are dropped.
+    /// What follows a reader that ended at `now` holding `begun`, a start of
+    /// the paste start marker that [`is_cut_paste_start`] accepts: a paste
+    /// when the bytes after it complete the marker, dropped with them. The
+    /// first byte that does not is read as usual, and the marker bytes before
+    /// it are dropped.
     pub(crate) fn after_start_of_marker(begun: &[u8], now: Instant) -> Self {
-        debug_assert!(begins_paste_start(begun));
+        debug_assert!(is_cut_paste_start(begun));
         Self {
             start_matched: Some(begun.len()),
             matched: 0,
@@ -649,10 +658,12 @@ mod tests {
         assert_eq!(paste.end_in_read(b"0~a\r\x1b[201~x", now), Some(10));
         let mut key = PasteRemainder::after_start_of_marker(b"\x1b[2", now);
         assert_eq!(key.end_in_read(b"0;5~x", now), Some(1));
-        assert!(begins_paste_start(b"\x1b"));
-        assert!(!begins_paste_start(b""));
-        assert!(!begins_paste_start(BRACKET_PASTE_START));
-        assert!(!begins_paste_start(b"\x1b[3"));
+        assert!(is_cut_paste_start(b"\x1b[2"));
+        assert!(!is_cut_paste_start(b"\x1b"));
+        assert!(!is_cut_paste_start(b"\x1b["));
+        assert!(!is_cut_paste_start(b""));
+        assert!(!is_cut_paste_start(BRACKET_PASTE_START));
+        assert!(!is_cut_paste_start(b"\x1b[3"));
     }
 
     #[test]
