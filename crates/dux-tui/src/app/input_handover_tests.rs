@@ -1248,6 +1248,24 @@ mod maximize_and_back {
         assert_eq!(want.received, "");
         assert_every_cut_matches(LOADING, typed, &want);
     }
+
+    /// A lone Escape typed while the program loads is dropped when the wait
+    /// that decides it ends, as is what is typed after it.
+    #[test]
+    fn a_lone_escape_typed_while_the_program_loads_never_reaches_it() {
+        let mut rig = Rig::new(LOADING);
+        rig.type_bytes(b"\x1b");
+        for _ in 0..5 {
+            rig.turn();
+        }
+        rig.type_bytes(b"ab");
+        for _ in 0..5 {
+            rig.turn();
+        }
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
 }
 
 /// Keys around a key that opens a dialog or an overlay, or takes over the pane

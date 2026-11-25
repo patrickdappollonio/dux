@@ -3605,14 +3605,16 @@ impl App {
         }
 
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
-        if self.wait_for_terminal(terminal, Duration::ZERO)? {
-            let n = self.read_terminal(terminal, buf)?;
-            if n != 0 {
-                return Ok(self.process_raw_input_bytes(&buf[..n]));
-            }
+        let n = if self.wait_for_terminal(terminal, Duration::ZERO)? {
+            self.read_terminal(terminal, buf)?
+        } else {
+            0
+        };
+        // An empty read decides the held key on its own.
+        if self.consume_loading_raw_input(&buf[..n]) {
+            return Ok(false);
         }
-
-        Ok(self.process_raw_input_bytes(&[]))
+        Ok(self.process_raw_input_bytes(&buf[..n]))
     }
 
     fn parse_raw_input_sequences(&mut self, bytes: &[u8]) -> Vec<crate::raw_input::ParsedSequence> {
@@ -13922,9 +13924,14 @@ impl App {
     /// Feed newly-read loading-phase bytes through the shared
     /// `raw_input_parser`, apply the focus reports among them, and leave
     /// fullscreen on a key or click that asks to, handing what followed it on
-    /// to the next reader. Returns whether fullscreen was left.
+    /// to the next reader. No bytes means the Escape wait has ended, which
+    /// decides a held lone Escape or Alt-] as the forwarding path does.
+    /// Returns whether fullscreen was left.
     pub(crate) fn scan_loading_phase(&mut self, new_bytes: &[u8]) -> bool {
-        let sequences = self.raw_input_parser.feed_sequences(new_bytes);
+        let mut sequences = self.raw_input_parser.feed_sequences(new_bytes);
+        if new_bytes.is_empty() {
+            sequences.extend(self.raw_input_parser.resolve_pending_esc());
+        }
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
         self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
         self.scan_loading_phase_focus(&sequences);
