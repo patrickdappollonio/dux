@@ -2031,6 +2031,120 @@ mod hand_overs_without_a_key {
         assert_eq!(rig.outcome().received, "abcx");
     }
 
+    /// The time the rest of a cut-off paste is measured by, stopped from now
+    /// on this thread and moved only by the case, so how long a step takes on
+    /// a loaded machine changes nothing.
+    struct PasteClock {
+        now: Instant,
+    }
+
+    impl PasteClock {
+        fn stopped() -> Self {
+            let now = Instant::now();
+            PASTE_CLOCK.set(Some(now));
+            Self { now }
+        }
+
+        fn advance(&mut self, by: Duration) {
+            self.now += by;
+            PASTE_CLOCK.set(Some(self.now));
+        }
+    }
+
+    impl Drop for PasteClock {
+        fn drop(&mut self) {
+            PASTE_CLOCK.set(None);
+        }
+    }
+
+    /// A maximized paste cut off by a worker's dialog, its end marker still
+    /// to come.
+    fn a_dialog_cuts_off_a_paste(rig: &mut Rig) {
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(rig);
+        rig.turn();
+    }
+
+    /// `n` bytes of a paste's text, the last a line break, which closes the
+    /// dialog if it is read as a key.
+    fn pasted_lines(n: usize) -> Vec<u8> {
+        let mut text = vec![b'p'; n - 1];
+        text.push(b'\r');
+        text
+    }
+
+    /// Escape typed every half second after a cut-off paste whose end marker
+    /// never comes: the Escape typed half a second after the cut is still
+    /// taken for the paste, and the one typed a second after it closes the
+    /// dialog. Typing keeps nothing dropped past that second.
+    #[test]
+    fn steady_typing_after_a_cut_off_paste_acts_a_second_after_the_cut() {
+        let mut clock = PasteClock::stopped();
+        let mut rig = Rig::new(MAXIMIZED);
+        a_dialog_cuts_off_a_paste(&mut rig);
+        let half = crate::raw_input::UNFINISHED_PASTE_WAIT / 2;
+        clock.advance(half);
+        rig.type_bytes(b"\x1b");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        clock.advance(half);
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "abcx");
+    }
+
+    /// The rest of a cut-off paste arriving as a slow link delivers it, in
+    /// reads of paste size with a stall just short of the quiet wait between
+    /// them, is dropped to its end marker: none of its line breaks closes the
+    /// dialog.
+    #[test]
+    fn the_rest_of_a_paste_arriving_with_stalls_is_dropped_to_its_end_marker() {
+        let mut clock = PasteClock::stopped();
+        let mut rig = Rig::new(MAXIMIZED);
+        a_dialog_cuts_off_a_paste(&mut rig);
+        let stall = crate::raw_input::UNFINISHED_PASTE_WAIT.mul_f32(0.9);
+        let mut waited = Duration::ZERO;
+        while waited + stall * 2 < crate::raw_input::CUT_PASTE_DROP_LIMIT {
+            clock.advance(stall);
+            waited += stall;
+            rig.type_bytes(&pasted_lines(crate::raw_input::PASTE_SIZED_READ));
+            rig.settle();
+            assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        }
+        clock.advance(stall);
+        rig.type_bytes(b"q\r\x1b[201~");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "abcx");
+    }
+
+    /// The rest of a cut-off paste that keeps arriving in reads of paste size
+    /// and never brings its end marker is dropped for at most
+    /// [`crate::raw_input::CUT_PASTE_DROP_LIMIT`] after the cut: a key read
+    /// then acts.
+    #[test]
+    fn the_rest_of_a_cut_off_paste_is_dropped_for_at_most_its_limit() {
+        let mut clock = PasteClock::stopped();
+        let mut rig = Rig::new(MAXIMIZED);
+        a_dialog_cuts_off_a_paste(&mut rig);
+        let step = crate::raw_input::UNFINISHED_PASTE_WAIT / 2;
+        let mut waited = Duration::ZERO;
+        while waited + step < crate::raw_input::CUT_PASTE_DROP_LIMIT {
+            clock.advance(step);
+            waited += step;
+            rig.type_bytes(&pasted_lines(crate::raw_input::PASTE_SIZED_READ));
+            rig.settle();
+            assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        }
+        clock.advance(crate::raw_input::CUT_PASTE_DROP_LIMIT.saturating_sub(waited));
+        close_the_dialog(&mut rig);
+    }
+
     /// Alt-[ typed at one maximized program and held for the key that may
     /// follow, then another program maximized: a 2 typed next reaches the
     /// new program, because a hand-typed Alt-[ is never taken for the start

@@ -459,6 +459,22 @@ pub(crate) struct CutPaste {
     pub(crate) hand_over_seen: bool,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The time the rest of a cut-off paste is measured by on this thread, in
+    /// place of the clock, for a test that sets how much time passes.
+    pub(crate) static PASTE_CLOCK: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// The time the rest of a cut-off paste is measured by.
+fn paste_clock() -> Instant {
+    #[cfg(test)]
+    if let Some(now) = PASTE_CLOCK.get() {
+        return now;
+    }
+    Instant::now()
+}
+
 /// The tips screen's logo, as last drawn.
 #[derive(Default)]
 pub(crate) struct WelcomeLogo {
@@ -6579,7 +6595,7 @@ impl App {
     /// paste's bytes it held unfinished, from what the terminal sends next.
     pub(crate) fn cut_paste_off(&mut self, held: &[u8]) {
         self.paste_remainder = Some(CutPaste {
-            rest: crate::raw_input::PasteRemainder::after(held, Instant::now()),
+            rest: crate::raw_input::PasteRemainder::after(held, paste_clock()),
             hand_over_seen: false,
         });
     }
@@ -6592,10 +6608,7 @@ impl App {
     pub(crate) fn cut_key_start_off(&mut self, begun: &[u8]) {
         if crate::raw_input::is_cut_paste_start(begun) {
             self.paste_remainder = Some(CutPaste {
-                rest: crate::raw_input::PasteRemainder::after_start_of_marker(
-                    begun,
-                    Instant::now(),
-                ),
+                rest: crate::raw_input::PasteRemainder::after_start_of_marker(begun, paste_clock()),
                 hand_over_seen: false,
             });
         }
@@ -6673,7 +6686,7 @@ impl App {
         let Some(cut) = self.paste_remainder.as_mut() else {
             return read.len();
         };
-        let Some(end) = cut.rest.end_in_read(read, Instant::now()) else {
+        let Some(end) = cut.rest.end_in_read(read, paste_clock()) else {
             return 0;
         };
         self.paste_remainder = None;

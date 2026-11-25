@@ -13,6 +13,16 @@ pub(crate) const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
 /// included.
 pub(crate) const UNFINISHED_PASTE_WAIT: Duration = Duration::from_secs(1);
 
+/// The fewest bytes one read of the rest of a cut-off paste holds for it to
+/// count as the paste still arriving. A terminal delivers a paste in reads of
+/// hundreds or thousands of bytes; keys typed by hand, `CSI … u` keys and
+/// mouse reports included, are a few dozen bytes between two reads.
+pub(crate) const PASTE_SIZED_READ: usize = 256;
+
+/// The longest the rest of a cut-off paste is dropped, however it keeps
+/// arriving.
+pub(crate) const CUT_PASTE_DROP_LIMIT: Duration = Duration::from_secs(5);
+
 /// Whether the last bracketed-paste marker in `bytes` opens a paste; `None`
 /// when `bytes` holds neither marker.
 pub(crate) fn last_paste_marker_opens(bytes: &[u8]) -> Option<bool> {
@@ -43,8 +53,18 @@ pub(crate) fn is_cut_paste_start(bytes: &[u8]) -> bool {
 
 /// The rest of a bracketed paste whose reader ended before the paste did,
 /// dropped from what the terminal sends so that no reader takes it as keys.
-/// It ends with the paste's end marker, or once the paste has gone
-/// [`UNFINISHED_PASTE_WAIT`] without a byte; what follows is read as usual.
+/// It ends with the paste's end marker, at the first read that comes
+/// [`UNFINISHED_PASTE_WAIT`] or more after the last read of
+/// [`PASTE_SIZED_READ`] bytes or more (or after the reader ended, when none
+/// has come), and at the first read [`CUT_PASTE_DROP_LIMIT`] or more after
+/// the reader ended. That read and what follows are read as usual.
+///
+/// Keys typed by hand come in reads far smaller than [`PASTE_SIZED_READ`],
+/// so they do not keep the rest of a paste going: once the paste stops
+/// arriving, they are dropped for at most [`UNFINISHED_PASTE_WAIT`]. A paste that keeps
+/// arriving in reads of that size, with no stall of [`UNFINISHED_PASTE_WAIT`]
+/// between them, is dropped to its end marker for up to
+/// [`CUT_PASTE_DROP_LIMIT`]; what arrives after that is read as keys.
 #[derive(Debug)]
 pub(crate) struct PasteRemainder {
     /// How many bytes of the start marker have arrived, while the reader
@@ -53,7 +73,10 @@ pub(crate) struct PasteRemainder {
     /// How many leading bytes of the end marker the bytes dropped so far end
     /// with.
     matched: usize,
-    /// When the paste last had a byte.
+    /// When the reader ended.
+    cut: Instant,
+    /// When the last read of [`PASTE_SIZED_READ`] bytes or more came, or the
+    /// reader ended when none has.
     last: Instant,
 }
 
@@ -64,6 +87,7 @@ impl PasteRemainder {
         let mut remainder = Self {
             start_matched: None,
             matched: 0,
+            cut: now,
             last: now,
         };
         // Bytes a reader holds unfinished never hold a whole end marker.
@@ -81,18 +105,24 @@ impl PasteRemainder {
         Self {
             start_matched: Some(begun.len()),
             matched: 0,
+            cut: now,
             last: now,
         }
     }
 
-    /// Where the paste ends in `bytes`, read at `now`: the index just past
-    /// its end marker, or 0 when the paste had already gone quiet for
-    /// [`UNFINISHED_PASTE_WAIT`]. `None` when every byte belongs to the paste.
+    /// Where the paste ends in `bytes`, one read made at `now`: the index
+    /// just past its end marker, or 0 when the dropping ended before this
+    /// read (see [`PasteRemainder`]). `None` when every byte belongs to the
+    /// paste.
     pub(crate) fn end_in_read(&mut self, bytes: &[u8], now: Instant) -> Option<usize> {
-        if now.saturating_duration_since(self.last) >= UNFINISHED_PASTE_WAIT {
+        if now.saturating_duration_since(self.cut) >= CUT_PASTE_DROP_LIMIT
+            || now.saturating_duration_since(self.last) >= UNFINISHED_PASTE_WAIT
+        {
             return Some(0);
         }
-        self.last = now;
+        if bytes.len() >= PASTE_SIZED_READ {
+            self.last = now;
+        }
         self.end_in(bytes)
     }
 
@@ -674,6 +704,21 @@ mod tests {
         assert_eq!(remainder.end_in_read(b"abc", almost), None);
         let quiet = almost + UNFINISHED_PASTE_WAIT;
         assert_eq!(remainder.end_in_read(b"x", quiet), Some(0));
+    }
+
+    #[test]
+    fn only_reads_of_paste_size_keep_a_paste_remainder_going() {
+        let now = Instant::now();
+        let half = UNFINISHED_PASTE_WAIT / 2;
+        let mut remainder = PasteRemainder::after(b"", now);
+        assert_eq!(remainder.end_in_read(b"a", now + half), None);
+        assert_eq!(remainder.end_in_read(b"b", now + half * 2), Some(0));
+
+        let big = vec![b'p'; PASTE_SIZED_READ];
+        let mut remainder = PasteRemainder::after(b"", now);
+        assert_eq!(remainder.end_in_read(&big, now + half), None);
+        assert_eq!(remainder.end_in_read(b"b", now + half * 2), None);
+        assert_eq!(remainder.end_in_read(&big, now + half * 3), Some(0));
     }
 
     #[test]
