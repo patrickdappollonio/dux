@@ -18,8 +18,8 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu"
+import { AgentNameInput } from "@/components/AgentNameFields"
 import { FormGroup } from "@/components/ui/form-group"
-import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ScrollList, ScrollListRows } from "@/components/ui/scroll-list"
 import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
@@ -739,29 +739,13 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
             invalid={invalidNonEmpty}
           >
             {(field) => (
-              <Input
-                {...field}
+              <AgentNameInput
+                field={field}
                 value={name}
-                onChange={(e) => {
-                  const el = e.target
-                  const raw = el.value
-                  const caret = el.selectionStart ?? raw.length
-                  setName(sanitizeAgentName(raw))
-                  // Restore the caret after live sanitization shrinks the string,
-                  // so mid-string edits don't jump to the end (same as CreateAgent).
-                  const sanitized = sanitizeAgentName(raw)
-                  if (sanitized !== raw) {
-                    const next = Math.max(0, caret - (raw.length - sanitized.length))
-                    requestAnimationFrame(() => el.setSelectionRange(next, next))
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault()
-                    handleAttach()
-                  }
-                }}
+                onChange={(raw) => setName(sanitizeAgentName(raw))}
+                onSubmit={handleAttach}
                 placeholder="Display name"
+                generating={false}
                 autoFocus
               />
             )}
