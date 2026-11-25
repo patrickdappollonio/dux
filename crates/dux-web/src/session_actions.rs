@@ -91,6 +91,14 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/sessions/{id}/branch-pushed",
             axum::routing::get(session_branch_pushed),
         )
+        .route(
+            "/api/v1/sessions/{id}/folder-files",
+            axum::routing::get(session_folder_files),
+        )
+        .route(
+            "/api/v1/standalone-agents/new-folder",
+            axum::routing::get(standalone_new_folder),
+        )
         .route("/api/v1/sessions/{id}/reconnect", post(reconnect_session))
         .route(
             "/api/v1/sessions/{id}/rerun-startup-command",
@@ -204,6 +212,13 @@ enum CreateSessionBody {
         #[serde(default)]
         provider: Option<String>,
     },
+    /// A STANDALONE agent in a new folder dux creates for it, named after the
+    /// agent, in the standalone agents folder. The name is required.
+    StandaloneNewFolder {
+        name: String,
+        #[serde(default)]
+        provider: Option<String>,
+    },
 }
 
 impl CreateSessionBody {
@@ -260,6 +275,9 @@ impl CreateSessionBody {
                 name,
                 provider,
             },
+            CreateSessionBody::StandaloneNewFolder { name, provider } => {
+                WireCommand::CreateStandaloneAgentInNewFolder { name, provider }
+            }
         }
     }
 }
@@ -835,6 +853,113 @@ async fn session_uncommitted_files(
     .into_response()
 }
 
+/// What the delete dialog says about a standalone agent's folder.
+#[derive(Serialize)]
+struct FolderFilesResponse {
+    /// Whether dux created the folder, so deleting the agent may delete it.
+    created_by_dux: bool,
+    /// How many files the folder holds, or why that is not known. Counted only
+    /// for a folder dux created; `None` for a folder the user chose.
+    files: Option<dux_core::agent_folders::FolderFiles>,
+}
+
+/// `GET /api/v1/sessions/{id}/folder-files`: whether dux created a standalone
+/// agent's folder and, when it did, how many files it holds. The count walks
+/// the folder, so it runs on the blocking pool.
+async fn session_folder_files(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let Some(folder) = state.engine.standalone_folder(id).await else {
+        return unknown_session();
+    };
+    let Some((path, created_by_dux)) = folder else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "This agent runs in a worktree, not in a standalone agent's folder.",
+        )
+            .into_response();
+    };
+    if !created_by_dux {
+        return axum::Json(FolderFilesResponse {
+            created_by_dux,
+            files: None,
+        })
+        .into_response();
+    }
+    let counted = tokio::task::spawn_blocking(move || {
+        dux_core::agent_folders::count_folder_files(std::path::Path::new(&path))
+    })
+    .await
+    .unwrap_or(dux_core::agent_folders::FolderFiles::Unreadable);
+    axum::Json(FolderFilesResponse {
+        created_by_dux,
+        files: Some(counted),
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct NewFolderQuery {
+    #[serde(default)]
+    name: String,
+}
+
+/// Where a new standalone agent's folder would be.
+#[derive(Serialize)]
+struct NewFolderResponse {
+    /// The folder new agents' folders are created in, home-shortened.
+    root_label: String,
+    /// The folder the agent called `name` would run in, home-shortened, or
+    /// `None` for an empty name.
+    folder_label: Option<String>,
+    /// Whether something is already at that folder's path, which the create
+    /// would refuse. `false` for an empty name.
+    taken: bool,
+}
+
+/// `GET /api/v1/standalone-agents/new-folder?name=`: the folder a standalone
+/// agent called `name` would get, and whether that name is taken. A read; the
+/// create itself refuses a taken name again, atomically.
+async fn standalone_new_folder(
+    State(state): State<AppState>,
+    Query(query): Query<NewFolderQuery>,
+) -> Response {
+    let Some(root) = state.engine.standalone_agents_root().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dux is shutting down, so the folder could not be looked up.",
+        )
+            .into_response();
+    };
+    let name = query.name.trim().to_string();
+    let answer = tokio::task::spawn_blocking(move || {
+        let root_label = dux_core::home_path::shorten_home(&root);
+        if name.is_empty() {
+            return NewFolderResponse {
+                root_label,
+                folder_label: None,
+                taken: false,
+            };
+        }
+        let folder = dux_core::agent_folders::folder_path_for(&root, &name);
+        NewFolderResponse {
+            root_label,
+            folder_label: Some(dux_core::home_path::shorten_home(&folder)),
+            taken: std::fs::symlink_metadata(&folder).is_ok(),
+        }
+    })
+    .await;
+    match answer {
+        Ok(answer) => axum::Json(answer).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the folder lookup stopped unexpectedly",
+        )
+            .into_response(),
+    }
+}
+
 /// What the rename dialog warns about under its "also rename the git branch" box.
 #[derive(Serialize)]
 struct BranchPushedResponse {
@@ -879,6 +1004,11 @@ struct DeleteQuery {
     /// therefore behaves exactly as it did before it existed.
     #[serde(default)]
     delete_branch: Option<bool>,
+    /// Also delete a standalone agent's folder. Only a folder dux created can
+    /// be; asking for any other refuses the whole delete. Absent means nobody
+    /// was asked: a folder dux created goes and a folder the user chose stays.
+    #[serde(default)]
+    delete_folder: Option<bool>,
 }
 
 /// The most a delete's body may hold: the branch answers, a few branch names
@@ -949,7 +1079,7 @@ async fn delete_session(
         delete_worktree: q.delete_worktree,
         delete_branch: q.delete_branch,
         branches: body.branches,
-        delete_folder: false,
+        delete_folder: q.delete_folder,
     };
     let result = match dispatch_guarded(
         &state,

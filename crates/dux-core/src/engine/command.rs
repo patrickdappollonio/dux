@@ -48,9 +48,9 @@ pub enum Command {
         delete_branch: Option<bool>,
         /// Both delete-dialog boxes' answers, when the caller sends them.
         branches: Option<crate::branch_history::BranchAnswersWire>,
-        /// Whether a standalone agent's folder goes too; refused unless dux
-        /// created it.
-        delete_folder: bool,
+        /// Whether a standalone agent's folder goes too; asking for one dux
+        /// did not create is refused. `None` leaves it to who made the folder.
+        delete_folder: Option<bool>,
     },
     /// Persist a project mutation. `Add` is handled inline: the handler writes
     /// SQLite and config.toml in `apply` and returns
@@ -693,11 +693,7 @@ impl Engine {
                     delete_branch,
                 )
                 .map_err(|reason| anyhow::anyhow!("The agent was not deleted: {reason}."))?;
-                let folder = if delete_folder {
-                    crate::engine::FolderOnDelete::Remove
-                } else {
-                    crate::engine::FolderOnDelete::Keep
-                };
+                let folder = crate::engine::FolderOnDelete::from_answer(delete_folder);
                 let outcome =
                     self.begin_delete_session_full(&session_id, worktree, &request, folder);
                 Ok(EventReaction::BeginDeleteSessionView(Box::new(

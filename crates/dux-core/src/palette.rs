@@ -472,8 +472,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::NewStandaloneAgent,
         name: "new-standalone-agent",
-        description: "Run an agent in a folder you already have",
-        // Global and parameter-free (it opens a folder browser and needs
+        description: "Start an agent in a new folder dux creates, or in a folder you have",
+        // Global and parameter-free (it asks for a name and needs
         // nothing selected), so it also earns a row in the web's creation menu
         // (see `crates/dux-web/web/src/lib/creationMenus.ts`). It sits beside
         // new-standalone-terminal on purpose: both are the "belongs to nothing"

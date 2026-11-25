@@ -267,10 +267,11 @@ pub enum Action {
     /// `NewProjectTerminal` (project-scoped): this one needs nothing selected
     /// and no owner to exist. No default keybinding.
     NewStandaloneTerminal,
-    /// Open the folder browser to pick a directory the user already has, and run
-    /// an agent in it. Distinct from `NewAgent`, which creates a branch and a
-    /// worktree inside a project: this one belongs to no project, makes nothing,
-    /// and never creates, moves or removes the folder it is pointed at.
+    /// Ask for a name and run an agent in a new folder dux creates for it, with
+    /// a way to a folder the user already has instead. Distinct from
+    /// `NewAgent`, which creates a branch and a worktree inside a project: this
+    /// one belongs to no project, and dux never moves or removes a folder the
+    /// user chose for it.
     ///
     /// Reachable from the palette, from anywhere in the agents pane, and from
     /// inside the NEW-AGENT project chooser, where it answers "none of these". It
@@ -668,7 +669,7 @@ impl Action {
                 "Open a standalone terminal in your home directory, belonging to no project or agent."
             }
             Action::NewStandaloneAgent => {
-                "Run an agent in a folder you already have. It belongs to no project, gets no branch and no worktree, and dux never creates, moves or removes the folder."
+                "Start an agent that belongs to no project: give it a name and dux creates a folder for it, or run it in a folder you already have. It gets no branch and no worktree."
             }
             Action::OpenMacroBar => {
                 "Open the macro command bar to send text macros. Works over the windowed agent pane and in fullscreen."

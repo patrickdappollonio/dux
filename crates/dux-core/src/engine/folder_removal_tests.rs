@@ -224,7 +224,7 @@ fn the_wire_flag_is_judged_by_the_record() {
         delete_worktree: false,
         delete_branch: None,
         branches: None,
-        delete_folder: true,
+        delete_folder: Some(true),
     });
     let refused_text = format!("{refused:?}");
     assert!(
@@ -239,9 +239,97 @@ fn the_wire_flag_is_judged_by_the_record() {
             delete_worktree: false,
             delete_branch: None,
             branches: None,
-            delete_folder: true,
+            delete_folder: Some(true),
         })
         .unwrap();
     let _ = folder_final(&engine);
     assert!(!folder.exists());
+}
+
+/// A delete that asks nobody about the folder leaves it to who made it: a
+/// folder dux created goes with the agent.
+#[test]
+fn an_unasked_delete_deletes_the_folder_dux_created() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    std::fs::write(folder.join("a.md"), "x").unwrap();
+    let outcome = delete(&mut engine, "otter", FolderOnDelete::Unasked);
+    assert!(
+        matches!(
+            outcome,
+            BeginDeleteSessionOutcome::Inline {
+                removal: WorktreeRemoval::NothingToRemove {
+                    folder: FolderFate::Deleting,
+                    ..
+                }
+            }
+        ),
+        "{outcome:?}"
+    );
+    let text = folder_final(&engine);
+    assert!(text.contains("Deleted the folder"), "{text}");
+    assert!(!folder.exists());
+}
+
+/// A delete that asks nobody keeps a folder the user chose, and is not refused.
+#[test]
+fn an_unasked_delete_keeps_a_folder_the_user_chose() {
+    let (mut engine, _tmp) = test_engine();
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join("mine.txt"), "mine").unwrap();
+    let session = sample_standalone_session("notes", &folder.path().to_string_lossy());
+    engine.session_store.upsert_session(&session).unwrap();
+    engine.sessions.push(session);
+    let outcome = delete(&mut engine, "notes", FolderOnDelete::Unasked);
+    assert!(
+        matches!(
+            outcome,
+            BeginDeleteSessionOutcome::Inline {
+                removal: WorktreeRemoval::NothingToRemove {
+                    folder: FolderFate::KeptChosen,
+                    ..
+                }
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(engine.pending_folder_removals.is_empty());
+    assert!(folder.path().join("mine.txt").exists());
+}
+
+/// The wire with no folder answer, as the command line sends it without a
+/// folder flag, deletes the folder dux created.
+#[test]
+fn the_wire_with_no_folder_answer_follows_who_made_the_folder() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    let _ = engine
+        .apply_wire(crate::wire::WireCommand::DeleteSession {
+            session_id: "otter".to_string(),
+            delete_worktree: false,
+            delete_branch: None,
+            branches: None,
+            delete_folder: None,
+        })
+        .unwrap();
+    let _ = folder_final(&engine);
+    assert!(!folder.exists());
+}
+
+/// Another agent whose recorded folder reaches the deleted one through a
+/// symbolic link still keeps it: the paths are compared resolved.
+#[test]
+fn a_folder_another_agent_reaches_through_a_link_is_kept() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    let link = tmp.path().join("shortcut");
+    std::os::unix::fs::symlink(&folder, &link).unwrap();
+    std::fs::write(folder.join("theirs.txt"), "keep").unwrap();
+    let other: AgentSession = sample_standalone_session("other", &link.to_string_lossy());
+    engine.sessions.push(other);
+
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("now works in it"), "{text}");
+    assert!(folder.join("theirs.txt").exists());
 }

@@ -3024,8 +3024,8 @@ fn run_create_standalone_agent_job(
         " in ",
         q(folder_label),
         ". \
-         dux does not manage a branch or a worktree for it, and never creates, moves \
-         or removes that folder."
+         dux does not manage a branch or a worktree for it, and never moves or removes a \
+         folder you chose."
     ];
     launch_standalone_session(
         session,

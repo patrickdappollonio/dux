@@ -146,10 +146,11 @@ pub enum WireCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branches: Option<crate::branch_history::BranchAnswersWire>,
         /// Whether a standalone agent's folder is deleted too. Only a folder
-        /// dux created can be: for any other the whole delete is refused.
-        /// Absent means the folder is kept.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        delete_folder: bool,
+        /// dux created can be: asking for any other refuses the whole delete.
+        /// Absent means nobody was asked, and who made the folder decides: a
+        /// folder dux created goes, a folder the user chose stays.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delete_folder: Option<bool>,
     },
     /// Replace the global `[env]` table with these variables.
     PersistGlobalEnv {
@@ -7473,7 +7474,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 delete_worktree: true,
                 delete_branch: None,
-                delete_folder: false,
+                delete_folder: None,
             },
             "an absent branch answer must mean nobody was asked, not \"keep it\": that is what \
              keeps a caller written before the checkbox existed behaving as it always did"
@@ -7494,7 +7495,7 @@ mod tests {
                     session_id: "s1".to_string(),
                     delete_worktree: true,
                     delete_branch: expected,
-                    delete_folder: false,
+                    delete_folder: None,
                 }
             );
         }
@@ -13650,7 +13651,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 delete_worktree: false,
                 delete_branch: None,
-                delete_folder: false,
+                delete_folder: None,
             })
             .expect("apply_wire");
         let status = outcome.status.expect("status");

@@ -1549,6 +1549,21 @@ pub enum FolderOnDelete {
     Remove,
     /// Leave the folder where it is.
     Keep,
+    /// Nobody was asked, so who made the folder decides, as it decides a
+    /// branch: a folder dux created goes with the agent, and a folder the
+    /// user chose stays.
+    Unasked,
+}
+
+impl FolderOnDelete {
+    /// The answer a request carries: `None` when nobody was asked.
+    pub fn from_answer(answer: Option<bool>) -> Self {
+        match answer {
+            Some(true) => Self::Remove,
+            Some(false) => Self::Keep,
+            None => Self::Unasked,
+        }
+    }
 }
 
 /// What became of a standalone agent's folder when the agent was deleted.
@@ -1625,9 +1640,10 @@ impl WorktreeRemoval {
         if let crate::model::AgentWorkspace::Folder(folder) = &session.workspace {
             let fate = match (folder.origin, folder_on_delete) {
                 (crate::model::FolderOrigin::Chosen, _) => FolderFate::KeptChosen,
-                (crate::model::FolderOrigin::CreatedByDux(_), FolderOnDelete::Keep) => {
-                    FolderFate::KeptCreated
-                }
+                (
+                    crate::model::FolderOrigin::CreatedByDux(_),
+                    FolderOnDelete::Keep | FolderOnDelete::Unasked,
+                ) => FolderFate::KeptCreated,
                 (crate::model::FolderOrigin::CreatedByDux(_), FolderOnDelete::Remove) => {
                     FolderFate::Deleting
                 }
@@ -3165,7 +3181,7 @@ impl Engine {
         worktree: WorktreeOnDelete,
         branches: &crate::branch_history::BranchDeleteRequest,
     ) -> BeginDeleteSessionOutcome {
-        self.begin_delete_session_full(session_id, worktree, branches, FolderOnDelete::Keep)
+        self.begin_delete_session_full(session_id, worktree, branches, FolderOnDelete::Unasked)
     }
 
     /// [`Self::begin_delete_session_with`] with the answer about a standalone
@@ -3202,10 +3218,21 @@ impl Engine {
         // Only a folder dux created may go with the agent. The record decides,
         // never the request, so a request naming any other folder is refused
         // whole rather than downgraded to a delete that keeps it.
+        // A request that asks nobody leaves it to who made the folder.
         let folder_removal = match (folder_on_delete, session.workspace.folder_removal_right()) {
-            (FolderOnDelete::Keep, _) => None,
             (
-                FolderOnDelete::Remove,
+                FolderOnDelete::Keep,
+                crate::model::FolderRemovalRight::CreatedByDux { .. }
+                | crate::model::FolderRemovalRight::ChosenByUser { .. }
+                | crate::model::FolderRemovalRight::NotAFolder,
+            )
+            | (
+                FolderOnDelete::Unasked,
+                crate::model::FolderRemovalRight::ChosenByUser { .. }
+                | crate::model::FolderRemovalRight::NotAFolder,
+            ) => None,
+            (
+                FolderOnDelete::Remove | FolderOnDelete::Unasked,
                 crate::model::FolderRemovalRight::CreatedByDux { path, identity },
             ) => Some(super::folder_removal::CreatedFolderRemoval {
                 session_id: session.id.clone(),
@@ -3213,11 +3240,20 @@ impl Engine {
                 identity,
                 label: session.display_label(),
             }),
-            (FolderOnDelete::Remove, right) => {
+            (
+                FolderOnDelete::Remove,
+                right @ (crate::model::FolderRemovalRight::ChosenByUser { .. }
+                | crate::model::FolderRemovalRight::NotAFolder),
+            ) => {
                 return BeginDeleteSessionOutcome::Refused {
                     message: folder_delete_refusal(&session.display_label(), &right),
                 };
             }
+        };
+        let folder_on_delete = if folder_removal.is_some() {
+            FolderOnDelete::Remove
+        } else {
+            FolderOnDelete::Keep
         };
         // Blanket precondition: refuse while ANY tab of this session has a launch
         // in flight. Such a tab is marked in-flight but not yet in `providers`, so
@@ -9982,7 +10018,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 delete_worktree: false,
                 delete_branch: None,
-                delete_folder: false,
+                delete_folder: None,
             })
             .expect_err("the create still holds its agent");
         assert!(refused.to_string().contains("op-1"), "{refused}");
@@ -11181,7 +11217,7 @@ mod tests {
                 delete_branch: None,
                 session_id: "s1".to_string(),
                 delete_worktree: true,
-                delete_folder: false,
+                delete_folder: None,
             })
             .unwrap();
         assert!(matches!(
@@ -11200,7 +11236,7 @@ mod tests {
                 delete_branch: None,
                 session_id: "missing".to_string(),
                 delete_worktree: false,
-                delete_folder: false,
+                delete_folder: None,
             })
             .unwrap();
         assert!(matches!(

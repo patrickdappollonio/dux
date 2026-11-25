@@ -1985,7 +1985,7 @@ mod tests {
                         session_id: "s1".to_string(),
                         delete_worktree: false,
                         delete_branch: None,
-                        delete_folder: false,
+                        delete_folder: None,
                     },
                     OperationKind::AgentDelete,
                 )
@@ -2112,7 +2112,7 @@ mod tests {
                         session_id: "s1".to_string(),
                         delete_worktree: true,
                         delete_branch: Some(true),
-                        delete_folder: false,
+                        delete_folder: None,
                     },
                     OperationKind::AgentDelete,
                 )
