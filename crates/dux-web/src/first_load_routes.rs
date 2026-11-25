@@ -47,7 +47,7 @@ use crate::server::AppState;
 
 /// The correlation key for the on-demand release-notes fetch. One key per
 /// operation kind, so a `Busy` and its eventual success/error replace the same
-/// toast instead of stacking (the keyed-status contract in CLAUDE.md).
+/// toast instead of stacking.
 const RELEASE_NOTES_STATUS_KEY: &str = "release-notes-fetch";
 
 /// The pending first-load screen for this launch, plus the release-notes API base

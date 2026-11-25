@@ -22,7 +22,7 @@ description = "Container-based user journeys for dux's web server: the dux binar
 #
 # The repository's `cargo clippy --all-targets --all-features` gate turns both
 # features on, and that is deliberate. Keeping the journeys out of it would mean
-# either an `--exclude` in every existing clippy command (CI, CLAUDE.md,
+# either an `--exclude` in every existing clippy command (CI, AGENTS.md,
 # CONTRIBUTING) or a separate workspace with its own lockfile, and either way the
 # main gate would stop compiling the journeys, so a change to a shared API could
 # break them unseen until the journey workflow ran. What it costs, measured: a

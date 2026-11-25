@@ -11,7 +11,7 @@
 //! concern (the TUI renders the full commented template, the web a plain one),
 //! so the driver takes a `persist` hook rather than hardcoding a renderer.
 //!
-//! Tenets honored (see CLAUDE.md):
+//! The rules it applies (the configuration rules in `AGENTS.md`):
 //! - Config wins for the safe explicit preference fields (`name`,
 //!   `default_provider`, `auto_reopen_agents`, `startup_command`, `env`); a
 //!   missing config field is filled from SQLite instead.

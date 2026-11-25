@@ -218,8 +218,8 @@ impl ResourceService {
 }
 
 /// The resource-monitor read route. Behind the same auth layer as every other
-/// API route (the single-tenant model in CLAUDE.md): any client it lets in can
-/// read every agent's and terminal's process stats.
+/// API route (the single-tenant model in `crates/dux-web/AGENTS.md`): any
+/// client it lets in can read every agent's and terminal's process stats.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/resources", get(get_resources))
 }

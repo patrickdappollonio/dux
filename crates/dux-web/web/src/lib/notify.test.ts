@@ -111,7 +111,7 @@ describe("statusToastDuration", () => {
 })
 
 describe("the configured window is read at RAISE time, not captured by the caller", () => {
-  // The trap this removes is documented in CLAUDE.md's clipboard-paste tenet: a
+  // The trap this removes: a
   // raise registered in a mount effect that captures `status_clear_seconds`
   // out of the render closure pins every later toast from that component to
   // the pre-bootstrap default. With the window living

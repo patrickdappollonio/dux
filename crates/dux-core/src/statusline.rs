@@ -105,9 +105,8 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
 /// final never lands would otherwise hold a spinner on screen for the life of
 /// the process, so past this age a `Busy` is upgraded whatever liveness says.
 ///
-/// Generous on purpose. It is a backstop for a bug, not a timeout: a value a
-/// slow clone or a long fetch could plausibly cross would reintroduce the false
-/// "timed out" this mechanism exists to remove.
+/// It is a backstop for a bug, not a timeout, so it sits far above anything a
+/// slow clone or a long fetch could cross.
 pub(crate) const BUSY_LIVE_CEILING: Duration = Duration::from_mins(30);
 
 /// The keys of status operations the engine is still running.
@@ -195,7 +194,7 @@ impl std::fmt::Debug for LiveStatusKeys {
 /// told how the operation ended; a page load an hour later is a different
 /// session and must not be. This window separates the two.
 ///
-/// Deliberately a fixed constant and not `ui.status_clear_seconds`: how long a
+/// A fixed constant and not `ui.status_clear_seconds`: how long a
 /// final stays replayable and how long a toast stays on screen are different
 /// questions, and a user who sets that setting to `0` would get unbounded
 /// retention.

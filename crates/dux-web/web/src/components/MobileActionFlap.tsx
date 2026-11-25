@@ -23,7 +23,8 @@ import { cn } from "@/lib/utils"
 // Where the phone's pane actions live when theater is off: a flap hanging from
 // the band above the terminal, taking the colour of whichever band that is
 // (usually the header, since the tab strip is only on screen for an agent with
-// two or more tabs).
+// two or more tabs). Its silhouette is one SVG measured from the cluster, not
+// CSS borders, so it meets the band without a seam at fractional pixel ratios.
 //
 // Every pane screen has one, agent or terminal. A project or standalone
 // terminal has no changed-file count and no pull request, so its cluster is one

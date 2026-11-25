@@ -1101,7 +1101,7 @@ describe("TerminalArea dock", () => {
     expect(screen.queryByTestId("stack-part-stub")).toBeNull()
   })
 
-  // Guards the user-locked bounce (CLAUDE.md "Locked by the user"): a working
+  // Guards the bounce the USER-LOCKED tests pin: a working
   // tab's pill must never be remounted by the screen below the strip changing,
   // because a remount restarts its bounce mid-flight. Switching between a live
   // tab and a dormant one swaps a terminal for a card under the same strip.

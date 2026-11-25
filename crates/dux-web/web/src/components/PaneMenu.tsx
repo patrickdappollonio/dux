@@ -97,6 +97,8 @@ function paneMenuLabel(subject: PaneMenuSubject): string {
 // the Settings drill where the anchor stands somewhere the cog does not. What
 // varies between anchors is placement, the trigger, that drill, and the computer
 // header's own controls while it has folded them in, never a row of the pane's.
+// The anchors are the sidebar row, the computer pane header, the phone flap and
+// the floating pill; the Input group's rows are `PaneInputGroup`'s.
 // There is deliberately no count row: an agent's flap and pill carry a real one.
 export function PaneMenu({
   subject,

@@ -69,20 +69,57 @@ function findSpinners(files: Record<string, string>): { file: string; line: stri
   return out
 }
 
+// Match each occurrence to one allowed entry; what is left over on either side
+// is wrong, so an entry covers exactly one occurrence of its line.
+function unmatched(
+  found: { file: string; line: string; what: string }[],
+  allowed: { file: string; line: string }[],
+): { unallowed: string[]; stale: string[] } {
+  const free = [...allowed]
+  const unallowed: string[] = []
+  for (const f of found) {
+    const at = free.findIndex((a) => a.file === f.file && a.line === f.line)
+    if (at === -1) unallowed.push(`${f.file}: ${f.what}: ${f.line}`)
+    else free.splice(at, 1)
+  }
+  return { unallowed, stale: free.map((a) => `${a.file}: ${a.line}`) }
+}
+
 describe("guard: one loading indicator", () => {
   const files = Object.fromEntries(
     sourceFilesUnder(root).map((p) => [relative(root, p), readFileSync(p, "utf8")]),
   )
 
   it("draws every spinner through Spinner unless that occurrence is allowed with its reason", () => {
-    const found = findSpinners(files)
-    const unallowed = found
-      .filter((f) => !ALLOWED.some((a) => a.file === f.file && a.line === f.line))
-      .map((f) => `${f.file}: ${f.what}: ${f.line}`)
+    const { unallowed, stale } = unmatched(findSpinners(files), ALLOWED)
     expect(unallowed, "draw it with Spinner from components/Spinner").toEqual([])
-    const stale = ALLOWED.filter(
-      (a) => !found.some((f) => f.file === a.file && f.line === a.line),
-    ).map((a) => `${a.file}: ${a.line}`)
     expect(stale, "an allowed occurrence is gone: remove its entry").toEqual([])
+  })
+
+  it("sees the glyph spinner's frames and a spin style, and ignores other text", () => {
+    const seen = (source: string) => findSpinners({ "components/X.tsx": source }).map((f) => f.what)
+    expect(seen('const f = "◜◝◞◟"')).toEqual(["the glyph spinner's frames"])
+    expect(seen('const f = "\\u25dc"')).toEqual(["the glyph spinner's frames"])
+    expect(seen("import { SPINNER_FRAMES } from \"@/lib/spinnerFrames\"")).toEqual([
+      "the glyph spinner's frames",
+    ])
+    expect(seen('<span className="glyph-spinner" />')).toEqual(["the glyph spinner's frames"])
+    expect(seen('<i style={{ animation: "spin 1s linear infinite" }} />')).toEqual([
+      "a spin animation style",
+    ])
+    expect(seen('<i style={{ animationName: "spin" }} />')).toEqual(["a spin animation style"])
+    expect(seen('<i className="animate-spin" />')).toEqual(["a spin animation class"])
+    expect(seen('<i style={{ animation: "fade 1s" }} />')).toEqual([])
+    expect(seen('<i className="animate-pulse spinner-like" />')).toEqual([])
+    expect(seen("// animate-spin ◜")).toEqual([])
+    expect(findSpinners({ "components/Spinner.tsx": 'const f = "◜◝◞◟"' })).toEqual([])
+  })
+
+  it("holds one allowed entry to one occurrence", () => {
+    const entry = { file: "components/X.tsx", line: "<Loader2 />", reason: "x" }
+    const hit = { file: "components/X.tsx", line: "<Loader2 />", what: "a lucide loader icon" }
+    expect(unmatched([hit, hit], [entry]).unallowed).toHaveLength(1)
+    expect(unmatched([hit], [entry, entry]).stale).toHaveLength(1)
+    expect(unmatched([hit], [entry])).toEqual({ unallowed: [], stale: [] })
   })
 })

@@ -1740,7 +1740,8 @@ pub(crate) enum TabKey {
 /// make the pane untypeable.
 ///
 /// `[ui] tab_reaches_agent` moves that line: with it on, Tab and both spellings
-/// of Shift-Tab type into the agent too, and the chords bound to
+/// of Shift-Tab type into the agent too (and into an agent's dock terminal
+/// while it is typed into), and the chords bound to
 /// `focus_next`/`focus_prev` are what move panes. Pass the RAW crossterm event,
 /// before backtab normalization, so both spellings are seen.
 ///
@@ -2866,7 +2867,8 @@ impl RuntimeBindings {
 }
 
 /// Whether an interactive-mode `action` acts only while the pane is scrolled
-/// back, its key otherwise reaching the child.
+/// back, its key otherwise reaching the child. Page-scroll keys always act, and
+/// non-interactive views scroll unconditionally.
 pub(crate) fn scrolls_only_when_scrolled_back(action: Action) -> bool {
     matches!(
         action,

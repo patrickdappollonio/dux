@@ -925,7 +925,7 @@ pub(crate) struct App {
     /// away (the pane starts taking input, a surface is maximized) or belong to
     /// another agent by the time the button comes up.
     ///
-    /// Deliberately NOT a second lifecycle: this rides the link lane's
+    /// Not a second lifecycle: this rides the link lane's
     /// retirement triggers through [`App::retire_pending_link_click`], so a
     /// resize, a lost focus or a surface change drops it exactly where it drops
     /// a withheld link press.

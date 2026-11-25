@@ -2041,6 +2041,9 @@ fn config_schema() -> Vec<ConfigEntry> {
     ]
 }
 
+/// The canonical, fully commented config, written on first creation and by `dux
+/// config regenerate --yes`; later saves patch the file through `toml_edit`
+/// ([`dux_core::config_write`]) and keep the user's edits.
 fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings) -> String {
     let mut out = String::new();
     for entry in config_schema() {

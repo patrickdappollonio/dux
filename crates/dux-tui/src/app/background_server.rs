@@ -7,7 +7,8 @@
 //! layer exists.
 //!
 //! The `start-web-server` flip is a different thing: it swaps the terminal UI
-//! out for the server. These commands keep both up at once.
+//! out for the server. These commands keep both up at once. Starting the flip
+//! while the background server serves is refused, naming both ways forward.
 
 use dux_core::engine::EventReaction;
 use dux_core::status_text::StatusText;
@@ -316,8 +317,8 @@ impl App {
     /// layer's engine servicer, so this interval IS a browser's request latency.
     /// The idle 100ms poll would put a remote keystroke up to that far behind, and
     /// worst case is worse than one interval: the cap restores parity with the
-    /// dedicated actor loop's own 50ms tick. Not serving, the lazy cadence stands
-    /// and idle CPU stays where it was.
+    /// dedicated actor loop's own 50ms tick. Not serving, the socket-only core
+    /// included, the poll stays uncapped.
     pub(crate) fn max_poll_ms(&self) -> u64 {
         if self.background_server_is_serving() {
             SERVING_POLL_CAP_MS

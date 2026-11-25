@@ -49,7 +49,8 @@ interface FileInfoDialogProps {
 // target keys on: a 404 dismisses the panel, while a 400 is a REFUSAL and stays on
 // screen with its reason. There is no poll and no subscription, so the facts are as
 // fresh as the last fetch, and only opening and the window regaining focus trigger
-// one. A file deleted while this tab stays focused is not noticed; that gap is accepted.
+// one, so a file deleted while this tab keeps focus is not noticed. The server
+// stats a symlink itself, never its target.
 export function FileInfoDialog(props: FileInfoDialogProps) {
   const life = useModalLifetime(props.target !== null)
   // Keyed by the open, so an answer from an earlier open (a path that was gone

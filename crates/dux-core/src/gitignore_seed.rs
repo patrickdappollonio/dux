@@ -1,11 +1,7 @@
 //! Starter `.gitignore` seeding for folders dux initializes as repositories.
 //!
-//! Deliberate deviation from the "All settings are configurable" tenet, at the
-//! user's explicit direction: this candidate list is a compile-time constant
-//! that contributors extend via PR, not a config key. It seeds brand-new
-//! repositories only, where there is no user intent to preserve, and a config
-//! surface here would invite unreviewable divergence in what dux writes into
-//! users' repos. Do not "fix" this by making it configurable.
+//! The candidate list is a compile-time constant extended by pull request, not
+//! a setting, because it decides what dux writes into new repositories.
 
 use std::io::Write;
 use std::path::Path;

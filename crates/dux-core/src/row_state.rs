@@ -5,7 +5,8 @@
 //! [`RowState`]; each surface maps that to its own WORD and color, because the
 //! wording deliberately differs per surface for the busy state (an agent
 //! "Working" against a terminal "Running"). The TS mirror is pinned by shared
-//! test vectors.
+//! test vectors. A terminal is busy while it streams output or a foreground
+//! app runs in it, even a quiet one.
 
 use crate::model::SessionStatus;
 

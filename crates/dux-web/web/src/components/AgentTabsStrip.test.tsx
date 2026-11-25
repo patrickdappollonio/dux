@@ -650,16 +650,19 @@ describe("AgentTabsStrip working cue ladder", () => {
 
 // USER-LOCKED. A working tab's pill icon bounces with the pulse and finishes its
 // bounce at rest on every stop, a hand-over to needs-you included, easing back
-// to full opacity like the sidebar list. This guard is named by CLAUDE.md's
-// "Locked by the user" section. Do not edit, weaken or delete it, or change
-// what it pins, without the user's explicit request.
+// to full opacity like the sidebar list. The USER-LOCKED line in
+// `crates/dux-web/web/AGENTS.md` names this guard: do not edit, weaken or
+// delete it, or change what it pins, without an explicit request for that
+// change.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (agent tab strip)", () => {
   const LOCKED =
-    'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
+    "This is a locked product decision, named by the USER-LOCKED line in " +
+    "crates/dux-web/web/AGENTS.md " +
     "(the web working glyph bounces with the pulse, four per pulse, finishes its " +
     "bounce at rest and eases back to full opacity on every stop, a hand-over to " +
     "a higher state included, and takes that state's look only once it has " +
-    "landed). Do not change it without the user's explicit request."
+    "landed). Change it only on an explicit request for that specific change; " +
+    "editing this test to make it pass is changing the decision."
   const BOUNCE = "motion-safe:animate-working-bounce"
   const PULSE = "motion-safe:animate-working-pulse"
 
@@ -708,6 +711,18 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     expect(frameOf(icon()).getAttribute("class"), LOCKED).toContain(BOUNCE)
     fireAnimationIteration(frameOf(icon()), "working-bounce")
     expect(frameOf(icon()).getAttribute("class"), LOCKED).not.toContain(BOUNCE)
+  })
+
+  it("drops a stopping tab's pulse at once, before the bounce lands", () => {
+    const { container, rerender } = render(
+      <AgentTabsStrip session={withWorking(true)} activeTabId="s1" maxTabs={20} />,
+    )
+    const icon = () => container.querySelectorAll("[role='tab'] svg.lucide-bot")[1]
+    fireAnimationStart(frameOf(icon()), "working-bounce")
+
+    rerender(<AgentTabsStrip session={withWorking(false)} activeTabId="s1" maxTabs={20} />)
+    expect(icon().getAttribute("class"), LOCKED).not.toContain(PULSE)
+    expect(frameOf(icon()).getAttribute("class"), LOCKED).toContain(BOUNCE)
   })
 })
 

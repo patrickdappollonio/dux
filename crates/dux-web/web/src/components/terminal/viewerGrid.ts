@@ -4,7 +4,10 @@
 // socket, never by resizing the PTY (that would be a silent steal): the
 // reconnect path rebuilds the buffer from the server's repaint at the new
 // geometry. The bounce is debounced longer than `RESIZE_SEND_DEBOUNCE_MS` so a
-// drag's burst of applied grids settles into one bounce.
+// drag's burst of applied grids settles into one bounce. The grid arrives on the
+// `connected` handshake and as a `size` event on every applied resize, and the
+// viewer adopts it at once (`resizeCoordinator.ts`), so the bounce's replay is
+// parsed at the new grid.
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import type { PtySocket } from "@/lib/ptySocket"

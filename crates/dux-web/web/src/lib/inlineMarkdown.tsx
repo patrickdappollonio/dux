@@ -45,9 +45,8 @@ export function inlineCodeDisplayText(text: string): string {
 // time. A place asks for it by calling it; no shared component applies it to the text it is
 // handed, because text that echoes something a person typed (a file name, a parser's
 // message) has backticks that are not dux's, and nothing in the string tells them apart.
-// Deliberately not a markdown parser: no bold, no italic, no links, and no dependency for it. Setting descriptions and
-// dialog copy are adapted from config.toml comments that use backticks for inline code, which
-// as plain text left the literal backtick characters visible in the UI.
+// `ErrorLine`, `Notice`, the toasts and a disabled control's hint show their text exactly
+// as it arrives. Not a markdown parser: no bold, no italic, no links, and no dependency.
 //
 // With `needles`, every occurrence of each one in the shown text is lit through the shared
 // `MatchHighlight`, a chip's text included; a hit that runs across a chip's edge is lit on

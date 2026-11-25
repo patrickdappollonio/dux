@@ -23,12 +23,15 @@ const LANDED_LOOK_EASE =
 /**
  * The one working glyph: the icon pulses while `working`, and a frame around
  * it bounces four times per pulse and finishes its bounce at rest on every
- * stop (a user-locked decision, CLAUDE.md "Locked by the user"). The bounce
- * rides the frame and the pulse the icon, so the pulse can yield at once to a
- * higher state without restarting or jumping the bounce; `useWorkingCue` holds
- * the reasoning.
+ * stop (pinned by the tests titled `USER-LOCKED: working glyph bounces with the
+ * pulse and settles at rest`). The bounce rides the frame and the pulse the
+ * icon, so the pulse can yield at once to a higher state without restarting or
+ * jumping the bounce; `useWorkingCue` holds the reasoning. Under reduced motion
+ * nothing bounces or eases.
  *
- * `working` must already be resolved through the surface's state ladder.
+ * `working` must already be resolved through the surface's state ladder: it is
+ * on exactly when the state word reads busy, so typing and needs-you turn it
+ * off. Only the glyph waits; the word beside it changes at once.
  * `look` is the glyph's color and state animation for whatever the ladder says
  * now (the attention blink, the rail's typing tint). A new look waits while the
  * glyph is still landing from a stop, its bounce finishing and its opacity

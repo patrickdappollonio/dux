@@ -24,10 +24,12 @@ import type { PrKeyView, PrView } from "@/lib/types"
 // A slim, one-line PR info strip mirroring the TUI's PR banner lane
 // (`render_pr_banner`): a state-colored surface carrying the PR icon, its
 // name, the state word, and the (truncated) title of the pull request at the
-// stepping cursor. Everything but the trailing controls is one anchor through
-// to that pull request, keyboard-focusable like any link. The controls are the
-// "n of m" counter and the ‹ › stepper (with two or more), and the list `⋯`
-// (always, since a surface's `⋯` never depends on what the surface holds).
+// stepping cursor, the first in the agent's order until the user steps.
+// Everything but the trailing controls is one anchor through to that pull
+// request, keyboard-focusable like any link. The controls are the "n of m"
+// counter and the ‹ › stepper (with two or more), and the list `⋯` (always,
+// since a surface's `⋯` never depends on what the surface holds); they share
+// the strip's height token, 40px under a coarse pointer.
 //
 // `position` is where the strip sits relative to the terminal (top = above,
 // bottom = below). It draws a border only on the edge FACING the terminal: the

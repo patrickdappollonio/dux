@@ -45,7 +45,7 @@ function AppMenuRows({
             key={entry.id}
             type="button"
             role="menuitem"
-            // min-h-11 is the 44px touch floor (CLAUDE.md touch-target tenet);
+            // min-h-11 is the 44px touch target, above the 40px floor;
             // AppMenuSheet.test.tsx pins the class contract.
             className="flex min-h-11 w-full items-center gap-3 px-4 text-left text-sm transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none motion-reduce:transition-none"
             // A submenu row opens a deeper list rather than a popup, but it is

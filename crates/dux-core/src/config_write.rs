@@ -1844,9 +1844,9 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
 /// Fails when an existing file cannot be read or parsed as TOML, or the write fails.
 pub fn save_config_with(config_path: &Path, config: &Config, durability: Durability) -> Result<()> {
     // FIRST CREATION (the file is missing) must emit the fully-commented
-    // template, not the plain one: "the config file is the documentation"
-    // (CLAUDE.md), and the patch path that runs on every later save preserves
-    // comments but never ADDS them, so a config born bare stays bare forever.
+    // template, not the plain one, because the config explains every setting
+    // in its own comments, and the patch path that runs on every later save
+    // preserves comments but never ADDS them, so a config born bare stays bare.
     // See [`render_config_documented`].
     save_config_three_way(config_path, None, config, durability).map(|_| ())
 }
@@ -2831,9 +2831,8 @@ const PROJECT_MANAGED_KEYS: &[&str] = &[
 /// Project keys dux once wrote to config and now keeps in SQLite instead. These
 /// are DROPPED on every write rather than carried over: `leading_branch` is
 /// autodetected runtime state, and leaving it in portable config pins the
-/// detection (CLAUDE.md, "Keep derived project state in SQLite"). The loader
-/// still reads it to repair SQLite, which is why it stays a `ProjectConfig`
-/// field; only the writer refuses to emit it.
+/// detection. The loader still reads it to repair SQLite, which is why it stays
+/// a `ProjectConfig` field; only the writer refuses to emit it.
 const PROJECT_KEYS_DROPPED_ON_WRITE: &[&str] = &["leading_branch"];
 
 /// One existing `[[projects]]` entry's user-owned material, captured before the

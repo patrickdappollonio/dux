@@ -35,7 +35,7 @@ pub(crate) const PULSE_FLOOR: f32 = 0.4;
 /// floor lands is a separate judgement from how much light is left. Two thirds
 /// keeps a visible third of the working hue, which still reads as that hue next
 /// to the grey around it.
-pub(crate) const PULSE_MUTE_FRACTION: f32 = 2.0 / 3.0;
+pub const PULSE_MUTE_FRACTION: f32 = 2.0 / 3.0;
 
 /// How far toward the muted tone a [`pulse_step`] cell sits, in `[0.0, 1.0]`:
 /// `0.0` is the untouched working color and [`PULSE_MUTE_FRACTION`] is the

@@ -304,9 +304,8 @@ pub enum RepoPathKind {
 }
 
 /// What the directory an agent lives in is, as far as a changes panel is
-/// concerned. Derived from [`repo_path_kind`]; deliberately no second detector,
-/// because two would drift and this is the decision that keeps dux from staging
-/// into somebody else's repository.
+/// concerned. Derived from [`repo_path_kind`], the one detector of what a
+/// folder is, which keeps dux from staging into somebody else's repository.
 ///
 /// git answers questions by walking UP parent directories, so a folder INSIDE a
 /// repository would report, stage and commit to the parent. A working repository
@@ -4264,7 +4263,7 @@ fn run_worktree_remove(repo_path: &Path, worktree_path: &Path) -> Result<std::pr
             "remove",
             "--force",
             // `--` so a worktree path that begins with a dash is read as a
-            // POSITIONAL and never as an option (the CLAUDE.md rule).
+            // POSITIONAL and never as an option (the refname rule in `AGENTS.md`).
             "--",
             worktree_path.to_string_lossy().as_ref(),
         ])
@@ -5774,7 +5773,7 @@ pub(crate) struct FileStatusCodes {
 ///
 /// Two things about the command line are load-bearing:
 ///
-/// - The `--` separator, per CLAUDE.md's positional rule, so a path beginning
+/// - The `--` separator, so a path beginning
 ///   with a dash (`--force`) is read as a path and not as an option.
 /// - The `:(literal)` pathspec magic, so a name containing a glob
 ///   metacharacter (`star[1].txt`) matches ITSELF. Git pathspecs are globs by
@@ -17475,8 +17474,8 @@ mod tests {
         }
 
         /// A leading dash must be read as a PATH, not as an option. The `--`
-        /// separator is what guarantees it (CLAUDE.md's refname/positional
-        /// rule); without it git would try to parse `--force` as a flag.
+        /// separator is what guarantees it; without it git would try to parse
+        /// `--force` as a flag.
         #[test]
         fn a_name_that_looks_like_an_option_is_read_as_a_path() {
             let dir = repo_with_commit();

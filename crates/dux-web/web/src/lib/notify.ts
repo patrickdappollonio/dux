@@ -121,6 +121,7 @@ let configuredStatusClearSeconds: number | null | undefined = undefined
 
 /// Publish the user's `ui.status_clear_seconds`. Called when the bootstrap
 /// document lands (and again whenever it is refetched after a config change).
+/// Each raise reads it here, so no call site holds a stale window.
 export function setStatusClearSeconds(secs: number | null | undefined): void {
   configuredStatusClearSeconds = secs
 }

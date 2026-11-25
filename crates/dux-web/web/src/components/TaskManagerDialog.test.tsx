@@ -741,7 +741,7 @@ describe("TaskManagerDialog", () => {
   it("mobile_expand_toggle_meets_the_touch_target_floor_beside_stop", async () => {
     // The chevron sits directly beside the Stop button in the mobile row; a
     // sub-40px target there is a misclick hazard on the one control a
-    // misclick would be worst on (CLAUDE.md's touch-target tenet).
+    // misclick would be worst on.
     vi.stubGlobal(
       "matchMedia",
       vi.fn((query: string) => ({
@@ -854,8 +854,8 @@ describe("TaskManagerDialog", () => {
 
   it("stop_all_trigger_is_destructive", async () => {
     // The bulk trigger is red. Unlike
-    // a `⋯` menu's neutral destructive items, a dialog footer button IS where
-    // CLAUDE.md's menu tenet reserves `variant="destructive"`.
+    // a `⋯` menu's neutral destructive items, a dialog footer button is where
+    // `variant="destructive"` belongs.
     seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
     const trigger = await screen.findByText("Force stop everything…")

@@ -3,11 +3,15 @@
 //!
 //! The center pane shares itself three ways, per agent and in runtime memory
 //! only: the agent alone, the split (the agent on top, the dock below, at
-//! `[ui] terminal_dock_pct`), or the dock alone. The dock is a pane of its own
-//! for focus: Tab stops at it, and the fullscreen key, the close binding and the
-//! tab keys act on it while it has focus. Which terminal it shows is remembered
-//! per agent as well. Under the take-over card none of this is drawn: the agent
-//! shows alone, and what is remembered waits for the row to come back.
+//! `[ui] terminal_dock_pct`), or the dock alone. The layout binding and the
+//! `agent | split | term` control each reach every layout, and dragging the
+//! divider to an edge shows one part alone. The dock is a pane of its own for
+//! focus: Tab stops at it between the agent and the Changes pane, and the
+//! fullscreen key, the close binding (which closes its active terminal behind
+//! the confirm) and the tab keys act on it while it has focus. Which terminal
+//! it shows is remembered per agent as well. Under the take-over card none of
+//! this is drawn: the agent shows alone, and what is remembered waits for the
+//! row to come back.
 
 use super::components::wrap_lines::display_width;
 use super::render::TabStripItem;

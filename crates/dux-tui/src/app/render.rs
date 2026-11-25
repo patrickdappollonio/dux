@@ -888,8 +888,8 @@ pub(crate) fn left_row_to_item(offset: usize, heights: &[u16], area_height: u16)
 /// (`dux_core::agent_search::match_char_range` semantics: start inclusive, end
 /// exclusive, char indices): the text before the hit in `base`, the hit in
 /// `matched`, the rest back in `base`. Empty side segments are omitted. All
-/// slicing is char-based, never byte offsets, per the CLAUDE.md truncation
-/// rule (labels carry emoji/CJK and a byte slice can panic mid-character).
+/// slicing is char-based, never byte offsets: labels carry emoji and CJK, and a
+/// byte slice can panic mid-character.
 fn search_highlight_spans(
     label: &str,
     base: Style,

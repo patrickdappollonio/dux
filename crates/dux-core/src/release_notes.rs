@@ -8,7 +8,7 @@
 //! build.
 //!
 //! Every `fetch_*` / `load_*` function here BLOCKS. They must only ever be called
-//! from a background worker, never from a UI thread. See CLAUDE.md.
+//! from a background worker, never from a UI thread.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

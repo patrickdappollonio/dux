@@ -10213,6 +10213,8 @@ export function toggleChangesPane(): void {
 }
 
 // ── The hideable touch terminal-keys bar (ui.mobile_accessory_bar) ─────────
+// The key row's own preference, independent of the message box. Where a row is
+// on offer at all is `terminalKeysApply` in `composebar.ts`.
 
 // The accessory key bar's effective visibility: the optimistic override if set,
 // else the config default, else visible for the window before the first

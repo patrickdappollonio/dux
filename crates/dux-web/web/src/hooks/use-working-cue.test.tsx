@@ -296,6 +296,41 @@ describe("WorkingGlyph's held look", () => {
     })
     expect(frame().className).toContain("needs-you")
   })
+
+  it("cancels a running ease and applies the held look at once when reduced motion turns on", async () => {
+    let reduced = false
+    const listeners = new Set<() => void>()
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        get matches() {
+          return reduced && query.includes("prefers-reduced-motion")
+        },
+        media: query,
+        addEventListener: (_: string, cb: () => void) => listeners.add(cb),
+        removeEventListener: (_: string, cb: () => void) => listeners.delete(cb),
+      })),
+    )
+    try {
+      const { container, rerender } = render(<WorkingGlyph icon={Bot} working look="at-rest" />)
+      const frame = () => container.querySelector("[data-slot='working-glyph']")!
+      const ease = stubGlyphEase(container.querySelector("svg")!)
+
+      rerender(<WorkingGlyph icon={Bot} working={false} look="needs-you" />)
+      expect(ease.animate).toHaveBeenCalledTimes(1)
+      expect(frame().className).not.toContain("needs-you")
+
+      reduced = true
+      await act(async () => {
+        for (const cb of listeners) cb()
+      })
+      const running = ease.animate.mock.results[0].value as { cancel: () => void }
+      expect(running.cancel).toHaveBeenCalled()
+      expect(frame().className).toContain("needs-you")
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 // A glyph that reports a part rather than names it (the phone's agent/terminals

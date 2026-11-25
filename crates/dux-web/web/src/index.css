@@ -230,8 +230,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        can yield at once to a higher state without restyling the element the
        bounce runs on. Every stop lets the bounce in flight finish
        (`useSettlingAnimation` ends it with its current iteration), so the
-       glyph rests exactly at translateY(0). The bounce is a user-locked
-       decision (CLAUDE.md, "Locked by the user"). */
+       glyph rests exactly at translateY(0). The tests titled "USER-LOCKED:
+       working glyph bounces with the pulse and settles at rest" pin it. */
     --animate-working-bounce: working-bounce 0.4s ease-in-out infinite;
     /* The ellipsis that runs after the state word: four states over the SAME
        period, one every ELLIPSIS_STEP_MS, held rather than tweened. It rides in

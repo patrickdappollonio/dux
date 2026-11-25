@@ -1228,8 +1228,8 @@ fn check_entry_parent_contained(
 /// symlink removes the LINK, never its target); a directory is removed
 /// recursively with `remove_dir_all`. Refuses `.git`/traversal/escape and
 /// refuses to delete the worktree root itself. Permanent: there is no trash on
-/// the server (CLAUDE.md: worktrees are user data, but deletion here is the
-/// explicit, confirmed action the caller asked for).
+/// the server (worktrees are user data, and deletion here is the explicit,
+/// confirmed action the caller asked for).
 ///
 /// Deliberately does NOT call `resolve_worktree_path`: that resolver checks
 /// containment of the FOLLOWED realpath, which is the wrong check for delete.

@@ -1,8 +1,10 @@
 // Theater mode: the one-pane, no-chrome layout for a terminal surface. The pure
 // rules live here (the memory key, the Escape verdict, how the mode rides the
-// address); the store owns the live flag and the URL write.
+// address); the store owns the live flag and the URL write. It hides the top
+// chrome only, so the message box and the key row stay, and it shows the part
+// typing goes to alone (`agentStackModel.ts`).
 //
-// Theater is deliberately not the browser's Fullscreen API: Android hard-clips a
+// Theater is not the browser's Fullscreen API: Android hard-clips a
 // fullscreen page against the keyboard-shrunk viewport, and what is reclaimed
 // here is dux's own chrome, which no system mode could give back.
 

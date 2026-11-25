@@ -2257,16 +2257,18 @@ describe("AppSidebar collapsed rail lists live work only", () => {
 // and finishes its bounce at rest on every stop, a hand-over to a higher state
 // (needs-you, typing) included, like the sidebar list: it eases back to full
 // opacity, and the higher state's color and blink on the icon wait until it
-// has landed. This guard is named by CLAUDE.md's "Locked by the user" section.
-// Do not edit, weaken or delete it, or change what it pins, without the user's
-// explicit request.
+// has landed. The USER-LOCKED line in `crates/dux-web/web/AGENTS.md` names this
+// guard: do not edit, weaken or delete it, or change what it pins, without an
+// explicit request for that change.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (collapsed rail)", () => {
   const LOCKED =
-    'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
+    "This is a locked product decision, named by the USER-LOCKED line in " +
+    "crates/dux-web/web/AGENTS.md " +
     "(the web working glyph bounces with the pulse, four per pulse, finishes its " +
     "bounce at rest and eases back to full opacity on every stop, a hand-over to " +
     "a higher state included, and takes that state's look only once it has " +
-    "landed). Do not change it without the user's explicit request."
+    "landed). Change it only on an explicit request for that specific change; " +
+    "editing this test to make it pass is changing the decision."
   const BOUNCE = "motion-safe:animate-working-bounce"
   const PULSE = "motion-safe:animate-working-pulse"
 
@@ -2339,4 +2341,72 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
       expectLookEasesIn(withLook()?.getAttribute("class") ?? "", LOCKED)
     })
   }
+
+  it("drops the rail icon's pulse at once on a plain stop, before the bounce lands", () => {
+    mockState = railState(true)
+    const { rerender } = render(tree())
+    fireAnimationStart(frame(), "working-bounce")
+
+    mockState = railState(false)
+    rerender(tree())
+    expect(icon().getAttribute("class"), LOCKED).not.toContain(PULSE)
+    expect(frame().getAttribute("class"), LOCKED).toContain(BOUNCE)
+  })
+
+  it("bounces a rail terminal's icon while it runs and lets it finish its bounce", () => {
+    const withTerminal = (working: boolean): DuxState => {
+      const spine = makeTwoProjectSpine() as unknown as Record<string, unknown>
+      return makeState({
+        spine: {
+          ...spine,
+          terminals: [
+            {
+              id: "t-run",
+              owner: { kind: "standalone", cwd_label: "~/work" },
+              label: "Terminal 1",
+              has_output: true,
+              working,
+              typing: false,
+              foreground_cmd: "vim",
+              sort_order: 0,
+            },
+          ],
+        } as unknown as DuxState["spine"],
+        bootstrap: { title: "dux", dux_version: "v1", available_providers: ["claude"] },
+        createTabInFlight: [],
+      })
+    }
+    mockState = withTerminal(true)
+    const { rerender } = render(tree())
+    const term = () =>
+      screen
+        .getByTestId("collapsed-agent-rail")
+        .querySelector("svg.lucide-square-terminal")!
+    const termFrame = () => term().closest("[data-slot='working-glyph']")!
+    expect(termFrame().getAttribute("class"), LOCKED).toContain(BOUNCE)
+    expect(term().getAttribute("class"), LOCKED).toContain(PULSE)
+    fireAnimationStart(termFrame(), "working-bounce")
+
+    mockState = withTerminal(false)
+    rerender(tree())
+    expect(termFrame().getAttribute("class"), LOCKED).toContain(BOUNCE)
+    fireAnimationIteration(termFrame(), "working-bounce")
+    expect(termFrame().getAttribute("class"), LOCKED).not.toContain(BOUNCE)
+  })
+
+  it("holds needs-you's look while the bounce is in flight, even once the ease has ended", async () => {
+    mockState = railState(true)
+    const { rerender } = render(tree())
+    const ease = stubGlyphEase(icon())
+    fireAnimationStart(frame(), "working-bounce")
+
+    mockState = railState(true, { needs_attention: true })
+    rerender(tree())
+    const withLook = () => icon().closest("[class*='animate-attention-pulse']")
+    await ease.eased()
+    expect(frame().getAttribute("class"), LOCKED).toContain(BOUNCE)
+    expect(withLook(), LOCKED).toBeNull()
+    fireAnimationIteration(frame(), "working-bounce")
+    expect(withLook(), LOCKED).toBeTruthy()
+  })
 })

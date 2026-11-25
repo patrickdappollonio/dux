@@ -8,7 +8,8 @@
 //! asks for it: [`Engine::apply_wire`] judges every [`WireCommand`] through
 //! [`row_change`], and a surface that changes a row some other way asks
 //! [`Engine::admit_row_change`] itself. What the engine does afterwards to
-//! finish an admitted change is never judged again.
+//! finish an admitted change is never judged again, so a git change or a file
+//! write already let through runs to its end when a take-over lands meanwhile.
 //!
 //! A request is judged for every row it would change, not only the one it
 //! names. [`RowChange`] says what a request is, and [`Engine::rows_changed`]

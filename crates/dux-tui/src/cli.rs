@@ -529,6 +529,9 @@ pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
 }
 
 /// Every setting whose current value differs from `baseline`, as display lines.
+/// `env` and `projects` are summarized so their values and paths never reach the
+/// output; `--raw` ([`raw_diff_text_against`]) prints `[env]` values and is not
+/// safe to paste into a bug report.
 ///
 /// Derived, never hand-maintained: `current` and `baseline` are both
 /// projected to `serde_json::Value` and walked structurally, so a config key

@@ -93,9 +93,8 @@ describe("AppMenu", () => {
   })
 
   // Base UI does NOT set aria-expanded=true on an OPEN menu trigger (it stays
-  // "false" and the trigger gains data-popup-open instead). CLAUDE.md documents
-  // this, and it was reconfirmed empirically against base-ui 1.5.0 before this
-  // test was written. Assert what the primitive actually emits.
+  // "false" and the trigger gains data-popup-open instead), as confirmed
+  // against base-ui 1.5.0. Assert what the primitive actually emits.
   it("marks the open trigger with data-popup-open, not aria-expanded", async () => {
     render(<AppMenu />)
     const trigger = screen.getByRole("button", { name: /^settings$/i })

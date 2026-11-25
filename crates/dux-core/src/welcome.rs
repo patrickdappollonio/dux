@@ -4,10 +4,10 @@
 //! render from this one list. Do NOT add surface-local tip lists. To add a
 //! tip, append a `WelcomeTip` here and provide BOTH renderings when the
 //! feature exists on both surfaces (`web: None` / `tui: None` mark a tip as
-//! surface-specific). Keep the tone playful and sassy (see CLAUDE.md's
-//! "Welcome tips" tenet): lead with the feature discovery, keep key/button
-//! references secondary. Wrap text in backticks to highlight it in an accent
-//! color on both surfaces (the backticks themselves are never rendered).
+//! surface-specific). Keep the tone playful and sassy: lead with the feature
+//! discovery, keep key/button references secondary. Wrap text in backticks to
+//! highlight it in an accent color on both surfaces (the backticks themselves
+//! are never rendered).
 //! TUI variants receive a resolver so keybinding labels stay accurate after
 //! rebinding. Never hardcode key names.
 

@@ -69,7 +69,9 @@ function readSplitPercent(): number {
 // when it has terminals, a dock below with a strip of its own, split by a
 // divider. Either part can take the whole height and the other keeps only its
 // strip, and a part folded away stays mounted in a box the size it has in the
-// split, clipped, so its program never sees a sliver of a terminal.
+// split, clipped, so its program never sees a sliver of a terminal. The layout,
+// the phone's view and the dock terminal in front are per-device browser state
+// (`lib/stackMemory.ts`), never config or SQLite.
 export function AgentStack({
   model,
   session,
