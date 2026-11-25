@@ -408,6 +408,12 @@ impl FolderKept {
     }
 }
 
+impl From<StatusText> for FolderKept {
+    fn from(reason: StatusText) -> Self {
+        Self::untouched(reason)
+    }
+}
+
 impl From<String> for FolderKept {
     fn from(reason: String) -> Self {
         Self::untouched(reason)
@@ -551,32 +557,26 @@ fn open_created_folder(
     path: &Path,
     mark: Option<FolderMark>,
     filesystem_of: FilesystemOf<'_>,
-) -> Result<Option<OpenedFolder>, String> {
+) -> Result<Option<OpenedFolder>, StatusText> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err("its path does not name a folder inside another one".to_string());
+        return Err("its path does not name a folder inside another one".into());
     };
     match std::fs::canonicalize(parent) {
         Ok(resolved) if resolved == parent => {}
-        Ok(_) => {
-            return Err(
-                "a folder on the way to it is now a symbolic link, and dux does not follow one \
-                 when it deletes"
-                    .to_string(),
-            );
-        }
+        Ok(resolved) => return Err(path_leads_elsewhere(parent, &resolved)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(format!("dux could not read the folder it is in ({err})")),
+        Err(err) => return Err(format!("dux could not read the folder it is in ({err})").into()),
     }
     let parent_fd = rustix::fs::open(
         parent,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|err| format!("dux could not open the folder it is in ({err})"))?;
+    .map_err(|err| StatusText::from(format!("dux could not open the folder it is in ({err})")))?;
     let stat = match rustix::fs::statat(&parent_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => stat,
         Err(rustix::io::Errno::NOENT) => return Ok(None),
-        Err(err) => return Err(format!("dux could not read it ({err})")),
+        Err(err) => return Err(format!("dux could not read it ({err})").into()),
     };
     check_is_directory(&stat)?;
     let dir_fd = rustix::fs::openat(
@@ -585,17 +585,19 @@ fn open_created_folder(
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|err| format!("dux could not open it ({err})"))?;
-    let opened =
-        rustix::fs::fstat(&dir_fd).map_err(|err| format!("dux could not read it ({err})"))?;
+    .map_err(|err| StatusText::from(format!("dux could not open it ({err})")))?;
+    let opened = rustix::fs::fstat(&dir_fd)
+        .map_err(|err| StatusText::from(format!("dux could not read it ({err})")))?;
     check_is_directory(&opened)?;
     check_mark(&dir_fd, mark)?;
-    let unreadable = |err| format!("dux could not tell which filesystem it is on ({err})");
+    let unreadable = |err| {
+        StatusText::from(format!(
+            "dux could not tell which filesystem it is on ({err})"
+        ))
+    };
     let filesystem = filesystem_of(Path::new(""), &dir_fd).map_err(unreadable)?;
     if filesystem_of(Path::new(".."), &parent_fd).map_err(unreadable)? != filesystem {
-        return Err(
-            "another filesystem is mounted on it, and dux never deletes inside one".to_string(),
-        );
+        return Err("another filesystem is mounted on it, and dux never deletes inside one".into());
     }
     Ok(Some(OpenedFolder {
         parent: parent_fd,
@@ -603,6 +605,30 @@ fn open_created_folder(
         name: name.to_os_string(),
         filesystem,
     }))
+}
+
+/// Why a folder whose recorded `parent` now resolves to `resolved` is kept:
+/// a link on the way to it, named, or a folder on the way renamed or moved.
+fn path_leads_elsewhere(parent: &Path, resolved: &Path) -> StatusText {
+    let mut walked = PathBuf::new();
+    for part in parent.components() {
+        walked.push(part);
+        if let Ok(target) = std::fs::read_link(&walked) {
+            return crate::status_text![
+                q(walked.display()),
+                " on the way to it is now a symbolic link to ",
+                q(target.display()),
+                ", so the folder may have moved there, and dux deletes only at the path it \
+                 recorded, never through a link"
+            ];
+        }
+    }
+    crate::status_text![
+        "the folders on the way to it now lead to ",
+        q(resolved.display()),
+        " instead of the path dux recorded, so one of them was renamed or moved, and dux \
+         deletes only at the path it recorded"
+    ]
 }
 
 /// Refuse anything at the folder's path other than a directory.
@@ -1546,8 +1572,36 @@ mod tests {
         std::fs::rename(&agents, &real).unwrap();
         std::os::unix::fs::symlink(&real, &agents).unwrap();
         let refused = refusal(&created.path, created.identity);
-        assert!(refused.contains("symbolic link"), "{refused}");
+        assert_eq!(
+            refused,
+            format!(
+                "\"{}\" on the way to it is now a symbolic link to \"{}\", so the folder may \
+                 have moved there, and dux deletes only at the path it recorded, never through \
+                 a link",
+                agents.display(),
+                real.display()
+            )
+        );
         assert!(real.join("otter/file.txt").exists());
+    }
+
+    #[test]
+    fn a_path_that_now_leads_elsewhere_without_a_link_is_kept_and_says_so() {
+        let tmp = root();
+        let created = create_agent_folder(&tmp.path().join("agents"), "otter").unwrap();
+        std::fs::create_dir(tmp.path().join("other")).unwrap();
+        let roundabout = tmp.path().join("other/../agents/otter");
+        let refused = refusal(&roundabout, created.identity);
+        assert_eq!(
+            refused,
+            format!(
+                "the folders on the way to it now lead to \"{}\" instead of the path dux \
+                 recorded, so one of them was renamed or moved, and dux deletes only at the \
+                 path it recorded",
+                tmp.path().join("agents").display()
+            )
+        );
+        assert!(created.path.is_dir());
     }
 
     #[test]
