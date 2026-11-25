@@ -4647,12 +4647,24 @@ mod tests {
             .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
             .unwrap();
         store.set_minted_branch_rename("sa1", "kept").unwrap();
-        seed_every_pr_table(&store, "sa1");
+        seed_every_session_table(&store, "sa1");
+
+        let tables = tables_with_a_session_id(&store);
+        let before: Vec<i64> = tables
+            .iter()
+            .map(|table| rows_for(&store, table, "sa1"))
+            .collect();
+        for (table, rows) in tables.iter().zip(&before) {
+            assert!(
+                *rows > 0,
+                "{table} has a session_id column but `seed_every_session_table` gives it no row"
+            );
+        }
 
         store.remove_project_records("").unwrap();
 
-        for table in PR_TABLES {
-            assert_eq!(rows_for(&store, table, "sa1"), 1, "{table}");
+        for (table, rows) in tables.iter().zip(&before) {
+            assert_eq!(rows_for(&store, table, "sa1"), *rows, "{table}");
         }
 
         let loaded = store.load_sessions().unwrap();
@@ -5743,6 +5755,44 @@ mod tests {
                  insert into session_branch_former_names \
                  (session_id, branch_name, former_name, renamed_at) \
                  values ('{session_id}', 'now', 'before', '2026-01-01T00:00:00Z');"
+            ))
+            .unwrap();
+    }
+
+    /// Every table the schema gives a `session_id` column.
+    fn tables_with_a_session_id(store: &SessionStore) -> Vec<String> {
+        let mut stmt = store
+            .conn
+            .prepare(
+                "select m.name from sqlite_master m, pragma_table_info(m.name) p \
+                 where m.type = 'table' and p.name = 'session_id' order by m.name",
+            )
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap()
+    }
+
+    /// Give `session_id` a row in every per-session table: the pull-request
+    /// tables, the changes counter, a tab, a branch history row and a pending
+    /// worktree removal. The minted-branch rename is set by the caller.
+    fn seed_every_session_table(store: &SessionStore, session_id: &str) {
+        seed_every_pr_table(store, session_id);
+        store.next_changes_rev(session_id).unwrap();
+        store
+            .conn
+            .execute_batch(&format!(
+                "insert or ignore into agent_tabs (id, session_id, provider, created_at) \
+                 values ('{session_id}-tab', '{session_id}', 'claude', '2026-01-01T00:00:00Z'); \
+                 insert or ignore into session_branch_history \
+                 (session_id, branch_name, first_seen_at) \
+                 values ('{session_id}', 'seeded', '2026-01-01T00:00:00Z'); \
+                 insert or ignore into pending_worktree_removals \
+                 (session_id, label, project_id, project_path, worktree_path, source_branch, \
+                  branch_name, initial_branch, branch_provenance, created_at) \
+                 values ('{session_id}', 'l', '', '/p', '/w', 'main', 'b', 'b', 'minted', \
+                 '2026-01-01T00:00:00Z');"
             ))
             .unwrap();
     }

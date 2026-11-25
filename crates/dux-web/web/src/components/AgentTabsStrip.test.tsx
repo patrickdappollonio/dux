@@ -709,6 +709,18 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     fireAnimationIteration(frameOf(icon()), "working-bounce")
     expect(frameOf(icon()).getAttribute("class"), LOCKED).not.toContain(BOUNCE)
   })
+
+  it("drops a stopping tab's pulse at once, before the bounce lands", () => {
+    const { container, rerender } = render(
+      <AgentTabsStrip session={withWorking(true)} activeTabId="s1" maxTabs={20} />,
+    )
+    const icon = () => container.querySelectorAll("[role='tab'] svg.lucide-bot")[1]
+    fireAnimationStart(frameOf(icon()), "working-bounce")
+
+    rerender(<AgentTabsStrip session={withWorking(false)} activeTabId="s1" maxTabs={20} />)
+    expect(icon().getAttribute("class"), LOCKED).not.toContain(PULSE)
+    expect(frameOf(icon()).getAttribute("class"), LOCKED).toContain(BOUNCE)
+  })
 })
 
 // A browser check: Tab onto a tab past the strip's right edge and the strip

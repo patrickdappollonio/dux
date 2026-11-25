@@ -273,6 +273,18 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     fireAnimationIteration(frameOf(icon()), "working-bounce")
     expect(frameOf(icon()).getAttribute("class"), LOCKED).not.toContain(BOUNCE)
   })
+
+  it("drops a stopping terminal's pulse at once, before the bounce lands", () => {
+    const { container, rerender } = render(
+      strip([terminal("t1", 1), terminal("t2", 2, true)]),
+    )
+    const icon = () => icons(container)[1]
+    fireAnimationStart(frameOf(icon()), "working-bounce")
+
+    rerender(strip([terminal("t1", 1), terminal("t2", 2, false)]))
+    expect(icon().getAttribute("class"), LOCKED).not.toContain(PULSE)
+    expect(frameOf(icon()).getAttribute("class"), LOCKED).toContain(BOUNCE)
+  })
 })
 
 // The agent tab strip's tablet shape, so the two strips stacked in one pane

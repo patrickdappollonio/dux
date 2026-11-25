@@ -2349,6 +2349,138 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     expect(look, LOCKED).toContain("text-cyan-100")
     expectLookEasesIn(look, LOCKED)
   })
+
+  it("drops the pulse at once on a plain stop, before the bounce lands", () => {
+    mockState = stateWith(
+      [makeSession({ id: "alpha", title: "Alpha", working: true })],
+      [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim", working: true })],
+    )
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const bot = () => container.querySelector("svg.lucide-bot")!
+    const term = () => container.querySelector("svg.lucide-square-terminal")!
+    for (const glyph of [bot(), term()]) fireAnimationStart(frameOf(glyph), "working-bounce")
+
+    mockState = stateWith(
+      [makeSession({ id: "alpha", title: "Alpha" })],
+      [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim" })],
+    )
+    rerender(<FlatAgentList handlers={handlers} />)
+    for (const glyph of [bot(), term()]) {
+      expect(glyph.getAttribute("class"), LOCKED).not.toContain(PULSE)
+      expect(frameOf(glyph).getAttribute("class"), LOCKED).toContain(BOUNCE)
+    }
+  })
+
+  it("eases the glyph from the pulse's opacity back to full over 300ms on a plain stop", () => {
+    mockState = stateWith([makeSession({ id: "alpha", title: "Alpha", working: true })], [])
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const bot = () => container.querySelector("svg.lucide-bot")!
+    const ease = stubGlyphEase(bot())
+    const computed = window.getComputedStyle
+    const opacity = vi
+      .spyOn(window, "getComputedStyle")
+      .mockImplementation((el: Element, pseudo?: string | null) =>
+        el === bot()
+          ? ({ ...computed(el, pseudo), opacity: "0.55" } as CSSStyleDeclaration)
+          : computed(el, pseudo),
+      )
+    try {
+      mockState = stateWith([makeSession({ id: "alpha", title: "Alpha" })], [])
+      rerender(<FlatAgentList handlers={handlers} />)
+    } finally {
+      opacity.mockRestore()
+    }
+    expect(ease.animate, LOCKED).toHaveBeenCalledTimes(1)
+    const [keyframes, options] = ease.animate.mock.calls[0] as unknown as [
+      Keyframe[],
+      KeyframeAnimationOptions,
+    ]
+    expect(keyframes, LOCKED).toEqual([{ opacity: "0.55" }, { opacity: "1" }])
+    expect(options.duration, LOCKED).toBe(300)
+  })
+
+  it("ends the bounce within 400ms and the opacity ease within 300ms", async () => {
+    const { WORKING_PULSE_FADE_MS } = await import("@/hooks/use-working-cue")
+    const { readFileSync } = await import("node:fs")
+    const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
+    expect(WORKING_PULSE_FADE_MS, LOCKED).toBe(300)
+    expect(css, LOCKED).toContain(
+      "--animate-working-bounce: working-bounce 0.4s ease-in-out infinite;",
+    )
+
+    mockState = stateWith([makeSession({ id: "alpha", title: "Alpha", working: true })], [])
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const ease = stubGlyphEase(container.querySelector("svg.lucide-bot")!)
+    mockState = stateWith(
+      [makeSession({ id: "alpha", title: "Alpha", working: true, needs_attention: true })],
+      [],
+    )
+    rerender(<FlatAgentList handlers={handlers} />)
+    const options = (ease.animate.mock.calls[0] as unknown as [
+      Keyframe[],
+      KeyframeAnimationOptions,
+    ])[1]
+    expect(options, LOCKED).toMatchObject({ duration: 300 })
+  })
+
+  it("shows the typing caret and word at once when typing takes a running terminal over", () => {
+    mockState = stateWith(
+      [],
+      [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim", working: true })],
+    )
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const term = () => container.querySelector("svg.lucide-square-terminal")!
+    stubGlyphEase(term())
+    fireAnimationStart(frameOf(term()), "working-bounce")
+
+    mockState = stateWith(
+      [],
+      [
+        makeTerminal({
+          id: "t-a",
+          label: "bash",
+          foreground_cmd: "vim",
+          working: true,
+          typing: true,
+        }),
+      ],
+    )
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(frameOf(term()).getAttribute("class"), LOCKED).toContain(BOUNCE)
+    expect(container.querySelector("[class*='animate-typing-caret']"), LOCKED).toBeTruthy()
+    expect(screen.getByText("Typing"), LOCKED).toBeTruthy()
+  })
+
+  it("under reduced motion hands over with no ease and the new look at once", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query.includes("prefers-reduced-motion"),
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      })),
+    )
+    mockState = stateWith([makeSession({ id: "alpha", title: "Alpha", working: true })], [])
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const bot = () => container.querySelector("svg.lucide-bot")!
+    const ease = stubGlyphEase(bot())
+    fireAnimationStart(frameOf(bot()), "working-bounce")
+
+    mockState = stateWith(
+      [makeSession({ id: "alpha", title: "Alpha", working: true, needs_attention: true })],
+      [],
+    )
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(ease.animate, LOCKED).not.toHaveBeenCalled()
+    const look = frameOf(bot()).getAttribute("class") ?? ""
+    expect(look, LOCKED).toContain("text-cyan-100")
+    expect(look, LOCKED).not.toContain("duration-200")
+  })
 })
 
 describe("FlatAgentList focus rings", () => {

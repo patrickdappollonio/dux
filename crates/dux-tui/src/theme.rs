@@ -281,22 +281,39 @@ impl Glyphs {
     }
 
     /// Every glyph in the set, labelled, for tests that must cover them all.
+    /// The destructuring names every field, so a new field does not compile
+    /// until it is listed here too.
     #[cfg(test)]
     pub(crate) fn all(&self) -> [(&'static str, &'static str); 13] {
+        let Self {
+            project,
+            standalone,
+            owned_by,
+            pull_request,
+            warning,
+            check,
+            collapsed,
+            expanded,
+            monitor_collapsed,
+            monitor_expanded,
+            serving,
+            terminals,
+            pin,
+        } = *self;
         [
-            ("project", self.project),
-            ("standalone", self.standalone),
-            ("owned_by", self.owned_by),
-            ("pull_request", self.pull_request),
-            ("warning", self.warning),
-            ("check", self.check),
-            ("collapsed", self.collapsed),
-            ("expanded", self.expanded),
-            ("monitor_collapsed", self.monitor_collapsed),
-            ("monitor_expanded", self.monitor_expanded),
-            ("serving", self.serving),
-            ("terminals", self.terminals),
-            ("pin", self.pin),
+            ("project", project),
+            ("standalone", standalone),
+            ("owned_by", owned_by),
+            ("pull_request", pull_request),
+            ("warning", warning),
+            ("check", check),
+            ("collapsed", collapsed),
+            ("expanded", expanded),
+            ("monitor_collapsed", monitor_collapsed),
+            ("monitor_expanded", monitor_expanded),
+            ("serving", serving),
+            ("terminals", terminals),
+            ("pin", pin),
         ]
     }
 }
@@ -1110,6 +1127,24 @@ mod tests {
             panic!("expected RGB shades");
         };
         assert!(floor_g < mid_g && mid_g < 0xc5);
+    }
+
+    #[test]
+    fn the_working_word_dips_the_shared_mute_fraction_toward_muted() {
+        let working = Color::Rgb(0, 0, 0);
+        let muted = Color::Rgb(255, 255, 255);
+        let dimmest = (0..8)
+            .map(|step| match working_word_color(working, muted, step) {
+                Color::Rgb(r, _, _) => r,
+                other => panic!("expected an RGB shade, got {other:?}"),
+            })
+            .max()
+            .expect("eight cells");
+        let expected = (255.0 * dux_core::working_cue::PULSE_MUTE_FRACTION).round();
+        assert!(
+            (f32::from(dimmest) - expected).abs() < f32::EPSILON,
+            "the dip lands {dimmest}/255 toward muted; PULSE_MUTE_FRACTION says {expected}"
+        );
     }
 
     #[test]
