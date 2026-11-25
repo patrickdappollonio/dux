@@ -261,8 +261,8 @@ const LAUNCHER_COPY: Record<
   "new-standalone-agent": {
     title: "New standalone agent",
     excerpt:
-      "Start an agent in any folder on this computer. No project or git needed.",
-    summary: "Run an agent in any folder, no project or git needed.",
+      "Pick a name and start talking. dux creates a folder for the agent, and no project or git is needed.",
+    summary: "Pick a name. dux creates a folder for it.",
   },
   "new-standalone-terminal": {
     title: "New standalone terminal",

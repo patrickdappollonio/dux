@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
-import { Check, CircleAlert } from "lucide-react"
+import { Check, CircleAlert, TriangleAlert } from "lucide-react"
 import { Spinner } from "@/components/Spinner"
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { Notice } from "@/components/Notice"
 import { WorktreeFilesNote } from "@/components/WorktreeFilesNote"
 import { InlineCode } from "@/components/ui/inline-code"
 import { AttachedSection } from "@/components/AttachedSection"
@@ -23,6 +24,7 @@ import {
   currentBranchLabelProse,
   branchLossProse,
   currentBranchWarningProse,
+  folderFilesSentence,
   otherBranchesLabelProse,
   otherBranchesWarningProse,
   protectedBranchesProse,
@@ -36,6 +38,7 @@ import {
   type BranchBoxAnswer,
   type BranchOffer,
   type DeleteBranchAnswers,
+  type FolderFilesReply,
   type OfferedBranch,
   sessionsApi,
 } from "@/lib/sessionsApi"
@@ -399,6 +402,13 @@ export function DeleteSessionDialog() {
   const [currentAnswer, setCurrentAnswer] = useState<boolean | null>(null)
   const [othersAnswer, setOthersAnswer] = useState<boolean | null>(null)
   const [entry, setEntry] = useState<OfferEntry | null>(null)
+  // The folder box of an agent whose folder dux created: ticked unless untouched
+  // and then its default, which is ticked.
+  const [deleteFolder, setDeleteFolder] = useState(true)
+  const [folderFiles, setFolderFiles] = useState<{
+    target: string
+    reply: FolderFilesReply
+  } | null>(null)
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const ours = entry !== null && entry.target === deleteTarget ? entry : null
@@ -428,7 +438,15 @@ export function DeleteSessionDialog() {
   const firstBoxShown =
     ready === null || current !== null || currentBranchFailed(ready)
 
+  const createdFolder = folder?.created_by_dux === true ? folder : null
+  const filesSentence =
+    createdFolder !== null && deleteFolder && folderFiles?.target === deleteTarget
+      ? folderFilesSentence(folderFiles.reply.files)
+      : null
+
   function reset() {
+    setDeleteFolder(true)
+    setFolderFiles(null)
     setDeleteWorktree(false)
     setCurrentAnswer(null)
     setOthersAnswer(null)
@@ -466,6 +484,24 @@ export function DeleteSessionDialog() {
     }
   }, [askOffer, deleteTarget, asked])
 
+  // Counted once per open of an agent whose folder dux created, so the warning
+  // says how much goes with the folder. A failed ask says nothing more than
+  // the box does.
+  const askFiles = isOpen && createdFolder !== null
+  useEffect(() => {
+    if (!askFiles || !deleteTarget) return
+    let live = true
+    sessionsApi
+      .folderFiles(deleteTarget)
+      .then((reply) => {
+        if (live) setFolderFiles({ target: deleteTarget, reply })
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [askFiles, deleteTarget])
+
   async function handleConfirm() {
     if (!deleteTarget) return
     // The server REFUSES a worktree-removing delete on a standalone agent, and this
@@ -477,8 +513,10 @@ export function DeleteSessionDialog() {
         ? branchAnswers(offer, deleteCurrent, deleteOthers)
         : null
     const target = deleteTarget
+    // The folder answer is sent only when its box was on screen.
+    const folderAnswer = createdFolder !== null ? deleteFolder : null
     const done = await confirm((accepted) =>
-      deleteSession(target, removeWorktree, branchesToSend, accepted),
+      deleteSession(target, removeWorktree, branchesToSend, accepted, folderAnswer),
     )
     if (!done) return
     reset()
@@ -513,14 +551,29 @@ export function DeleteSessionDialog() {
         This removes the agent session <InlineCode>{name}</InlineCode> from
         dux.
       </p>
-      {folder && (
+      {createdFolder !== null && (
+        <div className="flex flex-col gap-3">
+          <CheckboxRow
+            id="delete-folder"
+            checked={deleteFolder}
+            onCheckedChange={setDeleteFolder}
+          >
+            Also delete its folder <InlineCode>{createdFolder.folder_label}</InlineCode>
+          </CheckboxRow>
+          {filesSentence !== null && (
+            <Notice shape="box" tone="warning" icon={TriangleAlert} announce="static">
+              {filesSentence}
+            </Notice>
+          )}
+        </div>
+      )}
+      {folder && createdFolder === null && (
         // Said out loud because the sentence above reads as though something on
-        // disk goes too: a standalone agent's folder is left exactly as it was.
+        // disk goes too: a folder the user chose is left exactly as it was.
         <p className="text-sm text-muted-foreground">
           Its folder <InlineCode>{folder.folder_label}</InlineCode> is left
-          untouched: dux never creates, moves or removes a
-          standalone agent&rsquo;s folder. Anything the agent wrote there is
-          still there.
+          untouched: dux never moves or removes a folder you chose for a
+          standalone agent. Anything the agent wrote there is still there.
         </p>
       )}
       {managed && (

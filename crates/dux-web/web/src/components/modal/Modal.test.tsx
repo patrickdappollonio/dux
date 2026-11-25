@@ -524,6 +524,45 @@ describe("a card that changes step", () => {
   })
 })
 
+describe("a card that changes to a step with a height of its own", () => {
+  function Steps() {
+    const [step, setStep] = useState<"name" | "folder">("name")
+    return (
+      <Modal
+        kind="picker"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        step={step}
+        height={step === "folder" ? "h680" : "content"}
+      >
+        <button type="button" onClick={() => setStep(step === "name" ? "folder" : "name")}>
+          next
+        </button>
+      </Modal>
+    )
+  }
+
+  it("takes that height going there and its content's coming back", () => {
+    const height = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.dataset.slot === "dialog-content" ? 300 : 0
+      })
+    try {
+      render(<Steps />)
+      fireEvent.click(screen.getByText("next"))
+      expect(popup().style.height).toBe("")
+      expect(popup().className).toContain("42.5rem")
+      fireEvent.click(screen.getByText("next"))
+      expect(popup().style.height).toBe("")
+    } finally {
+      height.mockRestore()
+    }
+  })
+})
+
 // A field a finger focuses in a cover can sit below what the soft keyboard
 // leaves of the body.
 describe("a field focused in a cover", () => {

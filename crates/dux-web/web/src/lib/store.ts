@@ -6838,15 +6838,17 @@ export function closeDelete(): void {
 
 // Ask the server to delete an agent session. `deleteWorktree` opts into the
 // destructive removal of the git worktree on disk (default off in the UI).
-// `branches` is the dialog's two branch boxes, or `null` when it showed none.
+// `branches` is the dialog's two branch boxes, or `null` when it showed none,
+// and `deleteFolder` its folder box, `null` when it showed none.
 export function deleteSession(
   sessionId: string,
   deleteWorktree: boolean,
   branches: DeleteBranchAnswers | null = null,
   accepted: readonly string[] | null = null,
+  deleteFolder: boolean | null = null,
 ): Promise<AttachedBlocker[] | null> {
   return guardedChange(
-    sessionsApi.remove(sessionId, deleteWorktree, branches, accepted),
+    sessionsApi.remove(sessionId, deleteWorktree, branches, accepted, deleteFolder),
     (e) => {
       // A 409 is a refusal (a tab is still launching, or a delete is already in
       // flight). The server already surfaces that message over the `/ws/events`
@@ -7506,6 +7508,22 @@ export function createStandaloneAgent(folder: string, name: string): void {
   armCreateFocus({ kind: "standalone" })
   void sessionsApi
     .create({ kind: "standalone", folder, name })
+    .catch((e) =>
+      notifyError(
+        e instanceof Error
+          ? e.message
+          : "Could not create the standalone agent.",
+      ),
+    )
+}
+
+/** Create a standalone agent in a new folder the server creates for it, named
+ * after the agent, in the standalone agents folder. A name whose folder is
+ * already there is the server's refusal, said in a toast. */
+export function createStandaloneAgentInNewFolder(name: string): void {
+  armCreateFocus({ kind: "standalone" })
+  void sessionsApi
+    .create({ kind: "standalone_new_folder", name })
     .catch((e) =>
       notifyError(
         e instanceof Error

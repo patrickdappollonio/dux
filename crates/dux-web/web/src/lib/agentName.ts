@@ -69,3 +69,10 @@ export function draftAfterRandomizeOff(
 ): string {
   return draft === generated ? "" : draft
 }
+
+/** The folder a new standalone agent called `name` gets inside the standalone
+ * agents folder: the name with every `/` turned into `-`, so it sits directly
+ * in that folder. Twin of `dux_core::agent_folders::folder_name_for`. */
+export function agentFolderName(name: string): string {
+  return name.trim().replaceAll("/", "-")
+}
