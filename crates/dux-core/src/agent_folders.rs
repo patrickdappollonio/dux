@@ -262,7 +262,10 @@ fn left_by_a_create(
     .ok()?;
     let stat = rustix::fs::fstat(&dir).ok()?;
     if stat.st_uid != rustix::process::geteuid().as_raw()
-        || filesystem_of(&dir).ok()?.is_on(filesystem_of(root_fd).ok()?) != Some(true)
+        || filesystem_of(&dir)
+            .ok()?
+            .is_on(filesystem_of(root_fd).ok()?)
+            != Some(true)
     {
         return None;
     }
@@ -561,10 +564,13 @@ pub(crate) struct Filesystem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mount {
     /// The mount's id.
+    #[cfg(target_os = "linux")]
     Id(u64),
     /// Only whether a filesystem is mounted on the directory itself.
+    #[cfg(target_os = "linux")]
     MountPoint(bool),
     /// Nothing, so whether a filesystem is mounted on it cannot be told.
+    #[cfg(target_os = "linux")]
     Unknown,
     /// Nothing, and the device alone tells filesystems apart (macOS).
     #[cfg(not(target_os = "linux"))]
@@ -579,11 +585,14 @@ impl Filesystem {
             return Some(false);
         }
         match (self.mount, outer.mount) {
+            #[cfg(target_os = "linux")]
             (Mount::Id(id), Mount::Id(outer_id)) => Some(id == outer_id),
+            #[cfg(target_os = "linux")]
             (Mount::MountPoint(mounted), _) => Some(!mounted),
+            #[cfg(target_os = "linux")]
+            _ => None,
             #[cfg(not(target_os = "linux"))]
             (Mount::DeviceOnly, Mount::DeviceOnly) => Some(true),
-            _ => None,
         }
     }
 }
@@ -673,8 +682,7 @@ fn unescape_mountinfo(field: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-const CANNOT_TELL_MOUNTED: &str =
-    "dux cannot tell on this system whether another filesystem is mounted in it, and dux never \
+const CANNOT_TELL_MOUNTED: &str = "dux cannot tell on this system whether another filesystem is mounted in it, and dux never \
      deletes inside one";
 
 /// The folder dux created, opened and checked, and the folder it is in.
@@ -1131,6 +1139,7 @@ mod tests {
     /// Stands in for a kernel with no mount ids: every directory answers
     /// `mount`, and those `mounted` names answer that a filesystem is mounted
     /// on them.
+    #[cfg(target_os = "linux")]
     fn answering(
         mount: Mount,
         mounted: &[&str],
@@ -1148,6 +1157,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn with_only_mount_points_known_the_deletion_stops_at_one() {
         let tmp = root();
@@ -1181,6 +1191,7 @@ mod tests {
         assert!(!created.path.exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn when_mounts_cannot_be_told_the_folder_is_kept_whole() {
         let tmp = root();
@@ -1204,6 +1215,7 @@ mod tests {
         assert!(created.path.join("inside").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_subdirectory_whose_mount_cannot_be_told_is_not_entered() {
         let tmp = root();
@@ -1239,7 +1251,10 @@ mod tests {
         assert_eq!(is_mount_point(text, b"/proc"), Some(true));
         assert_eq!(is_mount_point(text, b"/home/me/my agents/mnt"), Some(true));
         assert_eq!(is_mount_point(text, b"/home/me/my agents"), Some(false));
-        assert_eq!(is_mount_point(text, b"/home/me/my\\040agents/mnt"), Some(false));
+        assert_eq!(
+            is_mount_point(text, b"/home/me/my\\040agents/mnt"),
+            Some(false)
+        );
         assert_eq!(is_mount_point("22 1 8:2 /\n", b"/"), None);
         assert_eq!(is_mount_point("40 22 8:2 / /a\\04 rw\n", b"/a"), None);
     }
