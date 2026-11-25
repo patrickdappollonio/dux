@@ -983,6 +983,10 @@ fn a_reason_takes_room_only_when_a_greyed_out_row_is_shown() {
 #[test]
 fn new_standalone_agent_asks_for_a_name_and_names_the_folder_dux_creates() {
     let mut app = test_app(default_bindings());
+    app.engine
+        .config
+        .defaults
+        .enable_randomized_pet_name_by_default = true;
     app.execute_command("new-standalone-agent").expect("opens");
     let PromptState::NameStandaloneAgent {
         folder,
@@ -1016,6 +1020,22 @@ fn new_standalone_agent_asks_for_a_name_and_names_the_folder_dux_creates() {
         dux_core::worker::CreateAgentRequest::StandaloneInNewFolder { ref title, .. }
             if title == "talk-to-me"
     ));
+}
+
+/// With the random pet-name default off, the name starts empty, as every
+/// other new-agent name field does.
+#[test]
+fn new_standalone_agent_starts_with_no_name_when_pet_names_are_off() {
+    let mut app = test_app(default_bindings());
+    app.engine
+        .config
+        .defaults
+        .enable_randomized_pet_name_by_default = false;
+    app.execute_command("new-standalone-agent").expect("opens");
+    let PromptState::NameStandaloneAgent { input, .. } = &app.prompt else {
+        panic!("expected the name step, got {:?}", app.prompt);
+    };
+    assert_eq!(input.text, "");
 }
 
 /// An empty name keeps the step open and says why: the folder is named after

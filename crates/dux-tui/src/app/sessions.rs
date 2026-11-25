@@ -93,11 +93,19 @@ impl App {
         }
     }
 
-    /// Ask for a new standalone agent's name, pre-filled; dux creates its folder,
-    /// and the modal's button leads on to the folder browser instead.
+    /// Ask for a new standalone agent's name, pre-filled with a pet name when
+    /// the random pet-name default is on; dux creates its folder, and the
+    /// modal's button leads on to the folder browser instead.
     pub(crate) fn open_new_standalone_agent(&mut self) {
         let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
-        input.insert_str(&crate::git::docker_style_name());
+        if self
+            .engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default
+        {
+            input.insert_str(&crate::git::docker_style_name());
+        }
         self.prompt = PromptState::NameStandaloneAgent {
             folder: crate::app::StandaloneFolder::New,
             input,
@@ -2888,6 +2896,7 @@ impl App {
 
     /// Start deleting an agent. A refusal naming who is attached is returned for
     /// the dialog; any other failure goes on the status line.
+    #[cfg(test)]
     pub(crate) fn begin_delete_session(
         &mut self,
         session_id: &str,
@@ -2897,8 +2906,9 @@ impl App {
         self.begin_delete_session_asking(session_id, worktree, None, branches, None)
     }
 
-    /// [`Self::begin_delete_session`] with the folder box's answer, `None`
-    /// when the dialog offered no folder box.
+    /// Start deleting an agent with the folder box's answer, `None` when the
+    /// dialog offered no folder box. A refusal naming who is attached is
+    /// returned for the dialog; any other failure goes on the status line.
     pub(crate) fn begin_delete_session_with_folder(
         &mut self,
         session_id: &str,
@@ -2909,8 +2919,8 @@ impl App {
         self.begin_delete_session_asking(session_id, worktree, None, branches, delete_folder)
     }
 
-    /// [`Self::begin_delete_session`] with the older single branch answer too,
-    /// which only a test still sends.
+    /// [`Self::begin_delete_session_with_folder`] with the older single branch
+    /// answer too, which only a test still sends.
     fn begin_delete_session_asking(
         &mut self,
         session_id: &str,
