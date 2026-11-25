@@ -1,7 +1,7 @@
 // The renderer ladder's DECISION, which is the only half a unit test can
 // reach: jsdom has no WebGL of any kind, so whether the addon actually paints
-// integer-snapped block glyphs is a container-pass question and is stated as
-// such in TERMINAL.md.
+// integer-snapped block glyphs, and whether selection, links and touch forwarding
+// still land on the right cell under its canvas, is checked in a real browser.
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
