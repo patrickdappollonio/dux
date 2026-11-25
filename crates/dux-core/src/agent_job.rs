@@ -3056,14 +3056,45 @@ fn run_create_standalone_agent_in_new_folder_job(
     create_key: String,
     identity: crate::term_identity::TerminalIdentity,
     gate: &crate::process_sessions::SpawnGate,
+    worktrees: &crate::worktree_ops::WorktreeOps,
 ) {
     // Checked before the folder exists, so a provider that is missing leaves
     // nothing on disk.
     let Some(prepared) = prepare_standalone_launch(provider, config, worker_tx, &create_key) else {
         return;
     };
-    let created = match crate::agent_folders::create_agent_folder(root, title) {
+    // Held until the engine has the agent's record, as a chosen folder is.
+    let hold = |path: &Path| {
+        worktrees
+            .hold_as(
+                crate::worktree_ops::HoldOwner::CreateOp(create_key.clone()),
+                path,
+                crate::worktree_ops::WorktreeOpKind::CreateAgent,
+            )
+            .map_err(|refused| refused.sentence("create an agent there"))
+    };
+    let unused = |path: &Path| {
+        worktrees.holders(path).len() == 1
+            && crate::process_sessions::read_process_table_strict()
+                .and_then(|table| {
+                    crate::process_sessions::occupants_of(&table, &[path.to_path_buf()])
+                })
+                .is_ok_and(|found| found.is_empty())
+    };
+    let checks = crate::agent_folders::CreateChecks {
+        hold: &hold,
+        unused: &unused,
+    };
+    let created = match crate::agent_folders::create_agent_folder_with(root, title, &checks) {
         Ok(created) => created,
+        Err(crate::agent_folders::CreateAgentFolderError::Held(refusal)) => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: create_key,
+                attempted_name: None,
+                message: refusal,
+            });
+            return;
+        }
         Err(crate::agent_folders::CreateAgentFolderError::AlreadyThere(path)) => {
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                 status_op_id: create_key,
@@ -3762,6 +3793,7 @@ pub fn run_create_agent_job(
         let gate = crate::process_sessions::SpawnGate::new(registry.clone(), worktrees.clone());
         run_create_standalone_agent_in_new_folder_job(
             &root, &title, &provider, config, worker_tx, term_size, create_key, identity, &gate,
+            &worktrees,
         );
         return;
     }
@@ -4478,6 +4510,29 @@ mod tests {
             folder_snapshot(&root.join("taken")),
             vec!["mine.txt".to_string()]
         );
+    }
+
+    /// A folder an earlier create made and left before any agent was recorded
+    /// in it, holding only its marker file, is taken over rather than refused.
+    #[test]
+    fn a_new_folder_create_takes_over_a_folder_an_earlier_create_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let left = crate::agent_folders::create_agent_folder(&root, "otter").unwrap();
+        let run =
+            drive_standalone_request(new_folder_request(&root, "otter"), &ghost_provider("true"));
+        let session = run.launched.expect("the agent launches");
+        let crate::model::FolderRemovalRight::CreatedByDux { path, identity } =
+            session.workspace.folder_removal_right()
+        else {
+            panic!("the record says dux created the folder");
+        };
+        assert_eq!(Path::new(path), left.path);
+        assert_ne!(identity.mark, left.identity.mark);
+        let marker =
+            std::fs::read_to_string(left.path.join(crate::agent_folders::MARKER_FILE_NAME))
+                .unwrap();
+        assert!(marker.contains(&identity.mark.expect("a mark").to_hex()));
     }
 
     /// A provider that cannot run is found before the folder is created, so
