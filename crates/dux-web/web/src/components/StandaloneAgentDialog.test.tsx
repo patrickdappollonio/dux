@@ -74,8 +74,9 @@ const SHORTCUTS: ProjectShortcutListView = {
   ],
 }
 
-function seed(shortcuts: ProjectShortcutListView | null, projects = 2) {
+function seed(shortcuts: ProjectShortcutListView | null, projects = 2, randomize = true) {
   mockState = {
+    bootstrap: { randomize_agent_names_by_default: randomize },
     spine: { projects: Array.from({ length: projects }, (_, i) => ({ id: `p-${i}` })) },
     standaloneAgentPickerOpen: true,
     standaloneProjectShortcuts: shortcuts,
@@ -345,6 +346,15 @@ describe("StandaloneAgentDialog name step", () => {
     fireEvent.click(createButton())
     expect(createStandaloneAgentInNewFolder).toHaveBeenCalledWith("brave-otter")
     expect(closeStandaloneAgentPicker).toHaveBeenCalled()
+  })
+
+  it("starts empty, generating nothing, when random names are off by default", async () => {
+    seed(SHORTCUTS, 2, false)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    expect(nameField().value).toBe("")
+    expect(agentName).not.toHaveBeenCalled()
+    expect(createButton().disabled).toBe(true)
   })
 
   it("follows the typed name in the folder it names", async () => {

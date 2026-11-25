@@ -58,10 +58,15 @@ interface StepParts {
 }
 
 /** The name step: dux creates the agent's folder, named after it. A taken name
- * is refused here, and again atomically by the server's create. */
+ * is refused here, and again atomically by the server's create. The box starts
+ * with a generated name only while random names are on by default, as every
+ * new-agent name does. */
 function useNewFolderStep(onUseExisting: () => void): StepParts {
+  const randomizeByDefault = useDux().bootstrap?.randomize_agent_names_by_default ?? false
+  // Read once, at opening, as the New agent dialog reads it.
+  const [randomize] = useState(randomizeByDefault)
   const [name, setName] = useState("")
-  const [generating, setGenerating] = useState(true)
+  const [generating, setGenerating] = useState(randomize)
   const [rootLabel, setRootLabel] = useState<string | null>(null)
   // The latest answer about whether the create would refuse a name for its
   // folder, kept with the name it answers so a stale one never speaks for
@@ -73,15 +78,17 @@ function useNewFolderStep(onUseExisting: () => void): StepParts {
 
   useEffect(() => {
     let live = true
-    browseApi
-      .agentName()
-      .then((reply) => {
-        if (live) setName(sanitizeAgentName(reply.name))
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (live) setGenerating(false)
-      })
+    if (randomize) {
+      browseApi
+        .agentName()
+        .then((reply) => {
+          if (live) setName(sanitizeAgentName(reply.name))
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (live) setGenerating(false)
+        })
+    }
     sessionsApi
       .newAgentFolder("")
       .then((reply) => {
@@ -91,7 +98,7 @@ function useNewFolderStep(onUseExisting: () => void): StepParts {
     return () => {
       live = false
     }
-  }, [])
+  }, [randomize])
 
   const valid = name !== "" && isValidAgentName(name)
   useEffect(() => {
