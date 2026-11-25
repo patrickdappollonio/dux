@@ -227,8 +227,22 @@ impl TerminalInput {
 
     /// Add one read's bytes.
     pub(crate) fn push_read(&mut self, bytes: &[u8]) {
+        self.push_end_of_read(bytes, bytes.len());
+    }
+
+    /// Add `bytes`, the last bytes of a read of `read_len` bytes.
+    pub(crate) fn push_end_of_read(&mut self, bytes: &[u8], read_len: usize) {
         self.unread.extend(bytes);
-        self.ends_full_read = bytes.len() == READ_SIZE;
+        self.ends_full_read = !bytes.is_empty() && read_len == READ_SIZE;
+    }
+
+    /// Drop the start of a sequence the event decoder has taken but not
+    /// finished, and return it.
+    pub(crate) fn end_begun_sequence(&mut self) -> Vec<u8> {
+        if self.unread.is_empty() {
+            self.ends_full_read = false;
+        }
+        std::mem::take(&mut self.partial)
     }
 
     /// Whether bytes are waiting that no reader has looked at yet.

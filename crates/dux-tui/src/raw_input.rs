@@ -7,6 +7,79 @@ pub(crate) const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracket paste mode end marker: `ESC [ 201 ~`
 pub(crate) const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
 
+/// How long a bracketed paste may go without a byte before its end marker
+/// is no longer waited for. A paste cut short (a dropped link, a file that
+/// holds the start marker) would otherwise swallow every key, Escape
+/// included.
+pub(crate) const UNFINISHED_PASTE_WAIT: Duration = Duration::from_secs(1);
+
+/// Whether the last bracketed-paste marker in `bytes` opens a paste; `None`
+/// when `bytes` holds neither marker.
+pub(crate) fn last_paste_marker_opens(bytes: &[u8]) -> Option<bool> {
+    bytes
+        .windows(BRACKET_PASTE_START.len())
+        .rev()
+        .find_map(|window| match window {
+            BRACKET_PASTE_START => Some(true),
+            BRACKET_PASTE_END => Some(false),
+            _ => None,
+        })
+}
+
+/// The rest of a bracketed paste whose reader ended before the paste did,
+/// dropped from what the terminal sends so that no reader takes it as keys.
+/// It ends with the paste's end marker, or once the paste has gone
+/// [`UNFINISHED_PASTE_WAIT`] without a byte; what follows is read as usual.
+#[derive(Debug)]
+pub(crate) struct PasteRemainder {
+    /// How many leading bytes of the end marker the bytes dropped so far end
+    /// with.
+    matched: usize,
+    /// When the paste last had a byte.
+    last: Instant,
+}
+
+impl PasteRemainder {
+    /// The rest of a paste whose reader ended at `now` holding `held`, the
+    /// paste's bytes it had not finished reading.
+    pub(crate) fn after(held: &[u8], now: Instant) -> Self {
+        let mut remainder = Self {
+            matched: 0,
+            last: now,
+        };
+        // Bytes a reader holds unfinished never hold a whole end marker.
+        let _ = remainder.end_in(held);
+        remainder
+    }
+
+    /// Where the paste ends in `bytes`, read at `now`: the index just past
+    /// its end marker, or 0 when the paste had already gone quiet for
+    /// [`UNFINISHED_PASTE_WAIT`]. `None` when every byte belongs to the paste.
+    pub(crate) fn end_in_read(&mut self, bytes: &[u8], now: Instant) -> Option<usize> {
+        if now.saturating_duration_since(self.last) >= UNFINISHED_PASTE_WAIT {
+            return Some(0);
+        }
+        self.last = now;
+        self.end_in(bytes)
+    }
+
+    fn end_in(&mut self, bytes: &[u8]) -> Option<usize> {
+        for (index, &byte) in bytes.iter().enumerate() {
+            // The marker's one Escape is its first byte, so a byte that breaks
+            // a partial match can only start a new one by being that Escape.
+            self.matched = if byte == BRACKET_PASTE_END[self.matched] {
+                self.matched + 1
+            } else {
+                usize::from(byte == BRACKET_PASTE_END[0])
+            };
+            if self.matched == BRACKET_PASTE_END.len() {
+                return Some(index + 1);
+            }
+        }
+        None
+    }
+}
+
 /// Focus-in report (DEC private mode 1004): `ESC [ I`.
 pub(crate) const FOCUS_GAINED_SEQ: &[u8] = b"\x1b[I";
 /// Focus-out report (DEC private mode 1004): `ESC [ O`.
@@ -516,6 +589,44 @@ pub(crate) fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_remainder_ends_after_an_end_marker_split_across_reads_and_held_bytes() {
+        let now = Instant::now();
+        let mut remainder = PasteRemainder::after(b"ab\x1b[2", now);
+        assert_eq!(remainder.end_in_read(b"0", now), None);
+        assert_eq!(remainder.end_in_read(b"1~xy", now), Some(2));
+    }
+
+    #[test]
+    fn a_paste_remainder_ends_at_an_end_marker_behind_a_broken_one() {
+        let now = Instant::now();
+        let mut remainder = PasteRemainder::after(b"", now);
+        assert_eq!(
+            remainder.end_in_read(b"\x1b[20\x1b\x1b[201~z", now),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn a_paste_remainder_ends_once_the_paste_has_gone_quiet() {
+        let now = Instant::now();
+        let mut remainder = PasteRemainder::after(b"", now);
+        let almost = now + (UNFINISHED_PASTE_WAIT / 2);
+        assert_eq!(remainder.end_in_read(b"abc", almost), None);
+        let quiet = almost + UNFINISHED_PASTE_WAIT;
+        assert_eq!(remainder.end_in_read(b"x", quiet), Some(0));
+    }
+
+    #[test]
+    fn the_last_paste_marker_says_whether_a_paste_is_open() {
+        assert_eq!(last_paste_marker_opens(b"ab"), None);
+        assert_eq!(last_paste_marker_opens(b"\x1b[200~ab"), Some(true));
+        assert_eq!(
+            last_paste_marker_opens(b"\x1b[200~a\x1b[201~b"),
+            Some(false)
+        );
+    }
 
     #[test]
     fn alt_with_a_multibyte_character_is_one_sequence() {

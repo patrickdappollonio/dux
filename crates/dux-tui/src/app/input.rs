@@ -696,6 +696,9 @@ impl RawInputDispatch {
             && app.write_into_focused_pty(&self.forward_batch)
         {
             self.forwarded.note(&self.forward_batch);
+            if let Some(opens) = crate::raw_input::last_paste_marker_opens(&self.forward_batch) {
+                app.raw_paste.program_in_paste = opens;
+            }
         }
         self.forward_batch.clear();
     }
@@ -3479,21 +3482,61 @@ impl App {
     }
 
     /// End the forwarding reader, the maximized pane's: the start of a key it
-    /// holds is dropped and a paste it is in ends, so whatever comes next
+    /// holds is dropped, and a paste it is in is closed for the program it was
+    /// going to and its rest dropped as it arrives, so whatever comes next
     /// reaches the reader that takes input then on its own.
     ///
     /// The held bytes are the start of a key typed at the program before the
     /// reader changed, most often an Alt-[ or Alt-O typed by hand, which the
-    /// reader holds until the next key; the rest of a key a read cut in two
-    /// comes with the same burst. Handed on, they would sit in front of the
-    /// next key typed at the new reader and turn it into another key, and a
-    /// held Escape would be read there as Escape. Dropped, every key typed
-    /// after the change does what it does with nothing held.
+    /// reader holds until the next key. Handed on, they would sit in front of
+    /// the next key typed at the new reader and turn it into another key, and
+    /// a held Escape would be read there as Escape. Dropped, every key typed
+    /// after the change does what it does with nothing held. The start of a
+    /// key that a read cut in two is dropped the same way, and the rest of
+    /// that key is read as keys of its own.
+    ///
+    /// For a reader that something other than a key it read stopped: a key
+    /// that stops it hands the rest of its read on instead.
     pub(super) fn end_forwarding_raw_input(&mut self) {
+        self.close_paste_for_forwarded_program();
+        if self.raw_input_parser.in_bracket_paste() {
+            let held = self.raw_input_parser.pending().to_vec();
+            self.cut_paste_off(&held);
+        }
+        self.clear_forwarding_raw_input();
+    }
+
+    /// Forget what the forwarding reader holds, keeping only whether its
+    /// program is inside a paste. Used when a key stops the reader: its read
+    /// was parsed past that key, so the parser's state is about the bytes the
+    /// key hands on, which the next reader reads whole.
+    fn clear_forwarding_raw_input(&mut self) {
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
-        self.raw_paste = super::RawPaste::default();
+        self.raw_paste = super::RawPaste {
+            program_in_paste: self.raw_paste.program_in_paste,
+            ..super::RawPaste::default()
+        };
         self.loading_input_buf.clear();
+    }
+
+    /// Send the end marker of a paste whose start marker the forwarding reader
+    /// wrote to its program, so the program stops reading what it gets next as
+    /// pasted text. It goes to that program whether or not this surface still
+    /// drives its row: it only ends what this surface's own paste opened, and a
+    /// program left inside a paste takes whatever its next driver types as
+    /// pasted text.
+    fn close_paste_for_forwarded_program(&mut self) {
+        if !std::mem::take(&mut self.raw_paste.program_in_paste) {
+            return;
+        }
+        if let Some(client) = self
+            .forwarding_reader_pty
+            .as_deref()
+            .and_then(|pty_id| self.pty_client_for(pty_id))
+        {
+            let _ = client.write_bytes(crate::raw_input::BRACKET_PASTE_END);
+        }
     }
 
     fn raw_input_target_available(&mut self) -> bool {
@@ -4233,7 +4276,10 @@ impl App {
         bytes.extend_from_slice(tail);
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
-        self.raw_paste = super::RawPaste::default();
+        self.raw_paste = super::RawPaste {
+            program_in_paste: self.raw_paste.program_in_paste,
+            ..super::RawPaste::default()
+        };
         self.terminal_input.give_back(&bytes);
     }
 
@@ -13813,7 +13859,7 @@ impl App {
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.terminal_selection = None;
-        self.end_forwarding_raw_input();
+        self.clear_forwarding_raw_input();
         let key = self.bindings.label_for(Action::ToggleFullscreen);
         if return_to_projects {
             // Same truthfulness rule as `close_top_overlay`: promise typing

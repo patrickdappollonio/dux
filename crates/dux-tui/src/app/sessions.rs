@@ -6185,6 +6185,8 @@ mod tests {
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             forwarding_reader_pty: None,
+            last_input_reader: crate::app::RunInputReader::Structured,
+            paste_remainder: None,
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
@@ -6245,6 +6247,7 @@ mod tests {
                 in_bracket: false,
                 normalize: false,
                 newlines: crate::raw_input::PasteNewlines::default(),
+                program_in_paste: false,
             },
             welcome_logo: WelcomeLogo {
                 visible: false,
