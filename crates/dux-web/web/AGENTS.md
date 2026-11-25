@@ -32,7 +32,7 @@ React, Vite and Tailwind, dark-only. Paths in `lib/`, `components/` and `hooks/`
 
 - `lib/shellLayout.ts` alone decides the phone or computer layout, read through `useIsMobile` and the `md:`/`max-md:` classes; a per-device choice from the app menu wins over detection.
 - Ask what the hardware can do with `isPhoneDevice`, never the layout.
-- The pointer decides only whether typing starts in the compose bar, and a per-device choice wins over it; detection changing moves the default only.
+- The pointer, never the layout, decides whether typing starts in the compose bar, and a per-device choice wins over it; detection changing moves the default only.
 - Theater is the one way to hide the phone's top bar; nothing else hides it.
 - In theater on a phone, a hidden tab that needs attention has no on-screen signal.
 - The floating pill carries controls that act, never status; its `⋯` is the pane's whole menu.

@@ -6101,8 +6101,9 @@ mod tests {
     }
 
     /// Give `session_id` a row in every per-session table: the pull-request
-    /// tables, the changes counter, a tab, a branch history row and a pending
-    /// worktree removal. The minted-branch rename is set by the caller.
+    /// tables, the changes counter, a tab, a branch history row, a pending
+    /// worktree removal and a pending folder removal. The minted-branch rename
+    /// is set by the caller.
     fn seed_every_session_table(store: &SessionStore, session_id: &str) {
         seed_every_pr_table(store, session_id);
         store.next_changes_rev(session_id).unwrap();
@@ -6118,7 +6119,10 @@ mod tests {
                  (session_id, label, project_id, project_path, worktree_path, source_branch, \
                   branch_name, initial_branch, branch_provenance, created_at) \
                  values ('{session_id}', 'l', '', '/p', '/w', 'main', 'b', 'b', 'minted', \
-                 '2026-01-01T00:00:00Z');"
+                 '2026-01-01T00:00:00Z'); \
+                 insert or ignore into pending_folder_removals \
+                 (session_id, label, folder_path, folder_device, folder_inode, created_at) \
+                 values ('{session_id}', 'l', '/f', 1, 2, '2026-01-01T00:00:00Z');"
             ))
             .unwrap();
     }

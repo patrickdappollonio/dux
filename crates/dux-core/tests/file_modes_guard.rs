@@ -29,6 +29,21 @@ const ALLOWED: &[(&str, &str, usize, &str)] = &[
          `CONFIG_FILE_MODE`, so the mode is still decided in file_modes.rs",
     ),
     (
+        "dux-core/src/agent_folders.rs",
+        "rustix::fs::fchmod(dir, mode | Mode::RWXU).ok()?;",
+        1,
+        "deleting a folder dux created gives a read-only directory inside it the owner's \
+         write and search bits so its entries can be removed: a deletion's need, not a \
+         mode dux keeps on a file of its own",
+    ),
+    (
+        "dux-core/src/agent_folders.rs",
+        "&& let Err(err) = rustix::fs::fchmod(dir, mode)",
+        1,
+        "a deletion that stops part way gives each directory it made writable its old mode \
+         back",
+    ),
+    (
         "dux-core/src/git.rs",
         "file.set_permissions(metadata.permissions())?;",
         1,

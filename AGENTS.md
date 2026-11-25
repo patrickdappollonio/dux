@@ -24,7 +24,7 @@ When a change conflicts with a rule here, the rule wins.
 ## User data and git
 
 - Worktrees are user data: never remove or change one without the user's explicit confirmation.
-- A standalone agent's folder that the user chose is never created, moved or removed by dux. A folder dux created for a standalone agent is removed only by a delete that asks for it, and the server refuses to remove any other.
+- A standalone agent's folder that the user chose is never created, moved or removed by dux, and a request to remove it is refused. A folder dux created for a standalone agent is removed with the agent unless the delete says to keep it, and only while the folder still holds dux's mark.
 - dux deletes only branches it created, unless the delete dialog's branch checkbox answers otherwise; with no dialog (project removal, create rollback, factory reset) the branch's recorded provenance decides.
 - Every destructive action asks first, in a dialog with Cancel focused and a destructive-styled confirm; a dialog keyed to a target closes when the target disappears.
 - Git operations are explicit and conservative; refreshing a source checkout uses `--ff-only`.
@@ -32,7 +32,7 @@ When a change conflicts with a rule here, the rule wins.
 - Git output must not depend on the user's git config: prefer plumbing (`rev-parse`, `cat-file`, `for-each-ref`, `symbolic-ref --quiet --short HEAD`), and parse `git status --porcelain=v1 -z` (never `--short`) and `--numstat -z`.
 - Where no stable form exists, override config with `-c` (`git -c color.diff=false ...`); imperative commands (`worktree add`, `branch -D`, `pull`) are judged by exit status, never by their output.
 - Diffs for display are computed in-process with `similar` and `syntect`, from `git::file_bytes_at_head()` and the working copy; never shell out to `git diff` for display.
-- Files dux keeps for itself are owner-only, decided in `crates/dux-core/src/file_modes.rs`; dux never changes the mode of user data (worktrees, the lock, user theme directories).
+- Files dux keeps for itself are owner-only, decided in `crates/dux-core/src/file_modes.rs`; dux never tightens the mode of user data (worktrees, the lock, user theme directories).
 - Commit messages are plain sentences: no conventional-commit prefixes, no trailers.
 
 ## Work and status
@@ -63,7 +63,7 @@ When a change conflicts with a rule here, the rule wins.
 
 ## Agents, tabs and terminals
 
-- An agent's workspace is a managed working copy or the user's folder (standalone); every question about it is a named method with an exhaustive match, never a `matches!` at a call site.
+- An agent's workspace is a managed working copy or a folder (standalone) that the user chose or dux created; every question about it is a named method with an exhaustive match, never a `matches!` at a call site.
 - Every git action resolves the workspace through the engine's chokepoint, which refuses with a sentence; an unclassified folder refuses every write.
 - A standalone agent has no branch features (push, pull, fork, pull requests, worktree manager, startup command, project environment): they are absent, not disabled.
 - Every background enumerator (branch sync, pull-request sync, the changes watcher) checks the workspace before enrolling an agent; nothing polls a plain folder.
