@@ -834,12 +834,127 @@ fn the_standalone_delete_dialog_chips_the_agent_and_its_folder() {
         delete_agent_prompt(
             DeleteAgentTarget::Folder {
                 folder_label: "~/notes-sa".to_string(),
+                created: None,
             },
             dux_core::engine::WorktreeOnDelete::Keep,
         ),
     );
     assert_chipped(&app, &buf, "launch-at-login");
     assert_chipped(&app, &buf, "~/notes-sa");
+}
+
+/// A folder dux created is offered for deletion in a ticked box naming it as
+/// a chip, with how many files go with it while the box is ticked.
+#[test]
+fn the_delete_dialog_offers_the_folder_dux_created_and_its_file_count() {
+    let mut app = test_app(default_bindings());
+    let prompt = |delete, count| {
+        delete_agent_prompt(
+            DeleteAgentTarget::Folder {
+                folder_label: "~/dux/agents/talk-to-me".to_string(),
+                created: Some(crate::app::CreatedFolderBox {
+                    delete,
+                    files: Some(dux_core::agent_folders::FolderFiles::Counted { count }),
+                }),
+            },
+            dux_core::engine::WorktreeOnDelete::Keep,
+        )
+    };
+    let buf = open(&mut app, prompt(true, 7));
+    assert_chipped(&app, &buf, "~/dux/agents/talk-to-me");
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(text.contains("[x] Also delete its folder"), "{text}");
+    assert!(
+        text.contains("The folder holds 7 files. They will be deleted with it."),
+        "{text}"
+    );
+    assert!(!text.contains("left untouched"), "{text}");
+    assert!(matches!(
+        app.overlay_layout.active,
+        OverlayMouseLayout::ConfirmDeleteAgent {
+            checkbox: Some(crate::app::OverlayCheckbox {
+                id: crate::app::OverlayCheckboxId::DeleteAgentFolder,
+                ..
+            }),
+            ..
+        }
+    ));
+    let buf = open(&mut app, prompt(false, 7));
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(text.contains("[ ] Also delete its folder"), "{text}");
+    assert!(!text.contains("The folder holds"), "{text}");
+}
+
+/// Confirming the dialog with its folder box ticked deletes the folder dux
+/// created; unticked, the folder stays.
+#[test]
+fn confirming_with_the_folder_box_deletes_the_folder_dux_created() {
+    for delete in [true, false] {
+        let mut app = test_app(default_bindings());
+        let root = tempfile::tempdir().expect("tempdir");
+        let created = dux_core::agent_folders::create_agent_folder(root.path(), "talk-to-me")
+            .expect("create");
+        std::fs::write(created.path.join("notes.md"), "x").expect("seed");
+        let session = &mut app.engine.sessions[0];
+        session.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: created.path.to_string_lossy().into_owned(),
+                origin: dux_core::model::FolderOrigin::CreatedByDux(created.identity),
+            });
+        let id = session.id.clone();
+        app.confirm_delete_selected_session();
+        let PromptState::ConfirmDeleteAgent { target, focus, .. } = &mut app.prompt else {
+            panic!("the delete dialog opens, got {:?}", app.prompt);
+        };
+        assert_eq!(target.folder_answer(), Some(true), "ticked when it opens");
+        if !delete {
+            *focus = DeleteAgentFocus::FolderCheckbox;
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(' '),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .expect("key");
+        }
+        app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
+        assert!(!app.engine.sessions.iter().any(|s| s.id == id));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while delete && created.path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the folder was never deleted"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !delete {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(
+                created.path.join("notes.md").exists(),
+                "an unticked box keeps the folder"
+            );
+        }
+    }
+}
+
+/// A folder the user chose has no box, so a click or a key cannot tick one.
+#[test]
+fn the_delete_dialog_offers_no_box_for_a_folder_the_user_chose() {
+    let mut app = test_app(default_bindings());
+    let buf = open(
+        &mut app,
+        delete_agent_prompt(
+            DeleteAgentTarget::Folder {
+                folder_label: "~/notes-sa".to_string(),
+                created: None,
+            },
+            dux_core::engine::WorktreeOnDelete::Keep,
+        ),
+    );
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(!text.contains("Also delete its folder"), "{text}");
+    assert!(matches!(
+        app.overlay_layout.active,
+        OverlayMouseLayout::ConfirmDeleteAgent { checkbox: None, .. }
+    ));
 }
 
 #[test]

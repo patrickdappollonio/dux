@@ -13835,7 +13835,11 @@ impl App {
     fn render_standalone_delete_prompt(&mut self, frame: &mut Frame<'_>) -> bool {
         let PromptState::ConfirmDeleteAgent {
             agent_label,
-            target: DeleteAgentTarget::Folder { folder_label },
+            target:
+                DeleteAgentTarget::Folder {
+                    folder_label,
+                    created,
+                },
             focus,
             attached,
             ..
@@ -13843,10 +13847,16 @@ impl App {
         else {
             return false;
         };
-        let (agent_label, folder_label, focus) =
-            (agent_label.clone(), folder_label.clone(), *focus);
+        let (agent_label, folder_label, focus, created) = (
+            agent_label.clone(),
+            folder_label.clone(),
+            *focus,
+            created.clone(),
+        );
         let confirm_label = guarded_confirm_label("Delete", attached);
-        let attached_lines = self.attached_section(attached, confirm_inner_width(frame.area()));
+        let inner_width = confirm_inner_width(frame.area());
+        let attached_lines = self.attached_section(attached, inner_width);
+        let muted = Style::default().fg(self.theme.hint_desc_fg);
         let mut body_lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -13855,21 +13865,73 @@ impl App {
                 Span::raw("?"),
             ]),
             Line::from(""),
-            Line::from(Span::styled(
-                " This removes dux's record of the agent only.",
-                Style::default().fg(self.theme.hint_desc_fg),
-            )),
-            Line::from(vec![
-                Span::styled(" Its folder ", Style::default().fg(self.theme.hint_desc_fg)),
-                name_chip(&folder_label, &self.theme),
-                Span::styled(
-                    " is left untouched.",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ),
-            ]),
         ];
+        // A folder dux created is said by its box; a folder the user chose is
+        // said to stay, because the question reads as though something on
+        // disk goes too.
+        if created.is_none() {
+            body_lines.push(Line::from(Span::styled(
+                " This removes dux's record of the agent only.",
+                muted,
+            )));
+            body_lines.push(Line::from(vec![
+                Span::styled(" Its folder ", muted),
+                name_chip(&folder_label, &self.theme),
+                Span::styled(" is left untouched.", muted),
+            ]));
+        }
         body_lines.extend(attached_lines);
-        self.render_delete_agent_frame(frame, body_lines, focus, &confirm_label);
+        let Some(folder_box) = created else {
+            self.render_delete_agent_frame(frame, body_lines, focus, &confirm_label);
+            return true;
+        };
+        let label = dux_core::delete_agent_prose::folder_box_label_prose(&folder_label);
+        let mark = CheckMark::from(folder_box.delete);
+        let state = CheckboxState::of(focus, DeleteAgentFocus::FolderCheckbox);
+        let checkbox_height = Checkbox::with_prose(&label, &self.theme)
+            .checked(mark)
+            .state(state)
+            .height_at(inner_width);
+        let warning_lines = folder_box
+            .files
+            .as_ref()
+            .filter(|_| folder_box.delete)
+            .and_then(dux_core::delete_agent_prose::folder_files_prose)
+            .map_or_default(|prose| {
+                self.hanging_prose_lines(
+                    &prose,
+                    Style::default().fg(self.theme.warning_fg),
+                    DELETE_AGENT_WARNING_INDENT,
+                    inner_width,
+                )
+            });
+        let warning_height = u16::try_from(warning_lines.len()).unwrap_or(u16::MAX);
+        let layout = self.render_confirm_dialog(
+            frame,
+            &ConfirmDialog {
+                title: "Delete Agent",
+                body: body_lines,
+                controls_height: checkbox_height.saturating_add(warning_height),
+                cancel: delete_agent_cancel_button(focus),
+                act: delete_agent_delete_button(focus, &confirm_label),
+                reserve_labels: &[],
+            },
+        );
+        let [box_area, warning_area] =
+            stack_rows(layout.controls, [checkbox_height, warning_height]);
+        let (rect, _) =
+            self.render_overlay_prose_checkbox(frame, box_area, &label, mark, state, None);
+        Paragraph::new(warning_lines).render(warning_area, frame.buffer_mut());
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
+            checkbox: Some(OverlayCheckbox {
+                id: OverlayCheckboxId::DeleteAgentFolder,
+                rect,
+            }),
+            branch_checkbox: None,
+            other_branches_checkbox: None,
+        };
         true
     }
 

@@ -1636,6 +1636,7 @@ mod tests {
                 dux_core::engine::WorktreeOnDelete::Keep,
                 None,
                 None,
+                None,
             )
             .is_none(),
             app.row_begin_recreate(SESSION, TabsAfterRecreate::Leave)

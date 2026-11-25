@@ -599,6 +599,11 @@ pub(crate) struct App {
     /// when the dialog opens on branches its warning would say something about,
     /// cleared by `drain_unpushed_count` when the answer lands.
     pub(crate) unpushed_count_rx: Option<mpsc::Receiver<BranchOfferAnswer>>,
+    /// The delete-agent dialog's pending count of the files in a folder dux
+    /// created, tagged with the agent it was asked for. One-shot, cleared by
+    /// `drain_folder_files` when the answer lands.
+    pub(crate) folder_files_rx:
+        Option<mpsc::Receiver<(String, dux_core::agent_folders::FolderFiles)>>,
     /// The Delete Project dialog's uncommitted-file counter, one answer per
     /// agent worktree as each lands. Set when the dialog opens, dropped (which
     /// stops it) once that dialog is no longer on screen.
@@ -3105,8 +3110,8 @@ pub(crate) enum ConfigReloadFailedFocus {
 /// A STANDALONE agent takes [`DeleteAgentTarget::Folder`], which carries no
 /// branch identity and no worktree, so the "also remove the worktree" checkbox
 /// is not merely hidden for it, there is nothing for the checkbox to be about.
-/// That is the modal half of "dux never deletes the user's folder": the offer
-/// cannot be rendered, so it cannot be ticked.
+/// Its folder box exists only for a folder dux created: a folder the user
+/// chose has no offer to render, so nothing can tick it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DeleteAgentTarget {
     /// A managed working copy dux owns.
@@ -3119,9 +3124,23 @@ pub(crate) enum DeleteAgentTarget {
         /// choice, so the checkbox is hidden and a note is shown instead.
         worktree_shared: bool,
     },
-    /// A folder the user already had. Deleting the agent removes dux's record
-    /// of it and nothing else. The label is home-collapsed for display.
-    Folder { folder_label: String },
+    /// A standalone agent's folder, home-collapsed for display. `created` is
+    /// the folder box of a folder dux created; `None` for a folder the user
+    /// chose, which deleting the agent leaves as it is.
+    Folder {
+        folder_label: String,
+        created: Option<CreatedFolderBox>,
+    },
+}
+
+/// The delete dialog's "also delete its folder" box, for a folder dux created.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CreatedFolderBox {
+    /// Whether the box is ticked. Ticked when the dialog opens.
+    pub(crate) delete: bool,
+    /// How many files the folder holds, counted off the UI thread; `None`
+    /// until the count lands.
+    pub(crate) files: Option<dux_core::agent_folders::FolderFiles>,
 }
 
 impl DeleteAgentTarget {
@@ -3154,6 +3173,30 @@ impl DeleteAgentTarget {
         worktree: dux_core::engine::WorktreeOnDelete,
     ) -> bool {
         worktree == dux_core::engine::WorktreeOnDelete::Remove && self.offers_worktree_checkbox()
+    }
+
+    /// Whether this dialog offers the "also delete its folder" checkbox: only
+    /// for a folder dux created. THE ONE ANSWER for the renderer, the focus
+    /// ring and the click handler.
+    pub(crate) fn offers_folder_checkbox(&self) -> bool {
+        match self {
+            Self::Managed { .. } | Self::Folder { created: None, .. } => false,
+            Self::Folder {
+                created: Some(_), ..
+            } => true,
+        }
+    }
+
+    /// The folder box's answer as the delete sends it: `None` where no box is
+    /// offered, which leaves a folder the user chose as it is.
+    pub(crate) fn folder_answer(&self) -> Option<bool> {
+        match self {
+            Self::Managed { .. } | Self::Folder { created: None, .. } => None,
+            Self::Folder {
+                created: Some(folder_box),
+                ..
+            } => Some(folder_box.delete),
+        }
     }
 
     /// Both branch boxes' answers as this dialog sends them, given the
@@ -3376,6 +3419,9 @@ pub(crate) enum DeleteAgentFocus {
     /// The "also delete the other branches" box, which exists only while the
     /// worktree box is ticked and the agent was on another branch.
     OtherBranchesCheckbox,
+    /// The "also delete its folder" box, which exists only for a standalone
+    /// agent whose folder dux created.
+    FolderCheckbox,
 }
 
 /// The folder browser's path-completion lookup still out, if any. The lookup
@@ -4748,6 +4794,8 @@ pub(crate) enum OverlayCheckboxId {
     DeleteAgentBranch,
     /// The delete-agent dialog's "also delete the other branches" box.
     DeleteAgentOtherBranches,
+    /// The delete-agent dialog's "also delete its folder" box.
+    DeleteAgentFolder,
     DeleteWorktreeBranch,
     /// The left-over folder delete's "also delete the branch" box.
     DeleteLeftoverFolderBranches,
@@ -5764,6 +5812,7 @@ impl App {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
+            folder_files_rx: None,
             project_worktree_files: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,

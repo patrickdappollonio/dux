@@ -315,6 +315,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         last_error_dialog_lines: 0,
         pending_first_load: None,
         unpushed_count_rx: None,
+        folder_files_rx: None,
         project_worktree_files: None,
         rename_pushed_rx: None,
         pr_clone_check_rx: None,

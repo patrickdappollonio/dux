@@ -5576,6 +5576,10 @@ impl App {
                 DeleteAgentFocus::OtherBranchesCheckbox,
                 branch_boxes && offer.others_answerable(),
             ),
+            (
+                DeleteAgentFocus::FolderCheckbox,
+                target.offers_folder_checkbox(),
+            ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
@@ -5596,6 +5600,7 @@ impl App {
                 DeleteAgentFocus::OtherBranchesCheckbox => {
                     *delete_other_branches = Some(!offer.others_ticked(*delete_other_branches));
                 }
+                DeleteAgentFocus::FolderCheckbox => toggle_folder_box(target),
                 DeleteAgentFocus::Cancel => {
                     return Some(self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel));
                 }
@@ -9625,7 +9630,7 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_delete_agent(&mut self, answer: ConfirmAnswer) -> bool {
-        let (session_id, delete_worktree, branch_answers) = match &self.prompt {
+        let (session_id, delete_worktree, branch_answers, folder_answer) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
                 session_id,
                 delete_worktree,
@@ -9647,6 +9652,7 @@ impl App {
                     *delete_branch,
                     *delete_other_branches,
                 ),
+                target.folder_answer(),
             ),
             _ => return false,
         };
@@ -9656,7 +9662,7 @@ impl App {
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
             let refused = self.guarded_by(&asked, |app| {
-                app.begin_delete_session(
+                app.begin_delete_session_with_folder(
                     &session_id,
                     if delete_worktree {
                         dux_core::engine::WorktreeOnDelete::Remove
@@ -9664,6 +9670,7 @@ impl App {
                         dux_core::engine::WorktreeOnDelete::Keep
                     },
                     branch_answers,
+                    folder_answer,
                 )
             });
             if let Some(refused) = refused {
@@ -10856,6 +10863,14 @@ impl App {
             }
             OverlayCheckboxId::DeleteAgentBranch | OverlayCheckboxId::DeleteAgentOtherBranches => {
                 self.toggle_delete_agent_branch_box(checkbox_id);
+            }
+            OverlayCheckboxId::DeleteAgentFolder => {
+                if let PromptState::ConfirmDeleteAgent { target, focus, .. } = &mut self.prompt
+                    && target.offers_folder_checkbox()
+                {
+                    toggle_folder_box(target);
+                    *focus = DeleteAgentFocus::FolderCheckbox;
+                }
             }
             OverlayCheckboxId::RecreateRestartTabs => {
                 if let PromptState::ConfirmRecreateWorkingCopy {
@@ -13889,6 +13904,16 @@ enum CompletionKey {
     NeedsCandidates(CompletionAnswer),
 }
 
+/// Flip the delete dialog's folder box, where it is offered.
+fn toggle_folder_box(target: &mut crate::app::DeleteAgentTarget) {
+    if let crate::app::DeleteAgentTarget::Folder {
+        created: Some(folder_box),
+        ..
+    } = target
+    {
+        folder_box.delete = !folder_box.delete;
+    }
+}
 #[cfg(test)]
 mod tests {
 

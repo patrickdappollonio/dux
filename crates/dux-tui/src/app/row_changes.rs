@@ -118,6 +118,7 @@ impl App {
         worktree: WorktreeOnDelete,
         delete_branch: Option<bool>,
         branches: Option<BranchAnswersWire>,
+        delete_folder: Option<bool>,
     ) -> Option<Result<EventReaction>> {
         let session_id = self.permitted_row(session_id)?;
         Some(self.engine.apply(Command::BeginDeleteSession {
@@ -125,7 +126,7 @@ impl App {
             delete_worktree: worktree == WorktreeOnDelete::Remove,
             delete_branch,
             branches,
-            delete_folder: None,
+            delete_folder,
         }))
     }
 

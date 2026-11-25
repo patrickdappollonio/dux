@@ -2633,10 +2633,20 @@ impl App {
                     folder_label: dux_core::home_path::shorten_home(std::path::Path::new(
                         &folder.folder_path,
                     )),
+                    created: session.workspace.folder_created_by_dux().then_some(
+                        crate::app::CreatedFolderBox {
+                            delete: true,
+                            files: None,
+                        },
+                    ),
                 }
             }
         };
         let offers_branches = target.offers_worktree_checkbox();
+        let counts_folder = target
+            .offers_folder_checkbox()
+            .then(|| session.folder_path().map(str::to_string))
+            .flatten();
         self.prompt = PromptState::ConfirmDeleteAgent {
             attached: Vec::new(),
             session_id: session.id.clone(),
@@ -2650,6 +2660,52 @@ impl App {
         };
         if offers_branches {
             self.spawn_branch_offer(&session.id);
+        }
+        if let Some(folder) = counts_folder {
+            self.spawn_folder_files_count(&session.id, folder);
+        }
+    }
+
+    /// Count the files in a folder dux created, off the UI thread, for the
+    /// delete dialog's warning under its folder box.
+    fn spawn_folder_files_count(&mut self, session_id: &str, folder: String) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.folder_files_rx = Some(rx);
+        let session_id = session_id.to_string();
+        std::thread::spawn(move || {
+            let files = dux_core::agent_folders::count_folder_files(std::path::Path::new(&folder));
+            let _ = tx.send((session_id, files));
+        });
+    }
+
+    /// Fold a landed file count into the delete dialog that asked for it, and
+    /// only that one: another dialog opened since is about another agent.
+    pub(crate) fn drain_folder_files(&mut self) {
+        let Some(rx) = self.folder_files_rx.as_ref() else {
+            return;
+        };
+        let (session, files) = match rx.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.folder_files_rx = None;
+                return;
+            }
+        };
+        self.folder_files_rx = None;
+        self.mark_frame_dirty();
+        if let PromptState::ConfirmDeleteAgent {
+            session_id,
+            target:
+                crate::app::DeleteAgentTarget::Folder {
+                    created: Some(folder_box),
+                    ..
+                },
+            ..
+        } = &mut self.prompt
+            && *session_id == session
+        {
+            folder_box.files = Some(files);
         }
     }
 
@@ -2729,7 +2785,7 @@ impl App {
         worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
     ) -> Result<()> {
-        self.begin_delete_session_asking(session_id, worktree, delete_branch, None);
+        self.begin_delete_session_asking(session_id, worktree, delete_branch, None, None);
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
         while self.pending_delete_ops.contains_key(session_id)
             || self.engine.pending_deletions.contains(session_id)
@@ -2815,7 +2871,19 @@ impl App {
         worktree: dux_core::engine::WorktreeOnDelete,
         branches: Option<dux_core::branch_history::BranchAnswersWire>,
     ) -> Option<dux_core::engine::Attached> {
-        self.begin_delete_session_asking(session_id, worktree, None, branches)
+        self.begin_delete_session_asking(session_id, worktree, None, branches, None)
+    }
+
+    /// [`Self::begin_delete_session`] with the folder box's answer, `None`
+    /// when the dialog offered no folder box.
+    pub(crate) fn begin_delete_session_with_folder(
+        &mut self,
+        session_id: &str,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branches: Option<dux_core::branch_history::BranchAnswersWire>,
+        delete_folder: Option<bool>,
+    ) -> Option<dux_core::engine::Attached> {
+        self.begin_delete_session_asking(session_id, worktree, None, branches, delete_folder)
     }
 
     /// [`Self::begin_delete_session`] with the older single branch answer too,
@@ -2826,8 +2894,10 @@ impl App {
         worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
         branches: Option<dux_core::branch_history::BranchAnswersWire>,
+        delete_folder: Option<bool>,
     ) -> Option<dux_core::engine::Attached> {
-        let begun = self.row_begin_delete(session_id, worktree, delete_branch, branches)?;
+        let begun =
+            self.row_begin_delete(session_id, worktree, delete_branch, branches, delete_folder)?;
         match begun {
             Ok(reaction) => self.apply_reaction(reaction),
             Err(e) => match super::attachment_presence::attached_refusal(e) {
@@ -6007,6 +6077,7 @@ mod tests {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
+            folder_files_rx: None,
             project_worktree_files: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
