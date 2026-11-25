@@ -544,6 +544,41 @@ describe("a card that changes to a step with a height of its own", () => {
     )
   }
 
+  // Steps that name the same height ask for nothing new, so the card keeps
+  // the height it had, as between two steps sized by their content.
+  it("keeps its height between two steps that name the same height", () => {
+    function SameHeight() {
+      const [step, setStep] = useState<"one" | "two">("one")
+      return (
+        <Modal
+          kind="picker"
+          open
+          onClose={() => {}}
+          title="Sample"
+          historyEntry={false}
+          step={step}
+          height="h680"
+        >
+          <button type="button" onClick={() => setStep(step === "one" ? "two" : "one")}>
+            next
+          </button>
+        </Modal>
+      )
+    }
+    const height = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.dataset.slot === "dialog-content" ? 300 : 0
+      })
+    try {
+      render(<SameHeight />)
+      fireEvent.click(screen.getByText("next"))
+      expect(popup().style.height).toBe("300px")
+    } finally {
+      height.mockRestore()
+    }
+  })
+
   it("takes that height going there and its content's coming back", () => {
     const height = vi
       .spyOn(HTMLElement.prototype, "offsetHeight", "get")

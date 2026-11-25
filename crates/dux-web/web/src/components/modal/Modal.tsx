@@ -313,11 +313,15 @@ function ModalParts(
     const stepChanged = was !== null && was.open && was.step !== step
     // On open the popup places focus itself, unless a control inside already
     // took it; that case and a change of step are placed here.
-    // Between two steps sized by their content a card keeps its height, so what
-    // is under the pointer does not jump; a step with a height token takes its own.
+    // A card keeps the height it had across a change of step, in both
+    // directions, so the list or the button under the pointer does not jump; a
+    // step with more to show scrolls inside it. A step that names a height other
+    // than the one before takes its own. The card's max-height still caps it to
+    // the window, and a resize of the window lets go of the held height so the
+    // card is measured again for the step it shows.
     if (stepChanged && !cover && popup instanceof HTMLElement) {
-      const held = height === "content" && was.height === "content" && shownHeight.current > 0
-      popup.style.height = held ? `${shownHeight.current}px` : ""
+      if (height !== was.height) popup.style.height = ""
+      else if (shownHeight.current > 0) popup.style.height = `${shownHeight.current}px`
     }
     if (!stepChanged && !popup?.contains(document.activeElement)) return
     target()?.focus({ preventScroll: true })
