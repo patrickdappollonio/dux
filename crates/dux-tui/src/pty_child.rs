@@ -100,11 +100,20 @@ pub(crate) fn wait_for_file(path: &Path, limit: Duration) {
 /// last in a child, it finds whatever it read and kept on dux's behalf, and
 /// otherwise reads nothing, because nothing more is typed.
 pub(crate) fn crossterm_kept_input() -> bool {
-    while crossterm::event::poll(Duration::ZERO).expect("poll crossterm's reader") {
+    loop {
+        match crossterm::event::poll(Duration::ZERO) {
+            Ok(true) => {}
+            Ok(false) => return false,
+            // On macOS crossterm's reader cannot watch the controlling
+            // terminal, so it never starts there and has read nothing.
+            Err(_) if cfg!(target_os = "macos") && crate::terminal_input::reads_dev_tty() => {
+                return false;
+            }
+            Err(err) => panic!("poll crossterm's reader: {err}"),
+        }
         let event = crossterm::event::read().expect("read crossterm's reader");
         if !matches!(event, crossterm::event::Event::Resize(..)) {
             return true;
         }
     }
-    false
 }

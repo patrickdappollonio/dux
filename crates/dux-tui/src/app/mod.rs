@@ -6406,7 +6406,8 @@ impl App {
     }
 
     /// Wait up to `timeout` for `terminal` to have bytes, and say whether it
-    /// does; a resize ends the wait. Once its input has ended, the answer is no.
+    /// does; a resize ends the wait. Once its input has ended, or the wait
+    /// cannot watch it, the answer is no.
     /// After a failed read, the terminal is looked at only once a wait with a
     /// timeout has passed.
     pub(crate) fn wait_for_terminal(
@@ -6423,8 +6424,8 @@ impl App {
         let waited = match (resting, wake) {
             (false, _) => input::wait_for_input_or_wake(terminal, wake, timeout)?,
             (true, Some(wake)) => input::Waited {
-                input: false,
                 woken: input::wait_for_input_or_wake(wake, None, timeout)?.input,
+                ..input::Waited::default()
             },
             (true, None) => {
                 thread::sleep(timeout);
@@ -6437,11 +6438,21 @@ impl App {
             wake.clear();
             self.sigwinch_flag.store(true, Ordering::Relaxed);
         }
-        if reading == TerminalReading::Failed {
+        let looked = if reading == TerminalReading::Failed {
             self.terminal_reading = TerminalReading::Reading;
-            return Ok(input::wait_for_input_or_wake(terminal, None, Duration::ZERO)?.input);
+            input::wait_for_input_or_wake(terminal, None, Duration::ZERO)?
+        } else {
+            waited
+        };
+        if looked.unwatchable {
+            self.terminal_reading = TerminalReading::Ended;
+            logger::warn(
+                "the terminal cannot be waited on, so dux reads no more keys; it quits on the \
+                 terminal's hang-up signal",
+            );
+            return Ok(false);
         }
-        Ok(waited.input)
+        Ok(looked.input)
     }
 
     /// One read of `terminal` into `buf`, as much as it has ready. A read of

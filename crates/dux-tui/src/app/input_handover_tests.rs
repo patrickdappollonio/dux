@@ -783,6 +783,24 @@ mod waiting {
         }
     }
 
+    /// A terminal the wait reports invalid, as macOS's `poll` reports the
+    /// controlling terminal, ends the input unread: a read could block for good.
+    #[test]
+    fn a_terminal_the_wait_cannot_watch_ends_the_input_unread() {
+        // SAFETY: no descriptor is open at this number, so the wait reports it
+        // invalid and nothing reads or closes it.
+        let unwatchable = unsafe { std::os::fd::BorrowedFd::borrow_raw(1 << 30) };
+        let mut rig = Rig::new(WINDOWED);
+        let started = Instant::now();
+        let input = rig
+            .app
+            .wait_for_terminal(unwatchable, Duration::from_secs(10))
+            .expect("wait");
+        assert!(!input, "an unwatchable terminal was taken for input");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(rig.app.terminal_reading, TerminalReading::Ended);
+    }
+
     /// A read error that does not say the terminal has gone is retried after
     /// a wait, and once the terminal reads again its input arrives.
     #[test]
@@ -1608,12 +1626,19 @@ mod real_terminal {
 
     const CHILD: &str = "app::input_handover_tests::real_terminal::child_runs_the_run_loop_s_input";
 
+    /// The child's setup that has it wait on the controlling terminal with
+    /// `select`, as macOS does, on every system.
+    const SELECT: &str = "select";
+
     #[test]
     #[ignore = "runs only as the child of a test in this module, in a pseudo-terminal"]
     fn child_runs_the_run_loop_s_input() {
         let Some(dir) = child_dir() else {
             return;
         };
+        if std::fs::read_to_string(dir.join("setup")).expect("setup file") == SELECT {
+            crate::terminal_input::SELECT_ON_EVERY_SYSTEM.store(true, Ordering::Relaxed);
+        }
         let (mut app, _serving) = app_typing_into(&dir.join("received"), WINDOWED);
         let mut handles = register_signal_handles().expect("register the signal handlers");
         app.sigwinch_flag = Arc::clone(&handles.sigwinch_flag);
@@ -1657,7 +1682,11 @@ mod real_terminal {
     /// input is `stdin`, resize it, and check where it ended and that its
     /// input poll waited. A poll that waits makes at most thirty a second.
     fn a_burst_and_a_resize_reach_the_run_loop(stdin: ChildStdin) {
-        let child = PtyChild::start_with_stdin(CHILD, "", stdin);
+        a_burst_and_a_resize_reach_the_run_loop_set_up(stdin, "");
+    }
+
+    fn a_burst_and_a_resize_reach_the_run_loop_set_up(stdin: ChildStdin, setup: &str) {
+        let child = PtyChild::start_with_stdin(CHILD, setup, stdin);
         let received = child.dir.path().join("received");
         child.type_bytes(b"ab\x07cd");
         wait_until(
@@ -1697,6 +1726,12 @@ mod real_terminal {
     #[test]
     fn the_run_loop_reads_the_terminal_when_standard_input_is_a_closed_pipe() {
         a_burst_and_a_resize_reach_the_run_loop(ChildStdin::ClosedPipe);
+    }
+
+    /// The wait macOS needs for the controlling terminal, on any system.
+    #[test]
+    fn the_run_loop_reads_the_terminal_through_select_when_standard_input_is_dev_null() {
+        a_burst_and_a_resize_reach_the_run_loop_set_up(ChildStdin::DevNull, SELECT);
     }
 
     const FORCE_REDRAW_CHILD: &str =

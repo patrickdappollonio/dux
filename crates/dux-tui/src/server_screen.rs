@@ -825,20 +825,21 @@ impl Drop for ScreenKeys {
 }
 
 /// Add one chunk `terminal` has ready to `input`, without waiting. Whether
-/// there was one.
+/// there was one; a terminal the wait cannot watch is an error, unread.
 fn read_ready_chunk(
     terminal: BorrowedFd<'_>,
     input: &mut crate::terminal_input::TerminalInput,
 ) -> std::io::Result<bool> {
-    use rustix::event::{PollFd, PollFlags, poll};
+    use crate::terminal_input::{Readiness, wait_readable};
 
     let zero = rustix::time::Timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    let mut fds = [PollFd::new(&terminal, PollFlags::IN)];
-    if crate::io_retry::retry_on_interrupt_errno(|| poll(&mut fds, Some(&zero)))? == 0 {
-        return Ok(false);
+    match crate::io_retry::retry_on_interrupt_errno(|| wait_readable([terminal], &zero))? {
+        [Readiness::Waiting] => return Ok(false),
+        [Readiness::Unwatchable] => return Err(rustix::io::Errno::BADF.into()),
+        [Readiness::Ready] => {}
     }
     let mut buf = [0u8; crate::terminal_input::READ_SIZE];
     let n = crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(terminal, &mut buf))?;

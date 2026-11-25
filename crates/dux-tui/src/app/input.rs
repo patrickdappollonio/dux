@@ -237,6 +237,8 @@ pub(super) fn terminal_is_gone(err: rustix::io::Errno) -> bool {
 pub(super) struct Waited {
     pub(super) input: bool,
     pub(super) woken: bool,
+    /// The wait cannot watch the terminal, so `input` says nothing.
+    pub(super) unwatchable: bool,
 }
 
 /// Wait up to `timeout` for `fd` to have something to read or `wake` to become
@@ -247,7 +249,7 @@ pub(super) fn wait_for_input_or_wake(
     wake: Option<std::os::fd::BorrowedFd<'_>>,
     timeout: Duration,
 ) -> rustix::io::Result<Waited> {
-    use rustix::event::{PollFd, PollFlags, poll};
+    use crate::terminal_input::{Readiness, wait_readable};
 
     let started = Instant::now();
     loop {
@@ -256,16 +258,16 @@ pub(super) fn wait_for_input_or_wake(
             tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
             tv_nsec: i64::from(left.subsec_nanos()),
         };
-        let mut fds = [
-            PollFd::new(&fd, PollFlags::IN),
-            PollFd::new(wake.as_ref().unwrap_or(&fd), PollFlags::IN),
-        ];
-        let watched = if wake.is_some() { 2 } else { 1 };
-        match poll(&mut fds[..watched], Some(&left)) {
-            Ok(_) => {
+        let waited = match wake {
+            Some(wake) => wait_readable([fd, wake], &left),
+            None => wait_readable([fd], &left).map(|[input]| [input, Readiness::Waiting]),
+        };
+        match waited {
+            Ok([input, woken]) => {
                 return Ok(Waited {
-                    input: !fds[0].revents().is_empty(),
-                    woken: watched == 2 && !fds[1].revents().is_empty(),
+                    input: input == Readiness::Ready,
+                    woken: woken != Readiness::Waiting,
+                    unwatchable: input == Readiness::Unwatchable,
                 });
             }
             Err(rustix::io::Errno::INTR) => {}

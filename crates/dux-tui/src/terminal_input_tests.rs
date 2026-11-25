@@ -6,6 +6,65 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use super::*;
 use crate::pty_child::{PtyChild, child_dir};
 
+const NO_WAIT: rustix::time::Timespec = rustix::time::Timespec {
+    tv_sec: 0,
+    tv_nsec: 0,
+};
+
+#[test]
+fn select_and_poll_see_a_pipe_alike() {
+    type Wait =
+        fn([BorrowedFd<'_>; 1], &rustix::time::Timespec) -> rustix::io::Result<[Readiness; 1]>;
+    let waits: [(&str, Wait); 2] = [("poll", poll_readable), ("select", select_readable)];
+    for (name, wait) in waits {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        assert_eq!(
+            wait([reader.as_fd()], &NO_WAIT),
+            Ok([Readiness::Waiting]),
+            "{name}"
+        );
+        rustix::io::write(&writer, b"x").expect("write");
+        assert_eq!(
+            wait([reader.as_fd()], &NO_WAIT),
+            Ok([Readiness::Ready]),
+            "{name}"
+        );
+        let mut byte = [0u8; 1];
+        rustix::io::read(&reader, &mut byte).expect("read");
+        writer
+            .shutdown(std::net::Shutdown::Write)
+            .expect("end the input");
+        assert_eq!(
+            wait([reader.as_fd()], &NO_WAIT),
+            Ok([Readiness::Ready]),
+            "{name}: ended"
+        );
+    }
+}
+
+#[test]
+fn select_takes_a_timeout_a_nanosecond_short_of_a_second() {
+    let (reader, _writer) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+    let almost = rustix::time::Timespec {
+        tv_sec: 0,
+        tv_nsec: 999_999_999,
+    };
+    assert_eq!(
+        select_readable([reader.as_fd()], &almost),
+        Ok([Readiness::Waiting])
+    );
+}
+
+#[test]
+fn poll_reports_a_descriptor_it_cannot_watch() {
+    // SAFETY: no descriptor is open at this number, so nothing is borrowed.
+    let closed = unsafe { BorrowedFd::borrow_raw(1 << 30) };
+    assert_eq!(
+        poll_readable([closed], &NO_WAIT),
+        Ok([Readiness::Unwatchable])
+    );
+}
+
 fn events_of_reads(reads: &[&[u8]]) -> Vec<Event> {
     let mut input = TerminalInput::default();
     let mut events = Vec::new();

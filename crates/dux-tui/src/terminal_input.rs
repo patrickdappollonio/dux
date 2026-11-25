@@ -8,7 +8,7 @@
 //! the events crossterm's own reader would make of them.
 
 use std::collections::VecDeque;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::{Mutex, OnceLock};
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
@@ -54,10 +54,11 @@ enum KeySource {
     ControllingTerminal(OwnedFd),
 }
 
+static SOURCE: OnceLock<KeySource> = OnceLock::new();
+
 /// The terminal every reader of dux's keys reads; standard input when neither
 /// it nor a controlling terminal can be had.
 pub(crate) fn terminal() -> BorrowedFd<'static> {
-    static SOURCE: OnceLock<KeySource> = OnceLock::new();
     let stdin = rustix::stdio::stdin();
     let source = SOURCE.get_or_init(|| {
         if rustix::termios::isatty(stdin) {
@@ -74,6 +75,118 @@ pub(crate) fn terminal() -> BorrowedFd<'static> {
     match source {
         KeySource::Stdin => stdin,
         KeySource::ControllingTerminal(tty) => tty.as_fd(),
+    }
+}
+
+/// Whether [`terminal`] opened `/dev/tty` because standard input is no terminal.
+#[cfg(test)]
+pub(crate) fn reads_dev_tty() -> bool {
+    matches!(SOURCE.get(), Some(KeySource::ControllingTerminal(_)))
+}
+
+/// Whether `fd` is the `/dev/tty` that [`terminal`] opened.
+fn is_opened_dev_tty(fd: BorrowedFd<'_>) -> bool {
+    matches!(SOURCE.get(), Some(KeySource::ControllingTerminal(tty))
+        if tty.as_raw_fd() == fd.as_raw_fd())
+}
+
+/// What a wait saw on one descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    Waiting,
+    /// A read will not block: bytes, the end of the input, or an error.
+    Ready,
+    /// The wait cannot watch it, so a read could block for good.
+    Unwatchable,
+}
+
+/// Wait up to `timeout` for any of `fds` to have something to read. A signal
+/// ends the wait with `INTR`.
+pub(crate) fn wait_readable<const N: usize>(
+    fds: [BorrowedFd<'_>; N],
+    timeout: &rustix::time::Timespec,
+) -> rustix::io::Result<[Readiness; N]> {
+    if poll_cannot_watch_dev_tty() && fds.iter().any(|fd| is_opened_dev_tty(*fd)) {
+        select_readable(fds, timeout)
+    } else {
+        poll_readable(fds, timeout)
+    }
+}
+
+/// Has [`wait_readable`] wait on the opened `/dev/tty` with `select`, as on
+/// macOS, when a pseudo-terminal child sets it.
+#[cfg(test)]
+pub(crate) static SELECT_ON_EVERY_SYSTEM: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// macOS's `poll` reports `/dev/tty` itself invalid while `select` watches
+/// it, which is how crossterm's own `/dev/tty` reader waits there.
+fn poll_cannot_watch_dev_tty() -> bool {
+    #[cfg(test)]
+    if SELECT_ON_EVERY_SYSTEM.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    cfg!(target_os = "macos")
+}
+
+fn poll_readable<const N: usize>(
+    fds: [BorrowedFd<'_>; N],
+    timeout: &rustix::time::Timespec,
+) -> rustix::io::Result<[Readiness; N]> {
+    use rustix::event::{PollFd, PollFlags, poll};
+
+    let mut polled = fds.map(|fd| PollFd::from_borrowed_fd(fd, PollFlags::IN));
+    poll(&mut polled, Some(timeout))?;
+    Ok(polled.map(|fd| {
+        let revents = fd.revents();
+        if revents.contains(PollFlags::NVAL) {
+            Readiness::Unwatchable
+        } else if revents.is_empty() {
+            Readiness::Waiting
+        } else {
+            Readiness::Ready
+        }
+    }))
+}
+
+fn select_readable<const N: usize>(
+    fds: [BorrowedFd<'_>; N],
+    timeout: &rustix::time::Timespec,
+) -> rustix::io::Result<[Readiness; N]> {
+    use rustix::event::{FdSetElement, FdSetIter, fd_set_insert, fd_set_num_elements, select};
+
+    let nfds = fds.iter().map(|fd| fd.as_raw_fd() + 1).max().unwrap_or(0);
+    let mut readable = vec![FdSetElement::default(); fd_set_num_elements(N, nfds)];
+    for fd in &fds {
+        fd_set_insert(&mut readable, fd.as_raw_fd());
+    }
+    // Whole microseconds: rounding a nanosecond count up can reach a full
+    // second of them, which `select` refuses.
+    let timeout = rustix::time::Timespec {
+        tv_sec: timeout.tv_sec,
+        tv_nsec: timeout.tv_nsec / 1000 * 1000,
+    };
+    // SAFETY: every descriptor in the set is borrowed for the whole call.
+    match unsafe { select(nfds, Some(&mut readable), None, None, Some(&timeout)) } {
+        Ok(_) => {
+            let ready: Vec<RawFd> = FdSetIter::new(&readable).collect();
+            Ok(fds.map(|fd| {
+                if ready.contains(&fd.as_raw_fd()) {
+                    Readiness::Ready
+                } else {
+                    Readiness::Waiting
+                }
+            }))
+        }
+        // `select` names no descriptor when one is invalid.
+        Err(rustix::io::Errno::BADF) => Ok(fds.map(|fd| {
+            if rustix::io::fcntl_getfd(fd).is_err() {
+                Readiness::Unwatchable
+            } else {
+                Readiness::Waiting
+            }
+        })),
+        Err(err) => Err(err),
     }
 }
 
