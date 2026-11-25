@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::agent_folders::FolderKept;
 use crate::engine::events::RemovalPlace;
 use crate::engine::{Engine, Final};
 use crate::model::DirectoryIdentity;
@@ -110,6 +111,43 @@ impl Engine {
             .map(|group| group.removal.row())
     }
 
+    /// Where the folder dux created for `session_id` is, and its mark, when
+    /// the agent's delete keeps it.
+    pub(crate) fn kept_created_folder(
+        &self,
+        session_id: &str,
+    ) -> Option<(PathBuf, Option<crate::model::FolderMark>)> {
+        if self.held_folder_removal_row(session_id).is_some() {
+            return None;
+        }
+        let session = self.sessions.iter().find(|s| s.id == session_id)?;
+        match session.workspace.folder_removal_right() {
+            crate::model::FolderRemovalRight::CreatedByDux { path, identity } => {
+                Some((PathBuf::from(path), identity.mark))
+            }
+            crate::model::FolderRemovalRight::ChosenByUser { .. }
+            | crate::model::FolderRemovalRight::NotAFolder => None,
+        }
+    }
+
+    /// Let go of a folder dux created and keeps, on a worker.
+    pub(crate) fn let_go_of_created_folder(
+        &mut self,
+        path: PathBuf,
+        mark: Option<crate::model::FolderMark>,
+    ) {
+        let spawned = super::spawn_worker::spawn_engine_thread("dux-folder-let-go", move || {
+            crate::agent_folders::let_go(&path, mark);
+        });
+        self.removal_workers.retain(|worker| !worker.is_finished());
+        match spawned {
+            Ok(handle) => self.removal_workers.push(handle),
+            Err(err) => crate::logger::warn(&format!(
+                "could not start the work that removes a kept folder's marker file: {err}"
+            )),
+        }
+    }
+
     /// The deletion of `session_id`'s record has ended: when the record is
     /// gone the held removal waits only for the agent's processes; when it is
     /// not, the removal is let go and the folder stays with its agent.
@@ -206,7 +244,8 @@ impl Engine {
 
     /// Delete the folder on a worker, with a busy status and a final. A folder
     /// anything is found in, or that is no longer the one dux created, is kept,
-    /// with a warning saying why.
+    /// with a warning saying why, and dux lets go of a folder it created and
+    /// keeps (see [`crate::agent_folders::let_go`]). Nothing is tried again.
     fn dispatch_created_folder_removal(
         &mut self,
         removal: CreatedFolderRemoval,
@@ -217,18 +256,13 @@ impl Engine {
         let pending = self.begin_status_op(&op);
         let _ = self.worker_tx.send(WorkerEvent::PollerStatus(pending));
         // The PTYs dux runs and the creates under way are known only here.
-        if let Some(occupant) = self.folder_occupant(
-            &removal.path,
-            Some(&removal.session_id),
-            crate::engine::StoppingProcesses::Occupy,
-        ) {
-            self.forget_pending_folder_removal(&removal.session_id);
-            drop(claim);
-            let _ = self.worker_tx.send(WorkerEvent::StatusOpCompleted {
-                resolved: op.resolve(&Err(occupant.reason())),
-            });
-            return;
-        }
+        let occupant = self
+            .folder_occupant(
+                &removal.path,
+                Some(&removal.session_id),
+                crate::engine::StoppingProcesses::Occupy,
+            )
+            .map(|occupant| occupant.reason());
         let key = op.status_key().to_string();
         let tx = self.worker_tx.clone();
         let inputs = FolderRemovalInputs {
@@ -246,7 +280,14 @@ impl Engine {
         let (unstarted, unstarted_path) = (session_id.clone(), path.clone());
         let spawned = super::spawn_worker::spawn_engine_thread("dux-folder-remove", move || {
             let db_path = inputs.db_path.clone();
-            let result = perform_created_folder_removal(&session_id, &path, identity, inputs);
+            let joined = matches!(inputs.claim, crate::worktree_ops::RemovalClaim::Join(_));
+            let result = match occupant {
+                Some(reason) => Err(FolderKept::untouched(reason)),
+                None => perform_created_folder_removal(&session_id, &path, identity, inputs),
+            };
+            if result.is_err() && !joined {
+                crate::agent_folders::let_go(&path, identity.mark);
+            }
             forget_pending_folder_removal_in(&db_path, &session_id);
             let _ = tx.send(WorkerEvent::StatusOpCompleted {
                 resolved: op.resolve(&result),
@@ -264,9 +305,9 @@ impl Engine {
                         kept_final(
                             &label,
                             &unstarted_path,
-                            &format!(
+                            &FolderKept::untouched(format!(
                                 "dux could not start the background work that deletes it ({err})"
-                            ),
+                            )),
                         ),
                     ),
                 });
@@ -288,7 +329,7 @@ enum Resumed {
 fn folder_removal_op(
     removal: &CreatedFolderRemoval,
     resumed: Resumed,
-) -> crate::engine::StatusOp<crate::agent_folders::RemovedFolder, String> {
+) -> crate::engine::StatusOp<crate::agent_folders::RemovedFolder, FolderKept> {
     let shown = crate::home_path::shorten_home(&removal.path);
     let label = removal.label.clone();
     let (success_label, success_path) = (label.clone(), shown.clone());
@@ -322,19 +363,32 @@ fn folder_removal_op(
             ]),
         },
     )
-    .on_failure(move |reason: &String| kept_final(&failure_label, &failure_path, reason))
+    .on_failure(move |kept: &FolderKept| kept_final(&failure_label, &failure_path, kept))
 }
 
-/// The final for a folder that was kept, saying why.
-fn kept_final(label: &str, path: &Path, reason: &str) -> Final {
+/// The final for a folder that was kept, in whole or in part, saying why.
+fn kept_final(label: &str, path: &Path, kept: &FolderKept) -> Final {
+    let (opening, closing) = if kept.deleted_some {
+        (
+            "Deleted only part of the folder ",
+            ". Delete the rest yourself if you no longer need it.",
+        )
+    } else {
+        (
+            "Kept the folder ",
+            ". Delete it yourself if you no longer need it.",
+        )
+    };
     // STICKY: a folder the user asked to delete is still on disk, and only
     // they can deal with it.
     Final::warning(crate::status_text![
-        "Kept the folder ",
+        opening,
         q(crate::home_path::shorten_home(path)),
         " that dux created for deleted agent ",
         q(label.to_string()),
-        format!(": {reason}. Delete it yourself if you no longer need it.")
+        ": ",
+        kept.reason.clone(),
+        closing
     ])
     .sticky()
 }
@@ -358,7 +412,7 @@ fn perform_created_folder_removal(
     folder: &Path,
     identity: DirectoryIdentity,
     inputs: FolderRemovalInputs,
-) -> Result<crate::agent_folders::RemovedFolder, String> {
+) -> Result<crate::agent_folders::RemovedFolder, FolderKept> {
     use std::panic::AssertUnwindSafe;
     let FolderRemovalInputs {
         claim,
@@ -373,7 +427,7 @@ fn perform_created_folder_removal(
         let leading = match claim {
             crate::worktree_ops::RemovalClaim::Lead(leading) => lease.insert(leading),
             crate::worktree_ops::RemovalClaim::Join(_) => {
-                return Err("dux is already deleting it".to_string());
+                return Err(FolderKept::untouched("dux is already deleting it"));
             }
         };
         if let Some(reason) = super::events::standalone_processes_keep_in(
@@ -381,7 +435,7 @@ fn perform_created_folder_removal(
             &folder_text,
             RemovalPlace::CreatedFolder,
         ) {
-            return Err(reason);
+            return Err(reason.into());
         }
         if let Some(reason) = super::events::cwd_keeps_in(
             &registry,
@@ -389,7 +443,7 @@ fn perform_created_folder_removal(
             &nothing_ended,
             RemovalPlace::CreatedFolder,
         ) {
-            return Err(reason);
+            return Err(reason.into());
         }
         let leading: &crate::worktree_ops::RemovalLease = leading;
         super::events::wait_then_last_look_in(
@@ -417,15 +471,16 @@ fn perform_created_folder_removal(
         crate::logger::error(&format!(
             "the folder removal of deleted agent {session_id} panicked: {reason}"
         ));
-        Err(format!(
+        Err(FolderKept::untouched(format!(
             "the work that deletes it stopped unexpectedly ({reason})"
-        ))
+        )))
     });
     if let Some(lease) = lease {
         lease.finish(
             result
                 .clone()
-                .map(|_| crate::engine::RemovedBranches::Outcomes(Vec::new())),
+                .map(|_| crate::engine::RemovedBranches::Outcomes(Vec::new()))
+                .map_err(|kept| kept.reason.message().to_string()),
         );
     }
     result

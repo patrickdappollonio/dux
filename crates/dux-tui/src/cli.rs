@@ -1169,8 +1169,14 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
 
     // The folders dux created for standalone agents go with the reset, as the
     // worktrees it created do; a folder the user chose stays.
-    let created_folders =
-        created_folders_reset_removes(&sessions, &pending_folders, &project_records, report);
+    let mut kept_folders = Vec::new();
+    let created_folders = created_folders_reset_removes(
+        &sessions,
+        &pending_folders,
+        &project_records,
+        &mut kept_folders,
+        report,
+    );
     // Nothing is deleted until everything dux started has stopped and one last
     // look finds nothing left in the way.
     let mut removing = folders_reset_removes(paths, &sessions, &occupied_folders);
@@ -1197,7 +1203,7 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         }
     }
     report.say(format_args!("{}", removed_worktrees_line(removed.len())));
-    remove_created_folders(&created_folders, report);
+    remove_created_folders(&created_folders, &mut kept_folders, report);
 
     // What the loop above could not account for goes with the root, except a folder
     // a standalone agent occupies; it stops at the first entry it cannot remove.
@@ -1210,6 +1216,10 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     )?;
     delete_branches_kept_with_leftovers(&kept_with_leftovers, report);
     remove_file_with_message(&paths.sessions_db_path, report)?;
+    // No record names them any more, so they are the person's.
+    for (path, mark) in &kept_folders {
+        dux_core::agent_folders::let_go(path, *mark);
+    }
     // The welcome screen was already seen, and a reset does not make it new
     // again: the fresh database starts with that one record.
     if let Some(version) = seen_welcome {
@@ -1230,11 +1240,12 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
 /// not finished, with the identity each had when dux created it. A folder that
 /// another agent's folder or a project's repository is, or is inside, is kept
 /// with a warning saying why, decided by the occupancy rule an agent delete
-/// asks.
+/// asks, and added to `kept`.
 fn created_folders_reset_removes(
     sessions: &[dux_core::model::AgentSession],
     pending: &[dux_core::storage::PendingFolderRemoval],
     projects: &[(String, String)],
+    kept: &mut Vec<(PathBuf, Option<dux_core::model::FolderMark>)>,
     report: &mut ResetReport,
 ) -> Vec<(PathBuf, dux_core::model::DirectoryIdentity)> {
     let recorded =
@@ -1257,10 +1268,13 @@ fn created_folders_reset_removes(
     let mut removing = Vec::new();
     for (owner, path, identity) in recorded.chain(deleted) {
         match dux_core::engine::created_folder_occupant(&path, owner, sessions, projects) {
-            Some(reason) => report.warn(format_args!(
-                "warning: kept the standalone agent folder {}: {reason}",
-                path.display()
-            )),
+            Some(reason) => {
+                report.warn(format_args!(
+                    "warning: kept the standalone agent folder {}: {reason}",
+                    path.display()
+                ));
+                kept.push((path, identity.mark));
+            }
             None => removing.push((path, identity)),
         }
     }
@@ -1268,20 +1282,30 @@ fn created_folders_reset_removes(
 }
 
 /// Delete the folders dux created for standalone agents, each only while it
-/// is still the directory dux created. A folder that cannot be deleted is a
-/// warning and the reset goes on.
+/// is still the directory dux created. A folder that cannot be deleted, in
+/// whole or in part, is a warning, is added to `kept`, and the reset goes on.
 fn remove_created_folders(
     folders: &[(PathBuf, dux_core::model::DirectoryIdentity)],
+    kept: &mut Vec<(PathBuf, Option<dux_core::model::FolderMark>)>,
     report: &mut ResetReport,
 ) {
     let mut removed = 0_usize;
     for (path, identity) in folders {
         match dux_core::agent_folders::remove_created_folder(path, *identity) {
             Ok(_) => removed += 1,
-            Err(reason) => report.warn(format_args!(
-                "warning: kept the standalone agent folder {}: {reason}",
-                path.display()
-            )),
+            Err(folder_kept) => {
+                report.warn(format_args!(
+                    "warning: {} the standalone agent folder {}: {}",
+                    if folder_kept.deleted_some {
+                        "deleted only part of"
+                    } else {
+                        "kept"
+                    },
+                    path.display(),
+                    folder_kept.reason.message()
+                ));
+                kept.push((path.clone(), identity.mark));
+            }
         }
     }
     report.say(format_args!(
@@ -2629,6 +2653,13 @@ mod tests {
         assert_eq!(
             fs::read_to_string(created.path.join("notes.txt")).expect("kept"),
             "project work\n"
+        );
+        assert!(
+            !created
+                .path
+                .join(dux_core::agent_folders::MARKER_FILE_NAME)
+                .exists(),
+            "a folder the reset keeps is let go of"
         );
     }
 

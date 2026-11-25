@@ -253,8 +253,8 @@ Some things to know:
   one is removed when dux still has a record of it: its agent's, or a deletion with the
   agent that had not finished. It goes only while it is still the folder dux created (its
   hidden `.dux-agent-folder` file still holds the mark dux wrote there) and no other
-  agent's folder or project is in it; otherwise it is kept with a warning saying why, and
-  the reset goes on. A folder you kept when you deleted its agent is no longer recorded,
+  agent's folder or project is in it; otherwise it is kept with a warning saying why, its
+  hidden file is removed, and the reset goes on. A folder you kept when you deleted its agent is no longer recorded,
   and stays.
 - **Branches kept with a left-over folder go too,** when dux created them and they still
   point where they did when the folder was left behind. A branch that existed before its

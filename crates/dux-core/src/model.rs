@@ -794,7 +794,7 @@ pub enum FolderOrigin {
     Chosen,
     /// A folder dux created for this agent, with the identity the directory
     /// had when dux created it. dux removes it only while the directory at
-    /// that path still has this identity.
+    /// that path still holds this identity's mark.
     CreatedByDux(DirectoryIdentity),
 }
 
@@ -808,9 +808,11 @@ impl FolderOrigin {
     }
 }
 
-/// What tells the directory dux created apart from anything later put at the
-/// same path: its device and inode numbers, which a filesystem reuses, and the
-/// random mark in its marker file (see [`crate::agent_folders::MARKER_FILE_NAME`]).
+/// The directory dux created: its device and inode numbers when it was
+/// created, and the random mark in its marker file (see
+/// [`crate::agent_folders::MARKER_FILE_NAME`]). The mark alone decides whether
+/// a directory is the one dux created; the numbers change across a reboot or
+/// a restore from backup, and are only recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectoryIdentity {
     /// The device the directory is on.

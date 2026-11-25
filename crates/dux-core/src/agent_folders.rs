@@ -4,16 +4,20 @@
 //! Creating one refuses a name that is already taken, atomically, and records
 //! the new directory's identity: its device and inode numbers and a random
 //! mark written into a marker file inside it. Removing one deletes it only
-//! while the directory at its path still has all three, reached without
-//! following a symbolic link anywhere inside it. Every function here touches
-//! the filesystem and belongs on a worker or a blocking pool.
+//! while the directory at its path still holds that mark, reached without
+//! following a symbolic link and without entering another filesystem. Every
+//! function here touches the filesystem and belongs on a worker or a blocking
+//! pool.
 
 use std::io::{Read as _, Write as _};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
+use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 
 use crate::model::{DirectoryIdentity, FolderMark};
+use crate::status_text::StatusText;
 
 /// The hidden file dux writes into a folder it creates, holding the folder's
 /// mark. Deleting the agent deletes the folder only while this file is there
@@ -30,6 +34,9 @@ const MARK_PREFIX: &str = "mark: ";
 
 /// The most of a marker file dux reads.
 const MARKER_READ_LIMIT: u64 = 4096;
+
+/// The name a fresh marker file is written under before it replaces the old.
+const MARKER_SWAP_NAME: &str = ".dux-agent-folder.new";
 
 /// The name of the folder a new standalone agent called `agent_name` gets:
 /// the name with every `/` turned into `-`, so the folder sits directly in the
@@ -57,6 +64,8 @@ pub struct CreatedAgentFolder {
 pub enum CreateAgentFolderError {
     /// Something is already at the folder's path, so nothing was created.
     AlreadyThere(PathBuf),
+    /// Another operation holds the folder's path; the text says which.
+    Held(StatusText),
     /// The folder could not be created; the text says why.
     Failed {
         /// The folder that was to be created.
@@ -66,21 +75,61 @@ pub enum CreateAgentFolderError {
     },
 }
 
+/// What a create asks the rest of dux about the folder's path.
+pub struct CreateChecks<'a> {
+    /// Hold the path for this create before anything at it is touched, or
+    /// say why it cannot be held.
+    pub hold: &'a dyn Fn(&Path) -> Result<(), StatusText>,
+    /// Whether nothing but this create holds the folder at the path or works
+    /// in it.
+    pub unused: &'a dyn Fn(&Path) -> bool,
+}
+
+impl std::fmt::Debug for CreateChecks<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateChecks").finish_non_exhaustive()
+    }
+}
+
+/// [`create_agent_folder_with`] with no hold, never taking over a folder an
+/// earlier create left.
+///
+/// # Errors
+///
+/// As [`create_agent_folder_with`].
+pub fn create_agent_folder(
+    root: &Path,
+    agent_name: &str,
+) -> Result<CreatedAgentFolder, CreateAgentFolderError> {
+    create_agent_folder_with(
+        root,
+        agent_name,
+        &CreateChecks {
+            hold: &|_| Ok(()),
+            unused: &|_| false,
+        },
+    )
+}
+
 /// Create the folder for a new standalone agent called `agent_name` inside
 /// `root`, creating `root` first when it is missing.
 ///
 /// The folder itself is created with one `mkdirat` relative to the opened
 /// agents folder, so a folder that is already there, or one created by anyone
-/// else at the same moment, is refused rather than shared.
+/// else at the same moment, is refused rather than shared. The one exception
+/// is a folder an earlier create made and left before any agent was recorded
+/// in it (see [`take_over_left_folder`]).
 ///
 /// # Errors
 ///
-/// [`CreateAgentFolderError::AlreadyThere`] when the name is taken, and
+/// [`CreateAgentFolderError::AlreadyThere`] when the name is taken,
+/// [`CreateAgentFolderError::Held`] when `checks` cannot hold the path, and
 /// [`CreateAgentFolderError::Failed`] when the agents folder or the new folder
 /// cannot be created or read.
-pub fn create_agent_folder(
+pub fn create_agent_folder_with(
     root: &Path,
     agent_name: &str,
+    checks: &CreateChecks<'_>,
 ) -> Result<CreatedAgentFolder, CreateAgentFolderError> {
     let name = folder_name_for(agent_name);
     let failed = |path: &Path, reason: String| CreateAgentFolderError::Failed {
@@ -103,9 +152,15 @@ pub fn create_agent_folder(
         Mode::empty(),
     )
     .map_err(|err| failed(&path, err.to_string()))?;
+    (checks.hold)(&path).map_err(CreateAgentFolderError::Held)?;
     match rustix::fs::mkdirat(&root_fd, name.as_str(), Mode::from_bits_truncate(0o777)) {
         Ok(()) => {}
-        Err(rustix::io::Errno::EXIST) => return Err(CreateAgentFolderError::AlreadyThere(path)),
+        Err(rustix::io::Errno::EXIST) => {
+            return match take_over_left_folder(&root_fd, name.as_str(), &path, checks.unused) {
+                Some(identity) => Ok(CreatedAgentFolder { path, identity }),
+                None => Err(CreateAgentFolderError::AlreadyThere(path)),
+            };
+        }
         Err(err) => return Err(failed(&path, err.to_string())),
     }
     match mark_new_folder(&root_fd, name.as_str()) {
@@ -141,19 +196,72 @@ fn mark_new_folder(
         Mode::empty(),
     )?;
     let stat = rustix::fs::fstat(&dir)?;
+    let mark = write_marker(&dir, MARKER_FILE_NAME)?;
+    Ok(DirectoryIdentity {
+        mark: Some(mark),
+        ..numbers_of(&stat)
+    })
+}
+
+/// Write a marker file called `file_name` with a fresh mark into `dir`.
+fn write_marker(dir: &OwnedFd, file_name: &str) -> std::io::Result<FolderMark> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|err| std::io::Error::other(err.to_string()))?;
     let mark = FolderMark(bytes);
     let marker = rustix::fs::openat(
-        &dir,
-        MARKER_FILE_NAME,
+        dir,
+        file_name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_bits_truncate(0o644),
     )?;
     let mut marker = std::fs::File::from(marker);
     marker.write_all(format!("{MARKER_TEXT}{MARK_PREFIX}{}\n", mark.to_hex()).as_bytes())?;
     marker.sync_all()?;
-    Ok(DirectoryIdentity {
+    Ok(mark)
+}
+
+/// Take over a folder of this user's holding only a marked marker file, left
+/// by a create that never recorded its agent; the fresh mark makes a removal
+/// still holding the old one keep it.
+fn take_over_left_folder(
+    root_fd: &OwnedFd,
+    name: &str,
+    path: &Path,
+    unused: &dyn Fn(&Path) -> bool,
+) -> Option<DirectoryIdentity> {
+    let dir = rustix::fs::openat(
+        root_fd,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let stat = rustix::fs::fstat(&dir).ok()?;
+    if stat.st_uid != rustix::process::geteuid().as_raw()
+        || filesystem_of(&dir).ok()? != filesystem_of(root_fd).ok()?
+    {
+        return None;
+    }
+    let names = entry_names(&dir).ok()?;
+    if names.len() != 1 || names[0].to_bytes() != MARKER_FILE_NAME.as_bytes() {
+        return None;
+    }
+    let MarkerFile::Holds(Some(_)) = read_marker(&dir) else {
+        return None;
+    };
+    if !unused(path) {
+        return None;
+    }
+    let mark = write_marker(&dir, MARKER_SWAP_NAME).ok()?;
+    if rustix::fs::renameat(&dir, MARKER_SWAP_NAME, &dir, MARKER_FILE_NAME).is_err() {
+        let _ = rustix::fs::unlinkat(&dir, MARKER_SWAP_NAME, AtFlags::empty());
+        return None;
+    }
+    crate::logger::info(&format!(
+        "took over the folder {}, which an earlier create left holding only its marker file",
+        path.display()
+    ));
+    Some(DirectoryIdentity {
         mark: Some(mark),
         ..numbers_of(&stat)
     })
@@ -161,7 +269,8 @@ fn mark_new_folder(
 
 /// Remove a folder dux created moments ago for an agent that never came up,
 /// while it still holds nothing but its marker file and is still the folder
-/// dux created. A folder anything was written into is kept.
+/// dux created. A folder anything was written into is kept and let go of,
+/// as [`let_go`] does.
 pub fn remove_if_unused(path: &Path, identity: DirectoryIdentity) {
     let kept = |why: &str| {
         crate::logger::warn(&format!(
@@ -169,7 +278,7 @@ pub fn remove_if_unused(path: &Path, identity: DirectoryIdentity) {
             path.display()
         ));
     };
-    let opened = match open_created_folder(path, identity) {
+    let opened = match open_created_folder(path, identity.mark, &|_, dir| filesystem_of(dir)) {
         Ok(Some(opened)) => opened,
         Ok(None) => return,
         Err(why) => return kept(&why),
@@ -179,7 +288,17 @@ pub fn remove_if_unused(path: &Path, identity: DirectoryIdentity) {
             if names
                 .iter()
                 .all(|n| n.to_bytes() == MARKER_FILE_NAME.as_bytes()) => {}
-        Ok(_) => return kept("something was written into it"),
+        Ok(_) => {
+            kept("something was written into it, so it is no longer dux's to delete");
+            if let Err(err) = ignore_missing(rustix::fs::unlinkat(
+                &opened.dir,
+                MARKER_FILE_NAME,
+                AtFlags::empty(),
+            )) {
+                kept(&format!("its marker file could not be removed ({err})"));
+            }
+            return;
+        }
         Err(err) => return kept(&err.to_string()),
     }
     let removed = ignore_missing(rustix::fs::unlinkat(
@@ -208,51 +327,203 @@ pub enum RemovedFolder {
     AlreadyGone,
 }
 
+/// Why a folder dux created was kept, in whole or in part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderKept {
+    /// Whether anything in it was deleted before dux stopped.
+    pub deleted_some: bool,
+    /// Why, as the end of a sentence about the folder.
+    pub reason: StatusText,
+}
+
+impl FolderKept {
+    /// Kept whole, for `reason`.
+    pub fn untouched(reason: impl Into<StatusText>) -> Self {
+        Self {
+            deleted_some: false,
+            reason: reason.into(),
+        }
+    }
+
+    /// The deletion of `folder` stopped at `stop`.
+    fn stopped(folder: &Path, stop: &Stopped, deleted_some: bool) -> Self {
+        let why = match stop.why {
+            StopWhy::Mounted => {
+                "another filesystem is mounted there, and dux never deletes inside one".to_string()
+            }
+            StopWhy::Failed(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => {
+                "dux does not have permission to delete it".to_string()
+            }
+            StopWhy::Failed(rustix::io::Errno::NOTEMPTY) => {
+                "something was written into it while dux was deleting".to_string()
+            }
+            StopWhy::Failed(err) => format!("of an error ({err})"),
+        };
+        let reason = if stop.at.as_os_str().is_empty() {
+            crate::status_text![format!(
+                "everything in it was deleted but the folder itself was not, because {why}"
+            )]
+        } else if deleted_some {
+            let left = match count_folder_files(folder) {
+                FolderFiles::Counted { count: 0 } => "no files are left in it".to_string(),
+                FolderFiles::Counted { count: 1 } => "1 file is still in it".to_string(),
+                FolderFiles::Counted { count } => format!("{count} files are still in it"),
+                FolderFiles::Missing => "nothing is left at its path".to_string(),
+                FolderFiles::Unreadable => "dux could not count what is still in it".to_string(),
+            };
+            crate::status_text![
+                "it stopped at ",
+                q(stop.at.display()),
+                format!(", because {why}, and {left}")
+            ]
+        } else {
+            crate::status_text![
+                "dux could not delete ",
+                q(stop.at.display()),
+                format!(", because {why}, so nothing in it was deleted")
+            ]
+        };
+        Self {
+            deleted_some,
+            reason,
+        }
+    }
+}
+
+impl From<String> for FolderKept {
+    fn from(reason: String) -> Self {
+        Self::untouched(reason)
+    }
+}
+
 /// Delete the folder dux created at `path`, and everything in it, while the
-/// directory there still has `identity`, mark included; no symbolic link is
-/// followed. The marker file goes last, so a deletion that stops part way
-/// leaves a folder dux still recognises.
+/// directory there still holds `identity`'s mark. No symbolic link is
+/// followed and no other filesystem is entered, and a read-only directory of
+/// this user's inside it is made writable first. The marker file goes last.
 ///
 /// # Errors
 ///
-/// The sentence fragment saying why the folder was kept, or what stopped the
-/// deletion part way through.
+/// Why the folder was kept, or where the deletion stopped and what is left.
 pub fn remove_created_folder(
     path: &Path,
     identity: DirectoryIdentity,
-) -> Result<RemovedFolder, String> {
-    let Some(opened) = open_created_folder(path, identity)? else {
+) -> Result<RemovedFolder, FolderKept> {
+    remove_created_folder_with(path, identity, &|_, dir| filesystem_of(dir))
+}
+
+/// [`remove_created_folder`], asking `filesystem_of` where each directory is,
+/// by its path inside the folder (`..` for the folder it is in).
+fn remove_created_folder_with(
+    path: &Path,
+    identity: DirectoryIdentity,
+    filesystem_of: FilesystemOf<'_>,
+) -> Result<RemovedFolder, FolderKept> {
+    let Some(opened) = open_created_folder(path, identity.mark, filesystem_of)? else {
         return Ok(RemovedFolder::AlreadyGone);
     };
-    remove_contents(&opened.dir, Some(MARKER_FILE_NAME))
-        .map_err(|err| format!("deleting what it holds stopped part way ({err})"))?;
+    let walk = Walk {
+        filesystem: opened.filesystem,
+        filesystem_of,
+        uid: rustix::process::geteuid().as_raw(),
+        deleted_some: std::cell::Cell::new(false),
+    };
+    walk.make_writable(&opened.dir);
+    let stopped = |stop: Stopped| FolderKept::stopped(path, &stop, walk.deleted_some.get());
+    walk.remove_contents(&opened.dir, Path::new(""), Some(MARKER_FILE_NAME))
+        .map_err(stopped)?;
     ignore_missing(rustix::fs::unlinkat(
         &opened.dir,
         MARKER_FILE_NAME,
         AtFlags::empty(),
     ))
-    .map_err(|err| format!("deleting what it holds stopped part way ({err})"))?;
+    .map_err(|err| {
+        stopped(Stopped {
+            at: PathBuf::from(MARKER_FILE_NAME),
+            why: StopWhy::Failed(err),
+        })
+    })?;
+    walk.deleted_some.set(true);
     match rustix::fs::unlinkat(&opened.parent, opened.name.as_os_str(), AtFlags::REMOVEDIR) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(RemovedFolder::Removed),
-        Err(err) => Err(format!(
-            "its contents were deleted but the folder itself was not ({err}); something may \
-             have written into it meanwhile"
-        )),
+        Err(err) => Err(stopped(Stopped {
+            at: PathBuf::new(),
+            why: StopWhy::Failed(err),
+        })),
     }
+}
+
+/// Let go of the folder dux created at `path`: remove its marker file while
+/// it still holds `mark`, so nothing in the folder says dux may delete it.
+/// From then on the folder is the person's. A failure is logged.
+pub fn let_go(path: &Path, mark: Option<FolderMark>) {
+    let opened = match open_created_folder(path, mark, &|_, dir| filesystem_of(dir)) {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return,
+        Err(why) => {
+            crate::logger::info(&format!(
+                "left the marker file of {} as it is: {why}",
+                path.display()
+            ));
+            return;
+        }
+    };
+    if let Err(err) = ignore_missing(rustix::fs::unlinkat(
+        &opened.dir,
+        MARKER_FILE_NAME,
+        AtFlags::empty(),
+    )) {
+        crate::logger::warn(&format!(
+            "could not remove the marker file of {}, which dux no longer looks after: {err}",
+            path.display()
+        ));
+    }
+}
+
+/// The filesystem a directory is on: its device and, where the system says,
+/// the mount it belongs to, which tells a bind mount of the same device apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Filesystem {
+    device: u64,
+    mount: Option<u64>,
+}
+
+/// Which filesystem the opened directory at a path inside the folder is on.
+type FilesystemOf<'a> = &'a dyn Fn(&Path, &OwnedFd) -> rustix::io::Result<Filesystem>;
+
+fn filesystem_of(dir: &OwnedFd) -> rustix::io::Result<Filesystem> {
+    Ok(Filesystem {
+        device: numbers_of(&rustix::fs::fstat(dir)?).device,
+        mount: mount_id(dir),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn mount_id(dir: &OwnedFd) -> Option<u64> {
+    let found =
+        rustix::fs::statx(dir, "", AtFlags::EMPTY_PATH, rustix::fs::StatxFlags::MNT_ID).ok()?;
+    (found.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() != 0).then_some(found.stx_mnt_id)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mount_id(_dir: &OwnedFd) -> Option<u64> {
+    None
 }
 
 /// The folder dux created, opened and checked, and the folder it is in.
 struct OpenedFolder {
-    parent: rustix::fd::OwnedFd,
-    dir: rustix::fd::OwnedFd,
+    parent: OwnedFd,
+    dir: OwnedFd,
     name: std::ffi::OsString,
+    filesystem: Filesystem,
 }
 
 /// Open the folder at `path` without following a link anywhere, and check it
-/// is the directory dux created. `None` when nothing is there any more.
+/// is the directory dux created: a directory holding `mark`, on the same
+/// filesystem as the folder it is in. `None` when nothing is there any more.
 fn open_created_folder(
     path: &Path,
-    identity: DirectoryIdentity,
+    mark: Option<FolderMark>,
+    filesystem_of: FilesystemOf<'_>,
 ) -> Result<Option<OpenedFolder>, String> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return Err("its path does not name a folder inside another one".to_string());
@@ -280,7 +551,7 @@ fn open_created_folder(
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(err) => return Err(format!("dux could not read it ({err})")),
     };
-    check_numbers(&stat, identity)?;
+    check_is_directory(&stat)?;
     let dir_fd = rustix::fs::openat(
         &parent_fd,
         name,
@@ -290,18 +561,25 @@ fn open_created_folder(
     .map_err(|err| format!("dux could not open it ({err})"))?;
     let opened =
         rustix::fs::fstat(&dir_fd).map_err(|err| format!("dux could not read it ({err})"))?;
-    check_numbers(&opened, identity)?;
-    check_mark(&dir_fd, identity.mark)?;
+    check_is_directory(&opened)?;
+    check_mark(&dir_fd, mark)?;
+    let unreadable = |err| format!("dux could not tell which filesystem it is on ({err})");
+    let filesystem = filesystem_of(Path::new(""), &dir_fd).map_err(unreadable)?;
+    if filesystem_of(Path::new(".."), &parent_fd).map_err(unreadable)? != filesystem {
+        return Err(
+            "another filesystem is mounted on it, and dux never deletes inside one".to_string(),
+        );
+    }
     Ok(Some(OpenedFolder {
         parent: parent_fd,
         dir: dir_fd,
         name: name.to_os_string(),
+        filesystem,
     }))
 }
 
-/// Refuse anything at the folder's path other than a directory with the
-/// device and inode numbers dux recorded.
-fn check_numbers(stat: &rustix::fs::Stat, identity: DirectoryIdentity) -> Result<(), String> {
+/// Refuse anything at the folder's path other than a directory.
+fn check_is_directory(stat: &rustix::fs::Stat) -> Result<(), String> {
     match FileType::from_raw_mode(stat.st_mode) {
         FileType::Directory => {}
         FileType::Symlink => {
@@ -312,10 +590,6 @@ fn check_numbers(stat: &rustix::fs::Stat, identity: DirectoryIdentity) -> Result
         }
         _ => return Err("it is no longer a folder".to_string()),
     }
-    let numbers = numbers_of(stat);
-    if (numbers.device, numbers.inode) != (identity.device, identity.inode) {
-        return Err(not_the_created_folder());
-    }
     Ok(())
 }
 
@@ -324,9 +598,8 @@ fn not_the_created_folder() -> String {
         .to_string()
 }
 
-/// Refuse a folder whose marker file does not hold `mark`, read without
-/// following a link and only from a plain file.
-fn check_mark(dir: &rustix::fd::OwnedFd, mark: Option<FolderMark>) -> Result<(), String> {
+/// Refuse a folder whose marker file does not hold `mark`.
+fn check_mark(dir: &OwnedFd, mark: Option<FolderMark>) -> Result<(), String> {
     let Some(mark) = mark else {
         return Err(
             "dux has no mark on record for it, so it cannot be certain the folder there is \
@@ -334,12 +607,32 @@ fn check_mark(dir: &rustix::fd::OwnedFd, mark: Option<FolderMark>) -> Result<(),
                 .to_string(),
         );
     };
-    let missing = || {
-        format!(
+    match read_marker(dir) {
+        MarkerFile::Missing => Err(format!(
             "its {MARKER_FILE_NAME} file, which dux wrote into it to recognise it, is gone, so \
              dux cannot be certain it is still the folder it created"
-        )
-    };
+        )),
+        MarkerFile::Unreadable(err) => Err(format!(
+            "dux could not read its {MARKER_FILE_NAME} file ({err})"
+        )),
+        MarkerFile::Holds(found) if found == Some(mark) => Ok(()),
+        MarkerFile::Holds(_) => Err(not_the_created_folder()),
+    }
+}
+
+/// What the marker file in a folder says.
+enum MarkerFile {
+    /// No plain file is there by that name.
+    Missing,
+    /// It could not be read.
+    Unreadable(rustix::io::Errno),
+    /// The mark it holds, `None` when it holds none dux can read.
+    Holds(Option<FolderMark>),
+}
+
+/// Read the marker file in `dir` without following a link and only from a
+/// plain file.
+fn read_marker(dir: &OwnedFd) -> MarkerFile {
     let file = match rustix::fs::openat(
         dir,
         MARKER_FILE_NAME,
@@ -347,36 +640,31 @@ fn check_mark(dir: &rustix::fd::OwnedFd, mark: Option<FolderMark>) -> Result<(),
         Mode::empty(),
     ) {
         Ok(file) => file,
-        Err(rustix::io::Errno::NOENT | rustix::io::Errno::LOOP) => return Err(missing()),
-        Err(err) => {
-            return Err(format!(
-                "dux could not read its {MARKER_FILE_NAME} file ({err})"
-            ));
-        }
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::LOOP) => return MarkerFile::Missing,
+        Err(err) => return MarkerFile::Unreadable(err),
     };
-    let stat = rustix::fs::fstat(&file)
-        .map_err(|err| format!("dux could not read its {MARKER_FILE_NAME} file ({err})"))?;
-    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-        return Err(missing());
+    match rustix::fs::fstat(&file) {
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {}
+        Ok(_) => return MarkerFile::Missing,
+        Err(err) => return MarkerFile::Unreadable(err),
     }
     let mut text = String::new();
-    std::fs::File::from(file)
+    if std::fs::File::from(file)
         .take(MARKER_READ_LIMIT)
         .read_to_string(&mut text)
-        .map_err(|_| not_the_created_folder())?;
-    let found = text
-        .lines()
-        .find_map(|line| line.strip_prefix(MARK_PREFIX))
-        .and_then(|hex| FolderMark::from_hex(hex.trim()));
-    if found == Some(mark) {
-        Ok(())
-    } else {
-        Err(not_the_created_folder())
+        .is_err()
+    {
+        return MarkerFile::Holds(None);
     }
+    MarkerFile::Holds(
+        text.lines()
+            .find_map(|line| line.strip_prefix(MARK_PREFIX))
+            .and_then(|hex| FolderMark::from_hex(hex.trim())),
+    )
 }
 
 /// The names of the entries in the opened directory, without `.` and `..`.
-fn entry_names(dir: &rustix::fd::OwnedFd) -> rustix::io::Result<Vec<std::ffi::CString>> {
+fn entry_names(dir: &OwnedFd) -> rustix::io::Result<Vec<std::ffi::CString>> {
     let mut entries = rustix::fs::Dir::read_from(dir)?;
     let mut names = Vec::new();
     while let Some(entry) = entries.read() {
@@ -390,37 +678,95 @@ fn entry_names(dir: &rustix::fd::OwnedFd) -> rustix::io::Result<Vec<std::ffi::CS
     Ok(names)
 }
 
-/// Delete everything inside the opened directory but `keep`, never following
-/// a link.
-fn remove_contents(dir: &rustix::fd::OwnedFd, keep: Option<&str>) -> rustix::io::Result<()> {
-    let names = entry_names(dir)?
-        .into_iter()
-        .filter(|name| keep.is_none_or(|keep| name.to_bytes() != keep.as_bytes()));
-    for name in names {
-        let stat = match rustix::fs::statat(dir, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(rustix::io::Errno::NOENT) => continue,
-            Err(err) => return Err(err),
+/// Where a deletion stopped, inside the folder, and why.
+struct Stopped {
+    at: PathBuf,
+    why: StopWhy,
+}
+
+enum StopWhy {
+    /// Another filesystem is mounted there.
+    Mounted,
+    Failed(rustix::io::Errno),
+}
+
+/// One deletion of the contents of a folder dux created.
+struct Walk<'a> {
+    /// The filesystem the folder is on, which the deletion never leaves.
+    filesystem: Filesystem,
+    filesystem_of: FilesystemOf<'a>,
+    /// This user, whose read-only directories are made writable.
+    uid: u32,
+    deleted_some: std::cell::Cell<bool>,
+}
+
+impl Walk<'_> {
+    /// Delete everything inside the opened directory at `at` but `keep`,
+    /// stopping at the first entry that cannot be deleted.
+    fn remove_contents(&self, dir: &OwnedFd, at: &Path, keep: Option<&str>) -> Result<(), Stopped> {
+        let failed = |at: &Path| {
+            let at = at.to_path_buf();
+            move |err| Stopped {
+                at,
+                why: StopWhy::Failed(err),
+            }
         };
-        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
-            let child = rustix::fs::openat(
-                dir,
-                name.as_c_str(),
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?;
-            remove_contents(&child, None)?;
-            drop(child);
-            ignore_missing(rustix::fs::unlinkat(
-                dir,
-                name.as_c_str(),
-                AtFlags::REMOVEDIR,
-            ))?;
-        } else {
-            ignore_missing(rustix::fs::unlinkat(dir, name.as_c_str(), AtFlags::empty()))?;
+        let names = entry_names(dir)
+            .map_err(failed(at))?
+            .into_iter()
+            .filter(|name| keep.is_none_or(|keep| name.to_bytes() != keep.as_bytes()));
+        for name in names {
+            let child_at = at.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+            let stat = match rustix::fs::statat(dir, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(err) => return Err(failed(&child_at)(err)),
+            };
+            if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+                let child = rustix::fs::openat(
+                    dir,
+                    name.as_c_str(),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(failed(&child_at))?;
+                if (self.filesystem_of)(&child_at, &child).map_err(failed(&child_at))?
+                    != self.filesystem
+                {
+                    return Err(Stopped {
+                        at: child_at,
+                        why: StopWhy::Mounted,
+                    });
+                }
+                self.make_writable(&child);
+                self.remove_contents(&child, &child_at, None)?;
+                drop(child);
+                ignore_missing(rustix::fs::unlinkat(
+                    dir,
+                    name.as_c_str(),
+                    AtFlags::REMOVEDIR,
+                ))
+                .map_err(failed(&child_at))?;
+            } else {
+                ignore_missing(rustix::fs::unlinkat(dir, name.as_c_str(), AtFlags::empty()))
+                    .map_err(failed(&child_at))?;
+            }
+            self.deleted_some.set(true);
+        }
+        Ok(())
+    }
+
+    /// Give this user write and search permission on a directory of theirs;
+    /// a failure shows as the deletion inside it failing.
+    fn make_writable(&self, dir: &OwnedFd) {
+        let Ok(stat) = rustix::fs::fstat(dir) else {
+            return;
+        };
+        let mode = Mode::from_raw_mode(stat.st_mode);
+        if stat.st_uid == self.uid && !mode.contains(Mode::RWXU) {
+            let _ = rustix::fs::fchmod(dir, mode | Mode::RWXU);
         }
     }
-    Ok(())
 }
 
 fn ignore_missing(result: rustix::io::Result<()>) -> rustix::io::Result<()> {
@@ -462,7 +808,8 @@ pub enum FolderFiles {
     Unreadable,
 }
 
-/// Count the files in `path`, never following a symbolic link.
+/// Count the files in `path` that deleting it would delete: never following a
+/// symbolic link nor entering another filesystem.
 pub fn count_folder_files(path: &Path) -> FolderFiles {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -471,7 +818,11 @@ pub fn count_folder_files(path: &Path) -> FolderFiles {
         Err(_) => return FolderFiles::Unreadable,
     }
     let mut count = 0_u64;
-    for entry in walkdir::WalkDir::new(path).follow_links(false).min_depth(1) {
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .same_file_system(true)
+        .min_depth(1)
+    {
         match entry {
             Ok(entry) if entry.file_type().is_dir() => {}
             Ok(entry) if entry.depth() == 1 && entry.file_name() == MARKER_FILE_NAME => {}
@@ -488,6 +839,237 @@ mod tests {
 
     fn root() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
+    }
+
+    fn refusal(path: &Path, identity: DirectoryIdentity) -> String {
+        remove_created_folder(path, identity)
+            .unwrap_err()
+            .reason
+            .message()
+            .to_string()
+    }
+
+    fn marker_mark(folder: &Path) -> Option<FolderMark> {
+        let text = std::fs::read_to_string(folder.join(MARKER_FILE_NAME)).ok()?;
+        text.lines()
+            .find_map(|line| line.strip_prefix(MARK_PREFIX))
+            .and_then(FolderMark::from_hex)
+    }
+
+    /// Stands in for a filesystem mounted on the directories `mounted` names:
+    /// each reports another device than the one it is really on.
+    fn mounted_at(mounted: &[&str]) -> impl Fn(&Path, &OwnedFd) -> rustix::io::Result<Filesystem> {
+        let mounted: Vec<PathBuf> = mounted.iter().map(PathBuf::from).collect();
+        move |at, dir| {
+            let mut found = filesystem_of(dir)?;
+            if mounted.iter().any(|m| m == at) {
+                found.device ^= 1;
+            }
+            Ok(found)
+        }
+    }
+
+    #[test]
+    fn the_deletion_never_enters_a_directory_on_another_filesystem() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::create_dir_all(created.path.join("deep/mnt")).unwrap();
+        std::fs::write(created.path.join("deep/mnt/theirs.txt"), "keep").unwrap();
+        let kept =
+            remove_created_folder_with(&created.path, created.identity, &mounted_at(&["deep/mnt"]))
+                .unwrap_err();
+        let text = kept.reason.message();
+        assert!(text.contains("\"deep/mnt\""), "{text}");
+        assert!(
+            text.contains("another filesystem is mounted there"),
+            "{text}"
+        );
+        assert!(created.path.join("deep/mnt/theirs.txt").exists());
+        assert!(created.path.join(MARKER_FILE_NAME).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_real_mount_reads_as_another_filesystem() {
+        let open = |path: &str| {
+            rustix::fs::open(
+                path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
+        let tmp = root();
+        let inside = tmp.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        assert_eq!(
+            filesystem_of(&open(tmp.path().to_str().unwrap())).unwrap(),
+            filesystem_of(&open(inside.to_str().unwrap())).unwrap()
+        );
+        assert_ne!(
+            filesystem_of(&open("/")).unwrap(),
+            filesystem_of(&open("/proc")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_folder_with_a_filesystem_mounted_on_it_is_kept_whole() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::write(created.path.join("theirs.txt"), "keep").unwrap();
+        let kept =
+            remove_created_folder_with(&created.path, created.identity, &mounted_at(&[".."]))
+                .unwrap_err();
+        assert!(!kept.deleted_some);
+        assert!(
+            kept.reason
+                .message()
+                .contains("another filesystem is mounted on it"),
+            "{kept:?}"
+        );
+        assert!(created.path.join("theirs.txt").exists());
+    }
+
+    /// Whichever of two folders the deletion reaches second stands in for a
+    /// mount, so the first is deleted before it stops.
+    #[test]
+    fn a_deletion_that_stops_part_way_names_where_and_counts_what_is_left() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        for dir in ["one", "two"] {
+            std::fs::create_dir(created.path.join(dir)).unwrap();
+            std::fs::write(created.path.join(dir).join("file.txt"), "x").unwrap();
+        }
+        let seen = std::cell::Cell::new(0);
+        let second_is_mounted = |_: &Path, dir: &OwnedFd| {
+            let mut found = filesystem_of(dir)?;
+            if dir_is_a_child(dir, &created.path) {
+                seen.set(seen.get() + 1);
+                if seen.get() == 2 {
+                    found.device ^= 1;
+                }
+            }
+            Ok(found)
+        };
+        let kept = remove_created_folder_with(&created.path, created.identity, &second_is_mounted)
+            .unwrap_err();
+        assert!(kept.deleted_some);
+        let text = kept.reason.message();
+        assert!(text.starts_with("it stopped at \""), "{text}");
+        assert!(text.ends_with("and 1 file is still in it"), "{text}");
+        let left: Vec<_> = ["one", "two"]
+            .into_iter()
+            .filter(|dir| created.path.join(dir).join("file.txt").exists())
+            .collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(text.contains(&format!("\"{}\"", left[0])), "{text}");
+    }
+
+    /// Whether the opened directory sits directly inside `folder`.
+    fn dir_is_a_child(dir: &OwnedFd, folder: &Path) -> bool {
+        let inode = rustix::fs::fstat(dir).unwrap().st_ino;
+        std::fs::read_dir(folder).unwrap().any(|entry| {
+            use std::os::unix::fs::MetadataExt as _;
+            entry.unwrap().metadata().unwrap().ino() == inode
+        })
+    }
+
+    #[test]
+    fn a_directory_dux_may_not_open_stops_the_deletion_and_is_named() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        let locked = created.path.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("inner.txt"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let kept = remove_created_folder(&created.path, created.identity).unwrap_err();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!kept.deleted_some);
+        assert_eq!(
+            kept.reason.message(),
+            "dux could not delete \"locked\", because dux does not have permission to delete \
+             it, so nothing in it was deleted"
+        );
+        assert!(locked.join("inner.txt").exists());
+    }
+
+    #[test]
+    fn letting_go_removes_only_a_marker_file_that_holds_the_mark() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::write(created.path.join("work.txt"), "keep").unwrap();
+        let_go(&created.path, Some(FolderMark([7; 16])));
+        assert!(created.path.join(MARKER_FILE_NAME).exists());
+        let_go(&created.path, created.identity.mark);
+        assert!(!created.path.join(MARKER_FILE_NAME).exists());
+        assert!(created.path.join("work.txt").exists());
+    }
+
+    fn checks<'a>(
+        hold: &'a dyn Fn(&Path) -> Result<(), StatusText>,
+        unused: &'a dyn Fn(&Path) -> bool,
+    ) -> CreateChecks<'a> {
+        CreateChecks { hold, unused }
+    }
+
+    /// A folder an earlier create left holding only its marker file is taken
+    /// over with a fresh mark.
+    #[test]
+    fn a_folder_left_holding_only_its_marker_file_is_taken_over() {
+        let tmp = root();
+        let left = create_agent_folder(tmp.path(), "otter").unwrap();
+        let taken = create_agent_folder_with(tmp.path(), "otter", &checks(&|_| Ok(()), &|_| true))
+            .expect("taken over");
+        assert_eq!(taken.path, left.path);
+        assert_ne!(taken.identity.mark, left.identity.mark);
+        assert_eq!(marker_mark(&taken.path), taken.identity.mark);
+        assert_eq!(
+            std::fs::read_dir(&taken.path).unwrap().count(),
+            1,
+            "nothing but the marker file"
+        );
+    }
+
+    #[test]
+    fn a_left_folder_is_not_taken_over_when_anything_else_is_there_or_uses_it() {
+        let tmp = root();
+        let take = |name: &str, unused: bool| {
+            create_agent_folder_with(tmp.path(), name, &checks(&|_| Ok(()), &move |_| unused))
+        };
+        let in_use = create_agent_folder(tmp.path(), "in-use").unwrap();
+        assert!(matches!(
+            take("in-use", false),
+            Err(CreateAgentFolderError::AlreadyThere(_))
+        ));
+        let written = create_agent_folder(tmp.path(), "written").unwrap();
+        std::fs::write(written.path.join("note"), "x").unwrap();
+        let unmarked = tmp.path().join("unmarked");
+        std::fs::create_dir(&unmarked).unwrap();
+        std::fs::write(unmarked.join(MARKER_FILE_NAME), "not a mark\n").unwrap();
+        for name in ["written", "unmarked"] {
+            assert!(
+                matches!(
+                    take(name, true),
+                    Err(CreateAgentFolderError::AlreadyThere(_))
+                ),
+                "{name}"
+            );
+        }
+        assert_eq!(marker_mark(&in_use.path), in_use.identity.mark);
+        assert_eq!(marker_mark(&written.path), written.identity.mark);
+    }
+
+    #[test]
+    fn a_create_whose_path_cannot_be_held_touches_nothing() {
+        let tmp = root();
+        let refused = create_agent_folder_with(
+            tmp.path(),
+            "otter",
+            &checks(&|_| Err(StatusText::plain("held")), &|_| true),
+        );
+        assert!(matches!(refused, Err(CreateAgentFolderError::Held(_))));
+        assert!(!tmp.path().join("otter").exists());
     }
 
     #[test]
@@ -540,7 +1122,7 @@ mod tests {
         let created = create_agent_folder(tmp.path(), "otter").unwrap();
         std::fs::remove_file(created.path.join(MARKER_FILE_NAME)).unwrap();
         std::fs::write(created.path.join("work.txt"), "keep").unwrap();
-        let refused = remove_created_folder(&created.path, created.identity).unwrap_err();
+        let refused = refusal(&created.path, created.identity);
         assert!(refused.contains(MARKER_FILE_NAME), "{refused}");
         assert!(created.path.join("work.txt").exists());
     }
@@ -558,7 +1140,7 @@ mod tests {
             format!("{MARK_PREFIX}{}\n", FolderMark([7; 16]).to_hex()),
         )
         .unwrap();
-        let refused = remove_created_folder(&created.path, created.identity).unwrap_err();
+        let refused = refusal(&created.path, created.identity);
         assert!(
             refused.contains("no longer the one dux created"),
             "{refused}"
@@ -581,7 +1163,7 @@ mod tests {
             mark: None,
             ..created.identity
         };
-        let refused = remove_created_folder(&created.path, unmarked).unwrap_err();
+        let refused = refusal(&created.path, unmarked);
         assert!(refused.contains("no mark on record"), "{refused}");
         assert!(created.path.is_dir());
     }
@@ -600,6 +1182,10 @@ mod tests {
         std::fs::write(used.path.join("note"), "x").unwrap();
         remove_if_unused(&used.path, used.identity);
         assert!(used.path.join("note").exists());
+        assert!(
+            !used.path.join(MARKER_FILE_NAME).exists(),
+            "a kept folder is let go of"
+        );
 
         let replaced = create_agent_folder(tmp.path(), "replaced").unwrap();
         std::fs::remove_dir_all(&replaced.path).unwrap();
@@ -729,11 +1315,8 @@ mod tests {
         std::fs::rename(&created.path, tmp.path().join("moved-away")).unwrap();
         std::fs::create_dir(&created.path).unwrap();
         std::fs::write(created.path.join("someone-elses.txt"), "keep").unwrap();
-        let refused = remove_created_folder(&created.path, created.identity).unwrap_err();
-        assert!(
-            refused.contains("no longer the one dux created"),
-            "{refused}"
-        );
+        let refused = refusal(&created.path, created.identity);
+        assert!(refused.contains(MARKER_FILE_NAME), "{refused}");
         assert!(created.path.join("someone-elses.txt").exists());
     }
 
@@ -765,9 +1348,59 @@ mod tests {
             inode: now.inode,
             ..created.identity
         };
-        let refused = remove_created_folder(&created.path, reused).unwrap_err();
+        let refused = refusal(&created.path, reused);
         assert!(refused.contains(MARKER_FILE_NAME), "{refused}");
         assert!(created.path.join("someone-elses.txt").exists());
+    }
+
+    /// A reboot can renumber the device and a restore from backup the inode
+    /// too; the mark still says it is the folder dux created.
+    #[test]
+    fn a_folder_with_other_numbers_and_its_mark_is_deleted() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::write(created.path.join("work.txt"), "x").unwrap();
+        let renumbered = DirectoryIdentity {
+            device: created.identity.device ^ 1,
+            inode: created.identity.inode ^ 1,
+            ..created.identity
+        };
+        assert_eq!(
+            remove_created_folder(&created.path, renumbered),
+            Ok(RemovedFolder::Removed)
+        );
+        assert!(!created.path.exists());
+    }
+
+    #[test]
+    fn a_truncated_marker_file_keeps_the_folder() {
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        let marker = created.path.join(MARKER_FILE_NAME);
+        let text = std::fs::read_to_string(&marker).unwrap();
+        std::fs::write(&marker, &text[..text.len() - 10]).unwrap();
+        assert!(remove_created_folder(&created.path, created.identity).is_err());
+        assert!(created.path.is_dir());
+    }
+
+    /// A module cache a package manager made read-only is deleted, as
+    /// `rm -rf` alone cannot.
+    #[test]
+    fn a_read_only_directory_inside_is_deleted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        let cache = created.path.join("pkg/mod/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("module.zip"), "x").unwrap();
+        for dir in [&cache, &created.path.join("pkg/mod")] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        assert_eq!(
+            remove_created_folder(&created.path, created.identity),
+            Ok(RemovedFolder::Removed)
+        );
+        assert!(!created.path.exists());
     }
 
     #[test]
@@ -780,7 +1413,7 @@ mod tests {
         let created = create_agent_folder(&agents, "otter").unwrap();
         std::fs::remove_dir_all(&created.path).unwrap();
         std::os::unix::fs::symlink(&outside, &created.path).unwrap();
-        let refused = remove_created_folder(&created.path, created.identity).unwrap_err();
+        let refused = refusal(&created.path, created.identity);
         assert!(refused.contains("symbolic link"), "{refused}");
         assert!(outside.join("precious.txt").exists());
         assert!(
@@ -802,7 +1435,7 @@ mod tests {
         let real = tmp.path().join("real-agents");
         std::fs::rename(&agents, &real).unwrap();
         std::os::unix::fs::symlink(&real, &agents).unwrap();
-        let refused = remove_created_folder(&created.path, created.identity).unwrap_err();
+        let refused = refusal(&created.path, created.identity);
         assert!(refused.contains("symbolic link"), "{refused}");
         assert!(real.join("otter/file.txt").exists());
     }
@@ -813,7 +1446,7 @@ mod tests {
         let created = create_agent_folder(tmp.path(), "otter").unwrap();
         std::fs::remove_dir_all(&created.path).unwrap();
         std::fs::write(&created.path, "a file now").unwrap();
-        let refused = remove_created_folder(&created.path, created.identity).unwrap_err();
+        let refused = refusal(&created.path, created.identity);
         assert!(refused.contains("no longer a folder"), "{refused}");
         assert!(created.path.is_file());
     }

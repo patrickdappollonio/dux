@@ -151,6 +151,88 @@ fn keeping_the_folder_dux_created_leaves_it_with_everything_in_it() {
     assert!(folder.join("a.md").exists());
 }
 
+fn marker_is_there(folder: &Path) -> bool {
+    folder.join(crate::agent_folders::MARKER_FILE_NAME).exists()
+}
+
+fn wait_for_marker_to_go(folder: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while marker_is_there(folder) {
+        assert!(
+            Instant::now() < deadline,
+            "the marker file was never removed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A folder the delete keeps is the person's from then on, so nothing in it
+/// says dux may delete it.
+#[test]
+fn keeping_the_folder_dux_created_lets_go_of_it() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    std::fs::write(folder.join("a.md"), "x").unwrap();
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Keep);
+    wait_for_marker_to_go(&folder);
+    assert!(folder.join("a.md").exists());
+}
+
+#[test]
+fn a_folder_kept_because_a_program_works_in_it_is_let_go_of() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    let _program = Sleeper::start(&folder);
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("Kept the folder"), "{text}");
+    wait_for_marker_to_go(&folder);
+    assert!(folder.is_dir());
+}
+
+/// A folder another agent works in is kept on the engine's own look, and let
+/// go of the same.
+#[test]
+fn a_folder_kept_because_another_agent_works_in_it_is_let_go_of() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    engine.sessions.push(sample_standalone_session(
+        "other",
+        &folder.to_string_lossy(),
+    ));
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(text.contains("runs in"), "{text}");
+    wait_for_marker_to_go(&folder);
+}
+
+/// A deletion that cannot go on names where it stopped, keeps the rest, and
+/// is not tried again.
+#[test]
+fn a_deletion_that_stops_says_where_and_is_not_tried_again() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    let locked = folder.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("inner.txt"), "x").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        text.contains(
+            "dux could not delete \\\"locked\\\", because dux does not have permission to \
+             delete it, so nothing in it was deleted. Delete it yourself if you no longer \
+             need it."
+        ),
+        "{text}"
+    );
+    assert!(locked.join("inner.txt").exists());
+    assert!(pending_rows(&engine).is_empty());
+    wait_for_marker_to_go(&folder);
+}
+
 /// The record decides, never the request: asking for the folder of an agent
 /// whose folder the user chose refuses the whole delete and touches nothing.
 #[test]
@@ -227,7 +309,10 @@ fn a_folder_replaced_since_dux_created_it_is_kept_and_said_so() {
     let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
     let text = folder_final(&engine);
     assert!(text.contains("Kept the folder"), "{text}");
-    assert!(text.contains("no longer the one dux created"), "{text}");
+    assert!(
+        text.contains(crate::agent_folders::MARKER_FILE_NAME),
+        "{text}"
+    );
     assert!(folder.join("theirs.txt").exists());
 }
 

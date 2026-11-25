@@ -1031,11 +1031,17 @@ deleting the agent may do with the folder.
 > else has been put there since, if another agent or a project has moved in, if a program
 > is still working in it, or if dux cannot tell, it is kept and dux says why. If dux quits
 > before the agent has stopped, it finishes the deletion the next time it starts.
+>
+> dux never deletes inside another filesystem mounted in the folder. A read-only folder of
+> yours inside it is made writable so it can be deleted. If the deletion stops part way,
+> dux says where it stopped and how many files are left, and does not try again.
 
 dux tells the folder it created from any other by the hidden `.dux-agent-folder` file it
 writes into it, which holds a random mark dux also keeps in its records. You can see the
 file in the folder; it says what it is for. Delete it and dux keeps the folder whatever
-happens to the agent. The delete dialog's file count leaves it out.
+happens to the agent. The delete dialog's file count leaves it out. When dux keeps a
+folder it created, because you unticked the box or because it could not delete it, it
+removes that file: the folder is yours from then on.
 
 > [!IMPORTANT]
 > **A folder you chose** is yours alone. dux does not create it, move it or remove it,

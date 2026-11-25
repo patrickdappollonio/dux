@@ -2796,6 +2796,7 @@ impl Engine {
         // created that goes with the agent is written down in the same
         // transaction, and is deleted only once that has been committed.
         let folder = self.held_folder_removal_row(session_id);
+        let kept_folder = self.kept_created_folder(session_id);
         if let Err(err) = self
             .session_store
             .delete_session_with_folder_removal(session_id, folder.as_ref())
@@ -2805,6 +2806,9 @@ impl Engine {
         }
         let outcome = self.finish_delete_session_memory(session_id);
         self.settle_held_folder_removal(session_id, true);
+        if let Some((path, mark)) = kept_folder {
+            self.let_go_of_created_folder(path, mark);
+        }
         Ok(outcome)
     }
 
