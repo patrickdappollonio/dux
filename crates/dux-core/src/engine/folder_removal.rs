@@ -355,11 +355,12 @@ fn folder_removal_op(
                 format!(", with everything in it{since}.")
             ]),
             crate::agent_folders::RemovedFolder::AlreadyGone => Final::info(crate::status_text![
-                "The folder ",
+                "Nothing is at the path of the folder ",
                 q(success_path.clone()),
-                " of deleted agent ",
+                " that dux created for deleted agent ",
                 q(success_label.clone()),
-                " was already gone, so there was nothing to delete."
+                ", so nothing was deleted. A folder that was moved is still wherever it was \
+                 moved to."
             ]),
         },
     )

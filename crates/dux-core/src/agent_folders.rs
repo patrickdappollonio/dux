@@ -359,7 +359,7 @@ pub fn remove_if_unused(path: &Path, identity: DirectoryIdentity) {
 pub enum RemovedFolder {
     /// The folder and everything in it were deleted.
     Removed,
-    /// Nothing was at the folder's path any more.
+    /// Nothing was at the folder's path any more; it may have been moved.
     AlreadyGone,
 }
 

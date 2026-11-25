@@ -317,13 +317,37 @@ fn a_folder_replaced_since_dux_created_it_is_kept_and_said_so() {
 }
 
 #[test]
-fn a_folder_already_gone_is_said_to_be_gone() {
+fn a_folder_already_gone_says_nothing_was_deleted() {
     let (mut engine, tmp) = test_engine();
     let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
     std::fs::remove_dir_all(&folder).unwrap();
     let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
     let text = folder_final(&engine);
-    assert!(text.contains("was already gone"), "{text}");
+    assert!(text.contains("so nothing was deleted"), "{text}");
+}
+
+/// dux cannot know where a moved agents folder went, so it claims nothing
+/// about the folder beyond its recorded path.
+#[test]
+fn a_folder_moved_away_is_not_called_gone() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    std::fs::rename(tmp.path().join("agents"), tmp.path().join("moved")).unwrap();
+    let _ = delete(&mut engine, "otter", FolderOnDelete::Remove);
+    let text = folder_final(&engine);
+    assert!(!text.contains("gone"), "{text}");
+    assert!(
+        text.contains("Nothing is at the path of the folder"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "so nothing was deleted. A folder that was moved is still wherever it was moved to."
+        ),
+        "{text}"
+    );
+    assert!(!folder.exists());
+    assert!(tmp.path().join("moved/otter").exists());
 }
 
 /// Another agent now working in the folder keeps it.
