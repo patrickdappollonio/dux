@@ -867,6 +867,10 @@ pub(crate) struct App {
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
     /// cannot leak into the first post-loading `process_raw_input_bytes` call.
     pub(crate) loading_input_buf: Vec<u8>,
+    /// The pty the forwarding reader's state (`raw_input_parser`,
+    /// `raw_input_buf`, `raw_paste`, `loading_input_buf`) was read for, or
+    /// none when that reader did not take the last poll's input.
+    pub(crate) forwarding_reader_pty: Option<String>,
     /// Host terminal-window focus, tracked via DEC mode 1004 focus reports.
     /// Gates the per-tick "viewed" stamp so an unfocused window stops
     /// suppressing the focused agent's attention flag. Fails open until the
@@ -5895,6 +5899,7 @@ impl App {
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
+            forwarding_reader_pty: None,
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
@@ -6451,6 +6456,17 @@ impl App {
         let reader = self.run_input_reader();
         if reader != RunInputReader::Debugger {
             self.end_debug_raw_input();
+        }
+        // Whatever moved input away from the forwarding reader, or moved it to
+        // another program, that reader's state ends here.
+        let forwarding_to = if reader == RunInputReader::Forwarding {
+            self.selected_terminal_surface_id()
+        } else {
+            None
+        };
+        if forwarding_to != self.forwarding_reader_pty {
+            self.end_forwarding_raw_input();
+            self.forwarding_reader_pty = forwarding_to;
         }
         match reader {
             RunInputReader::Debugger => match self.poll_debug_raw_input(terminal) {

@@ -6184,6 +6184,7 @@ mod tests {
             debug_raw_input: crate::app::debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
+            forwarding_reader_pty: None,
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),

@@ -3475,9 +3475,24 @@ impl App {
     pub(super) fn reset_raw_input_state(&mut self) {
         self.input_target = InputTarget::None;
         self.terminal_selection = None;
-        self.raw_paste.in_bracket = false;
+        self.end_forwarding_raw_input();
+    }
+
+    /// End the forwarding reader, the maximized pane's: the start of a key it
+    /// holds is dropped and a paste it is in ends, so whatever comes next
+    /// reaches the reader that takes input then on its own.
+    ///
+    /// The held bytes are the start of a key typed at the program before the
+    /// reader changed, most often an Alt-[ or Alt-O typed by hand, which the
+    /// reader holds until the next key; the rest of a key a read cut in two
+    /// comes with the same burst. Handed on, they would sit in front of the
+    /// next key typed at the new reader and turn it into another key, and a
+    /// held Escape would be read there as Escape. Dropped, every key typed
+    /// after the change does what it does with nothing held.
+    pub(super) fn end_forwarding_raw_input(&mut self) {
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
+        self.raw_paste = super::RawPaste::default();
         self.loading_input_buf.clear();
     }
 
@@ -13798,12 +13813,7 @@ impl App {
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.terminal_selection = None;
-        self.raw_paste.in_bracket = false;
-        self.raw_paste.normalize = false;
-        self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
-        self.raw_input_buf.clear();
-        self.raw_input_parser.clear();
-        self.loading_input_buf.clear();
+        self.end_forwarding_raw_input();
         let key = self.bindings.label_for(Action::ToggleFullscreen);
         if return_to_projects {
             // Same truthfulness rule as `close_top_overlay`: promise typing

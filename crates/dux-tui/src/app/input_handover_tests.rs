@@ -264,17 +264,43 @@ fn prompt_name(prompt: &PromptState) -> String {
         .to_string()
 }
 
-/// The app, and the serving state that has to outlive it when a browser drives.
-fn app_typing_into(received: &Path, setup: Setup) -> (App, Option<Box<dyn std::any::Any>>) {
-    let enable = if setup.program == Program::ReadsMouse {
+/// The shell script of a program that says ready and writes what it receives
+/// to `received`.
+fn program_script(received: &Path, program: Program) -> String {
+    let enable = if program == Program::ReadsMouse {
         "\\033[?1000h\\033[?1006h\\033[?1004h"
     } else {
         ""
     };
-    let script = format!(
+    format!(
         "stty raw -echo; printf '{enable}ready'; exec cat > '{}'",
         received.display()
-    );
+    )
+}
+
+/// A plain program writing what it receives to `received`, once it has said
+/// ready.
+fn ready_program(received: &Path) -> PtyClient {
+    let client = PtyClient::spawn(
+        "sh",
+        &["-c".to_string(), program_script(received, Program::Plain)],
+        Path::new("."),
+        5,
+        80,
+        100,
+    )
+    .expect("spawn a program");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !client.has_output() {
+        assert!(Instant::now() < deadline, "the program never said ready");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    client
+}
+
+/// The app, and the serving state that has to outlive it when a browser drives.
+fn app_typing_into(received: &Path, setup: Setup) -> (App, Option<Box<dyn std::any::Any>>) {
+    let script = program_script(received, setup.program);
     let (mut app, serving) = if setup.driver == Driver::Browser {
         let (app, recorded, seat) =
             super::pty_ownership::tests::app_with_a_live_pty_running(&script);
@@ -1313,6 +1339,197 @@ mod hand_overs_without_a_key {
             outcome.received, "x",
             "the windowed pane types into the program"
         );
+    }
+
+    /// The dialog a config reload that failed opens, as the worker's answer
+    /// opens it.
+    fn a_worker_opens_a_dialog(rig: &mut Rig) {
+        rig.app.apply_reaction(
+            dux_core::engine::EventReaction::OpenConfigReloadFailedModal(
+                "the config does not parse".to_string(),
+            ),
+        );
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+    }
+
+    /// Escape, in a read of its own, closes the dialog.
+    fn close_the_dialog(rig: &mut Rig) {
+        rig.type_bytes(b"\x1b");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "None");
+    }
+
+    /// The program behind the agent pane ends and the run loop's sweep sees it.
+    fn the_agent_exits(rig: &mut Rig) {
+        let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+        rig.app.engine.providers[&tab].terminate();
+        sweep_until(rig, |app| !app.engine.providers.contains_key(&tab));
+    }
+
+    fn sweep_until(rig: &mut Rig, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(&rig.app) {
+            assert!(Instant::now() < deadline, "the program never exited");
+            std::thread::sleep(Duration::from_millis(5));
+            rig.app.drain_events();
+        }
+    }
+
+    /// The agent pane maximized again over a program that has just started.
+    fn maximize_a_new_agent_program(rig: &mut Rig) {
+        let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+        let client = ready_program(&rig.received);
+        rig.app.engine.providers.insert(tab, client);
+        rig.app.focus = FocusPane::Center;
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+    }
+
+    /// Alt-[ as a classic terminal sends it, held by the maximized pane for a
+    /// key that may follow, when a worker opens a dialog: the next key typed
+    /// into the pane once the dialog is closed is that key, as it is typed
+    /// with no Alt-[ before it.
+    #[test]
+    fn the_start_of_a_key_held_when_a_worker_opens_a_dialog_is_dropped() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// A paste the maximized pane is in when a worker opens a dialog ends
+    /// there: its end marker reaches the dialog, and once the dialog is
+    /// closed the fullscreen toggle leaves the pane rather than being pasted.
+    #[test]
+    fn a_paste_open_when_a_worker_opens_a_dialog_ends_with_the_hand_over() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"\x1b[201~");
+        rig.settle();
+        close_the_dialog(&mut rig);
+        rig.type_bytes(TOGGLE);
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "abc");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::None);
+    }
+
+    /// The start of a key the maximized pane holds when its agent exits is
+    /// not put in front of what is typed into the pane once the agent is
+    /// back and the pane maximized again.
+    #[test]
+    fn the_start_of_a_key_held_when_the_agent_exits_never_reaches_its_next_program() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        the_agent_exits(&mut rig);
+        assert_eq!(rig.app.fullscreen_overlay, FullscreenOverlay::None);
+        rig.turn();
+        maximize_a_new_agent_program(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// The same for a paste open when the agent exits: the pane maximized
+    /// over its next program is not in it, so the toggle leaves the pane.
+    #[test]
+    fn a_paste_open_when_the_agent_exits_does_not_reach_its_next_program() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        the_agent_exits(&mut rig);
+        rig.turn();
+        maximize_a_new_agent_program(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        rig.type_bytes(TOGGLE);
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::None);
+    }
+
+    /// A terminal in the agent's dock running a program that writes what it
+    /// receives to `received`, maximized; returns its id.
+    fn maximize_a_dock_terminal(rig: &mut Rig, received: &Path) -> String {
+        let id = "dock-terminal".to_string();
+        rig.app.engine.companion_terminals.insert(
+            id.clone(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
+                label: id.clone(),
+                foreground_cmd: None,
+                client: ready_program(received),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+                list_after: None,
+            },
+        );
+        rig.app.rebuild_left_items();
+        rig.app.active_terminal_id = Some(id.clone());
+        rig.app.session_surface = crate::model::SessionSurface::Terminal;
+        rig.app.focus = FocusPane::Center;
+        rig.app.input_target = InputTarget::Terminal;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        rig.draw();
+        assert_eq!(rig.app.selected_terminal_surface_id(), Some(id.clone()));
+        id
+    }
+
+    /// The start of a key a maximized terminal holds when it exits is not
+    /// put in front of what is typed into the agent pane maximized after it.
+    #[test]
+    fn the_start_of_a_key_held_when_a_terminal_exits_never_reaches_the_agent() {
+        let mut rig = Rig::new(WINDOWED);
+        let elsewhere = rig.received.with_file_name("terminal received");
+        let id = maximize_a_dock_terminal(&mut rig, &elsewhere);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        rig.app.engine.companion_terminals[&id].client.terminate();
+        sweep_until(&mut rig, |app| {
+            !app.engine.companion_terminals.contains_key(&id)
+        });
+        assert_eq!(rig.app.fullscreen_overlay, FullscreenOverlay::None);
+        rig.turn();
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.focus = FocusPane::Center;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// The start of a key held by the maximized pane of one program is not
+    /// put in front of what is typed into another program's maximized pane,
+    /// even when no poll ran between them while the pane was not maximized.
+    #[test]
+    fn the_start_of_a_key_held_for_one_program_never_reaches_another() {
+        let mut rig = Rig::new(WINDOWED);
+        let elsewhere = rig.received.with_file_name("terminal received");
+        maximize_a_dock_terminal(&mut rig, &elsewhere);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
     }
 }
 
