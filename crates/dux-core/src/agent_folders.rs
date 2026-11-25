@@ -345,8 +345,14 @@ impl FolderKept {
         }
     }
 
-    /// The deletion of `folder` stopped at `stop`.
-    fn stopped(folder: &Path, stop: &Stopped, deleted_some: bool) -> Self {
+    /// The deletion of `folder` stopped at `stop`; `unrestored` names the
+    /// directories whose mode could not be given back.
+    fn stopped(
+        folder: &Path,
+        stop: &Stopped,
+        deleted_some: bool,
+        unrestored: &[(PathBuf, rustix::io::Errno)],
+    ) -> Self {
         let why = match stop.why {
             StopWhy::Mounted => {
                 "another filesystem is mounted there, and dux never deletes inside one".to_string()
@@ -359,7 +365,7 @@ impl FolderKept {
             }
             StopWhy::Failed(err) => format!("of an error ({err})"),
         };
-        let reason = if stop.at.as_os_str().is_empty() {
+        let mut reason = if stop.at.as_os_str().is_empty() {
             crate::status_text![format!(
                 "everything in it was deleted but the folder itself was not, because {why}"
             )]
@@ -383,6 +389,18 @@ impl FolderKept {
                 format!(", because {why}, so nothing in it was deleted")
             ]
         };
+        for (at, err) in unrestored {
+            if at.as_os_str().is_empty() {
+                reason.push(", and dux could not make the folder itself read-only again");
+            } else {
+                reason.push(", and dux could not make ");
+                reason.push_quoted(at.display());
+                reason.push(" read-only again");
+            }
+            reason.push(format!(
+                " after making it writable to delete inside it ({err})"
+            ));
+        }
         Self {
             deleted_some,
             reason,
@@ -426,9 +444,18 @@ fn remove_created_folder_with(
         filesystem_of,
         uid: rustix::process::geteuid().as_raw(),
         deleted_some: std::cell::Cell::new(false),
+        unrestored: std::cell::RefCell::new(Vec::new()),
     };
-    walk.make_writable(&opened.dir);
-    let stopped = |stop: Stopped| FolderKept::stopped(path, &stop, walk.deleted_some.get());
+    let top_mode = walk.make_writable(&opened.dir);
+    let stopped = |stop: Stopped| {
+        walk.restore(&opened.dir, top_mode, Path::new(""));
+        FolderKept::stopped(
+            path,
+            &stop,
+            walk.deleted_some.get(),
+            &walk.unrestored.borrow(),
+        )
+    };
     walk.remove_contents(&opened.dir, Path::new(""), Some(MARKER_FILE_NAME))
         .map_err(stopped)?;
     ignore_missing(rustix::fs::unlinkat(
@@ -698,6 +725,8 @@ struct Walk<'a> {
     /// This user, whose read-only directories are made writable.
     uid: u32,
     deleted_some: std::cell::Cell<bool>,
+    /// The directories whose mode could not be given back, and why.
+    unrestored: std::cell::RefCell<Vec<(PathBuf, rustix::io::Errno)>>,
 }
 
 impl Walk<'_> {
@@ -738,15 +767,21 @@ impl Walk<'_> {
                         why: StopWhy::Mounted,
                     });
                 }
-                self.make_writable(&child);
-                self.remove_contents(&child, &child_at, None)?;
-                drop(child);
-                ignore_missing(rustix::fs::unlinkat(
-                    dir,
-                    name.as_c_str(),
-                    AtFlags::REMOVEDIR,
-                ))
-                .map_err(failed(&child_at))?;
+                let mode = self.make_writable(&child);
+                let removed = self
+                    .remove_contents(&child, &child_at, None)
+                    .and_then(|()| {
+                        ignore_missing(rustix::fs::unlinkat(
+                            dir,
+                            name.as_c_str(),
+                            AtFlags::REMOVEDIR,
+                        ))
+                        .map_err(failed(&child_at))
+                    });
+                if removed.is_err() {
+                    self.restore(&child, mode, &child_at);
+                }
+                removed?;
             } else {
                 ignore_missing(rustix::fs::unlinkat(dir, name.as_c_str(), AtFlags::empty()))
                     .map_err(failed(&child_at))?;
@@ -756,15 +791,26 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// Give this user write and search permission on a directory of theirs;
-    /// a failure shows as the deletion inside it failing.
-    fn make_writable(&self, dir: &OwnedFd) {
-        let Ok(stat) = rustix::fs::fstat(dir) else {
-            return;
-        };
+    /// Give this user write and search permission on a directory of theirs,
+    /// answering the mode it had when it was changed; a failure shows as the
+    /// deletion inside it failing.
+    fn make_writable(&self, dir: &OwnedFd) -> Option<Mode> {
+        let stat = rustix::fs::fstat(dir).ok()?;
         let mode = Mode::from_raw_mode(stat.st_mode);
         if stat.st_uid == self.uid && !mode.contains(Mode::RWXU) {
-            let _ = rustix::fs::fchmod(dir, mode | Mode::RWXU);
+            rustix::fs::fchmod(dir, mode | Mode::RWXU).ok()?;
+            return Some(mode);
+        }
+        None
+    }
+
+    /// Give a directory that was not deleted the mode [`Self::make_writable`]
+    /// found on it.
+    fn restore(&self, dir: &OwnedFd, mode: Option<Mode>, at: &Path) {
+        if let Some(mode) = mode
+            && let Err(err) = rustix::fs::fchmod(dir, mode)
+        {
+            self.unrestored.borrow_mut().push((at.to_path_buf(), err));
         }
     }
 }
@@ -1401,6 +1447,70 @@ mod tests {
             Ok(RemovedFolder::Removed)
         );
         assert!(!created.path.exists());
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_deletion_that_stops_gives_read_only_directories_their_modes_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::create_dir_all(created.path.join("a/b")).unwrap();
+        for dir in [created.path.join("a"), created.path.clone()] {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let kept =
+            remove_created_folder_with(&created.path, created.identity, &mounted_at(&["a/b"]))
+                .unwrap_err();
+        let modes = (mode_of(&created.path), mode_of(&created.path.join("a")));
+        for dir in [created.path.clone(), created.path.join("a")] {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(!kept.deleted_some, "{kept:?}");
+        assert_eq!(modes, (0o555, 0o555));
+    }
+
+    #[test]
+    fn a_folder_left_empty_but_not_deleted_gets_its_mode_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = root();
+        let created = create_agent_folder(tmp.path(), "otter").unwrap();
+        std::fs::write(created.path.join("file.txt"), "x").unwrap();
+        std::fs::set_permissions(&created.path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // The folder the agent's folder is in refuses the last step.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let kept = remove_created_folder(&created.path, created.identity).unwrap_err();
+        let mode = mode_of(&created.path);
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&created.path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(kept.deleted_some);
+        assert_eq!(mode, 0o555);
+    }
+
+    #[test]
+    fn a_mode_that_could_not_be_given_back_is_named() {
+        let reason = FolderKept::stopped(
+            Path::new("/nowhere/otter"),
+            &Stopped {
+                at: PathBuf::from("a/b"),
+                why: StopWhy::Mounted,
+            },
+            false,
+            &[(PathBuf::from("a"), rustix::io::Errno::PERM)],
+        )
+        .reason;
+        let text = reason.message();
+        assert!(
+            text.contains(
+                ", so nothing in it was deleted, and dux could not make \"a\" read-only again \
+                 after making it writable to delete inside it ("
+            ),
+            "{text}"
+        );
     }
 
     #[test]
