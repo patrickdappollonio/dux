@@ -461,7 +461,9 @@ pub(crate) struct AddAgentArgs {
     /// Create a standalone agent in a new folder dux creates for it, named
     /// after --name, in the standalone agents folder ([defaults]
     /// standalone_agents_directory). A name whose folder is already there is
-    /// refused. Needs --name.
+    /// refused, except a folder dux created for a start that was interrupted:
+    /// while it holds only its marker file and nothing uses it, it is used
+    /// again. Needs --name.
     #[arg(
         long,
         requires = "name",
