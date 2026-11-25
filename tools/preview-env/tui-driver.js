@@ -202,8 +202,8 @@ function sleep(milliseconds) {
 
 /// Whether the screen says `needle`, read the way a person reads it: every run
 /// of spaces on either side counts as one. A name in a dialog renders as a chip,
-/// padded by one cell each side, so the title that used to read
-/// `Add Project: /root` now reads `Add Project:  /root ` and an exact match
+/// padded by one cell each side, so a title such as
+/// `Add Project: /root` reads `Add Project:  /root ` and an exact match
 /// fails on spacing alone. Only spaces are folded, never line breaks, so a
 /// needle still has to sit on one row of the screen.
 function screenSays(text, needle) {

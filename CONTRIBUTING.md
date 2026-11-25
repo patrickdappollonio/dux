@@ -36,9 +36,9 @@ distinction matters the moment you go looking for why the binary is serving
 something you did not expect, so it has a section of its own:
 [Where the embedded assets actually live](#where-the-embedded-assets-actually-live).
 
-**A failed frontend build fails the Rust build.** It used to print a
-`cargo:warning`, embed a placeholder page and succeed, which meant a release could
-ship binaries with no web UI and every check green. If you see the build abort with
+**A failed frontend build fails the Rust build.** There is no placeholder page
+and no `cargo:warning`-and-succeed path, because a release could then ship
+binaries with no web UI and every check green. If you see the build abort with
 a tsc or Vite error, that is working as intended. To see the underlying error:
 
 ```bash
@@ -119,18 +119,17 @@ reuse path. What it no longer does is embed it. rust-embed reads
 it can take.
 
 The reason is written out in full in the long comment in `crates/dux-web/build.rs`,
-including the two things the change does not fix. The short version: `dist` is a
-directory the build script generates, cargo cannot watch a generated directory
-without re-running the script forever, and so emptying `dist` used to leave the
+including the two things the design does not fix. The short version: `dist` is a
+directory the build script generates, and cargo cannot watch a generated directory
+without re-running the script forever, so an emptied `dist` would leave the
 script un-run and bake zero assets into the binary with nothing said anywhere.
 
 Two practical consequences:
 
-- **A hand-run `npm run build` no longer reaches the binary on its own.** It used
-  to, because rust-embed's file dependencies forced a recompile. Now the staged
-  copy is what gets embedded and nothing notices that `dist` moved on. Run
-  `touch crates/dux-web/web/index.html` and rebuild.
-- **Fault injection moved too.** The `dist.real/`, `dist.bak/` and `dist.orig/`
+- **A hand-run `npm run build` does not reach the binary on its own.** The
+  staged copy is what gets embedded and nothing notices that `dist` moved on.
+  Run `touch crates/dux-web/web/index.html` and rebuild.
+- **Fault injection works on `dist`.** The `dist.real/`, `dist.bak/` and `dist.orig/`
   entries in `.gitignore` exist so you can park a real build aside and see what
   the binary does without one:
 

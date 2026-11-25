@@ -1,4 +1,4 @@
-# Where dux's memory goes: a measured baseline (2026-09-17)
+# Where dux's memory goes: a measured baseline
 
 Every figure below was read off `/proc/<pid>/smaps_rollup` and `/proc/<pid>/status`
 inside the preview container while dux was in the stated condition. Numbers marked

@@ -160,12 +160,10 @@ async function shootOne(scene) {
     // viewport change, which is how a picture of an open tab menu came back as
     // a bare strip and was written anyway.
     await lib.recheckGuards()
-    // Taken into memory and read before it is kept. A pure black frame was
-    // written and reported as a success with every guard passing twice, because
-    // nothing ever looked at the artifact.
+    // Taken into memory and read before it is kept, so a pure black frame is
+    // not reported as a success with every guard passing.
     //
-    // The discarded first capture is the fix for the mechanism behind that
-    // frame: a scene that never screenshots while it runs (no terminal, so no
+    // The first capture is discarded: a scene that never screenshots while it runs (no terminal, so no
     // pane guard) can have its first one come back before the compositor has
     // anything to hand over.
     await page.screenshot({ clip, captureBeyondViewport: false })

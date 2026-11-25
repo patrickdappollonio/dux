@@ -1,6 +1,6 @@
 // A dock that appears under an agent already on screen, or on the agent the
-// page moves to, used to replace the centre pane with a "dux needs a reload"
-// card and log "Invalid 1 panel layout". The terminal is added through the
+// page moves to, must not replace the centre pane with a "dux needs a reload"
+// card or log "Invalid 1 panel layout". The terminal is added through the
 // API rather than the page's own controls, the first one as the command line
 // would and the last as the page driving the row would. The move crashed
 // only when the browser had last left the docked agent with its terminal

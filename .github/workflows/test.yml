@@ -66,12 +66,11 @@ jobs:
   # The macOS half of the platform-split code (file drops read /proc on Linux
   # and different plumbing on macOS; the process-scan tests are Linux-gated) is
   # INVISIBLE to the Ubuntu jobs: cfg(target_os) hides it from their compile
-  # entirely. Three macOS-only warnings and a macOS test-compile break shipped
-  # that way and were found by hand on a maintainer machine. This job is the
-  # "never again": clippy with --all-targets compiles the test code too, so
-  # both classes fail here, and cargo test then actually EXERCISES the macOS
-  # arms that otherwise run on a maintainer laptop or nowhere. One job, two
-  # steps, so the compile cache is warmed once on the slower runner.
+  # entirely, so macOS-only warnings and test-compile breaks pass them. This job
+  # catches both: clippy with --all-targets compiles the test code too, so both
+  # classes fail here, and cargo test then actually EXERCISES the macOS arms
+  # that otherwise run only on a macOS machine. One job, two steps, so the
+  # compile cache is warmed once on the slower runner.
   clippy-test-macos:
     name: Clippy and test (macOS)
     runs-on: macos-latest
