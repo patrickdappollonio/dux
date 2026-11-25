@@ -6585,8 +6585,7 @@ impl App {
         }
     }
 
-    /// Drop the start of a key or a paste the windowed interface holds,
-    /// as [`Self::cut_held_input_off`] does.
+    /// Drop the start of a key or a paste the windowed interface holds.
     fn end_windowed_reader_held(&mut self) {
         let begun = self.terminal_input.end_begun_sequence();
         match begun.strip_prefix(crate::raw_input::BRACKET_PASTE_START) {

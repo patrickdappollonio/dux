@@ -7,7 +7,7 @@
 //! program selected) ends what the reader held unfinished: the start of a key
 //! is dropped, and a paste is closed for the program it was going to and its
 //! rest dropped up to its end marker, so it never acts as keys. The dropping
-//! also ends at the next hand-over with no key, and before the first read
+//! also ends at the next change of reader with no key, and before the first read
 //! that comes `UNFINISHED_PASTE_WAIT` (one second) or more after the last
 //! read of `PASTE_SIZED_READ` (256) bytes or more, or after the cut when no
 //! read that size has come, or `CUT_PASTE_DROP_LIMIT` (five seconds) or more
