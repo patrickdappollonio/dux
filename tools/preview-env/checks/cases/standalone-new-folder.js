@@ -1,4 +1,5 @@
-// New standalone agent asks for a name, pre-filled, says the folder dux creates,
+// New standalone agent asks for a name, pre-filled exactly while random names
+// are on by default, says the folder dux creates,
 // leads on to the existing-folder picker at the picker's own height and back
 // with the name kept, and creates the agent in a folder dux records as its own.
 
@@ -14,7 +15,7 @@ async function removeStray(H) {
 
 module.exports = {
   protects:
-    "New standalone agent: the name box opens pre-filled and says the folder dux creates; Use an existing folder or project… opens the picker at its own height and Back returns with the name kept; Create agent makes an agent whose folder dux created.",
+    "New standalone agent: the name box opens pre-filled while random names are on by default and empty while they are off, and says the folder dux creates; Use an existing folder or project… opens the picker at its own height and Back returns with the name kept; Create agent makes an agent whose folder dux created.",
   async run(ctx, H) {
     ctx.after(() => removeStray(H))
     const dev = await H.device(ctx, "computer")
@@ -22,10 +23,18 @@ module.exports = {
     await H.press(dev, { name: "^More ways to start$", selector: "button" })
     await H.press(dev, { name: "^New standalone agent", selector: "[role=menuitem]" })
     const named = await H.waitForDialog(dev, "^New standalone agent$")
-    await H.until(async () => {
-      const top = await H.topDialog(dev.page)
-      return top && top.fields[0] && top.fields[0].value !== ""
-    }, "the name box to be pre-filled with a generated name")
+    const randomized = (await H.lib.get("/api/v1/bootstrap")).randomize_agent_names_by_default === true
+    if (randomized) {
+      await H.until(async () => {
+        const top = await H.topDialog(dev.page)
+        return top && top.fields[0] && top.fields[0].value !== ""
+      }, "the name box to be pre-filled with a generated name")
+    } else {
+      H.expect(
+        named.fields[0] && named.fields[0].value === "",
+        `with random names off by default the name box should open empty; it holds "${named.fields[0] && named.fields[0].value}"`,
+      )
+    }
     const help = await dev.page.evaluate(() => document.querySelector('[role="dialog"]')?.textContent ?? "")
     H.expect(/dux creates the folder\./.test(help), `"${named.name}" should say "dux creates the folder."; it says: ${help.slice(0, 300)}`)
 
