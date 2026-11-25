@@ -810,19 +810,21 @@ mod waiting {
     }
 
     /// The leading end of a pseudo-terminal whose other end is closed, which
-    /// Linux reads as an I/O error.
+    /// Linux reads as an I/O error and macOS as the end of the input.
     fn pty_reading_an_io_error() -> std::os::fd::OwnedFd {
         use std::os::fd::FromRawFd as _;
         let (mut leader, mut follower) = (-1, -1);
         // SAFETY: openpty writes two descriptors into the integers it is
-        // given and reads nothing through its null arguments.
+        // given and reads nothing through its null arguments. They are
+        // `null_mut` because macOS declares the last two `*mut`, which a
+        // `*const` parameter on Linux accepts too.
         let opened = unsafe {
             libc::openpty(
                 &raw mut leader,
                 &raw mut follower,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(opened, 0, "openpty");
