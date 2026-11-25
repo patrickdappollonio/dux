@@ -216,8 +216,7 @@ describe("resolvedTypingSurface", () => {
   })
 
   // An explicit choice wins on EVERY device, in both directions. Turning the
-  // message box on where the browser thinks it is
-  // not needed is allowed.
+  // message box on where the browser thinks it is not needed is allowed.
   it("lets an explicit choice win in both directions on either pointer", () => {
     expect(resolvedTypingSurface("auto", false, "compose")).toBe("compose")
     expect(resolvedTypingSurface("auto", true, "direct")).toBe("direct")

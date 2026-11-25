@@ -117,13 +117,12 @@ describe("the cadence", () => {
     beat.stop()
   })
 
-  // THE ARMED GAP DOES NOT HAVE TO RUN OUT. It used to: `schedule` returned
-  // early whenever a timer existed and read the period only when arming, so a
-  // take-over or a return to the tab waited out the slow gap already pending
-  // (15s configured, or a hidden page's platform-clamped minute) before the fast
-  // cadence began. The engine answers the attention boundary in 3s, so the flag
-  // stayed lit for 13 to 15 seconds past it. A cadence change now clears and
-  // re-arms.
+  // THE ARMED GAP DOES NOT HAVE TO RUN OUT. A cadence change clears and
+  // re-arms the timer, so a take-over or a return to the tab does not wait out
+  // the slow gap already pending (15s configured, or a hidden page's
+  // platform-clamped minute) before the fast cadence begins. The engine answers
+  // the attention boundary in 3s, so waiting out the gap would keep the flag lit
+  // for 13 to 15 seconds past it.
   it("clears the armed gap when ownership changes the cadence", () => {
     const { beat, frames, advance, state } = setup({ isOwner: false, viewed: false })
     beat.start()

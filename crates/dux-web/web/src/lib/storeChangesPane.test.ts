@@ -255,10 +255,10 @@ describe("Changes-pane visibility", () => {
 })
 
 // The pane can be dragged to zero width, and the zero must not make the pane
-// unreachable: the preference still says "visible", so the header's reopen
-// button (gated on the preference alone) stays away, and the pane's own hide
-// item is inside the zero-width pane. These are the pure halves; the panel
-// wiring is asserted in App.test.tsx.
+// unreachable: a header reopen button gated on the "visible" preference alone
+// would stay away while the preference still says "visible", and the pane's
+// own hide item is inside the zero-width pane. These are the pure halves of
+// keeping it reachable; the panel wiring is asserted in App.test.tsx.
 describe("Changes-pane width", () => {
   it("setChangesPanePercent clamps to 0..100 and drops a no-op write", async () => {
     const mod = await loadStore()

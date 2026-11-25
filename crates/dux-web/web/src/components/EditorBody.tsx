@@ -1865,9 +1865,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function renderStandaloneActions(): React.ReactNode {
     if (standalone) return null
     // Both of these leave the overlay rather than act on the file, so they
-    // could be quieter; they wear the cluster's outline anyway,
-    // because a ghost label in a row of outlined buttons reads as text rather
-    // than as a control, and these are the overlay's only ways out.
+    // could be quieter; they wear the cluster's outline anyway, because a ghost
+    // label in a row of outlined buttons reads as text rather than as a
+    // control, and these are the overlay's only ways out.
     return (
       <>
         <SimpleTooltip content="Open in new tab">

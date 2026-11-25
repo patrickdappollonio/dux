@@ -1137,8 +1137,8 @@ describe("TerminalPane take-over device naming", () => {
   const chromeMac =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-  // THE MERE-ATTACH CASE. Under attach-never-steals
-  // a watcher's only word on who drives arrives on the `connected` handshake; no
+  // THE MERE-ATTACH CASE. Under attach-never-steals a watcher's only word on
+  // who drives arrives on the `connected` handshake; no
   // `pty.owner` ever follows a plain attach, so the handshake must carry the
   // owner's device label or the card can only say "Active on another device".
   it("names the owning device from the connected handshake alone, no pty.owner event", () => {
@@ -3501,11 +3501,11 @@ describe("TerminalPane compose bar gate", () => {
 })
 
 // WIDTH DECIDES THE LAYOUT; THE POINTER DECIDES THE TYPING SURFACE. The two
-// are orthogonal, and treating them as one question was the bug: a tablet in
+// are orthogonal and must not be treated as one question: a tablet in
 // landscape gets the DESKTOP shell because it has the room, and still needs the
 // buffered input because a finger is still doing the typing. So both touch
 // surfaces (the compose bar and the accessory keys) travel with the pointer,
-// including inside the desktop shell, which was impossible before.
+// including inside the desktop shell.
 describe("TerminalPane typing surfaces follow the pointer, not the layout", () => {
   const desktopWidth = 1200
   let pointerStub: MatchMediaStub | null = null
@@ -3775,8 +3775,8 @@ describe("TerminalPane publishes its input group", () => {
     expect(paneInputGroupFor(["s1"])?.keysToggle).toBe(true)
   })
 
-  // The press works on a fine pointer. Both surfaces arrive together, because asking for the message box on a
-  // laptop brings its keys along.
+  // The press works on a fine pointer. Both surfaces arrive together, because
+  // asking for the message box on a laptop brings its keys along.
   it("turns the virtual input on from a fine pointer, keys and all", async () => {
     const surface = await import("@/lib/typingSurface")
     pointerStub = stubCoarsePointer(false)

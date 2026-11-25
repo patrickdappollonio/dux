@@ -870,9 +870,9 @@ function GroupHeader({
 // browser makes them do.
 //
 // It matches the `⋯` on variant as well as geometry. It navigates rather than
-// acts, so it could be quieter, but a ghost glyph beside an
-// outlined square read as a decoration rather than a control, so the two share
-// the header's one outline treatment.
+// acts, so it could be quieter, but a ghost glyph beside an outlined square
+// reads as a decoration rather than a control, so the two share the header's
+// one outline treatment.
 //
 // The editor needs the agent's directory and nothing else, so a quiet pane
 // keeps it live; only a directory that is gone greys it out, with `unavailable`
@@ -1088,8 +1088,8 @@ function ChangesHeader({
               * which therefore stay ABSENT for it rather than disabled, here
               * and in every other menu.
               *
-              * Refresh is greyed too, and nothing waits on
-              * it: the server refuses a refresh of a quiet pane anyway, and
+              * Refresh is greyed too, and nothing waits on it: the server
+              * refuses a refresh of a quiet pane anyway, and
               * the folder is looked at again without one. While an agent is
               * selected the web's changes service polls it (every 2s while
               * anything runs, 10s otherwise) and every poll re-probes the

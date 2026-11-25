@@ -9,15 +9,15 @@ import "./store"
 
 import type { Spine } from "./workspaceApi"
 
-// Coverage for the reconnect deep link: when the connection
-// drops while the user is deep-linked to a running agent, clicking "Reconnect
-// now" must not land them on the HOME screen. The center pane transiently ejects
-// to the welcome screen while the agent is momentarily `detached` (it exited
-// during the outage and has not finished resuming), which wipes the URL hash to
-// home; nothing restored the route because `restoreDeepLink` is a spent boot
-// one-shot. The store now re-arms the deep-link from `location.hash` on every
-// events reconnect (BEFORE any spine apply can wipe it) and re-restores it once
-// the agent is present AND back to `active`.
+// Coverage for the reconnect deep link: when the connection drops while the
+// user is deep-linked to a running agent, clicking "Reconnect now" must not
+// land them on the HOME screen. The center pane transiently ejects to the
+// welcome screen while the agent is momentarily `detached` (it exited during
+// the outage and has not finished resuming), which wipes the URL hash to home,
+// and `restoreDeepLink` is a spent boot one-shot. So the store re-arms the deep
+// link from `location.hash` on every events reconnect (BEFORE any spine apply
+// can wipe it) and re-restores it once the agent is present AND back to
+// `active`.
 
 type Sess = {
   id: string

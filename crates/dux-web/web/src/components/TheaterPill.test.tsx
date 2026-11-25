@@ -319,8 +319,8 @@ describe("the app menu the pill carries", () => {
   })
 
   it("keeps the way out inside the one menu as well", async () => {
-    // Whatever else the mode hides, the way back is
-    // inside the `⋯` a user can always find.
+    // Whatever else the mode hides, the way back is inside the `⋯` a user can
+    // always find.
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
     const item = screen

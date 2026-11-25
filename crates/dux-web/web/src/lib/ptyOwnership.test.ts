@@ -390,10 +390,10 @@ describe("pty.owner fan-out", () => {
 
 describe("pty.owner epoch dedup", () => {
   it("ignores an out-of-order (older) handover so a stale owner cannot win", () => {
-    // The server assigns a monotonic epoch under its owners
-    // lock, but the broadcast is emitted after the lock releases and can be
-    // reordered. The map ends on owner=A (epoch 2), yet a client could receive the
-    // owner=B (epoch 1) broadcast LAST. Keeping only the highest epoch per pty
+    // The server assigns a monotonic epoch under its owners lock, but the
+    // broadcast is emitted after the lock releases and can be reordered. The
+    // map ends on owner=A (epoch 2), yet a client could receive the owner=B
+    // (epoch 1) broadcast LAST. Keeping only the highest epoch per pty
     // makes the stale owner=B arrival a no-op, so the client stays on owner=A.
     const seen: Array<string | undefined> = []
     track(

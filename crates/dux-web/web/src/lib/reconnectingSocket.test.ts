@@ -709,13 +709,14 @@ describe("the canRetry gate", () => {
 })
 
 
-// AN OPEN IS A PROMISE, NOT A PROOF. Resetting the backoff on `onopen`
-// alone is the one thing a socket that opens and closes again in the same
-// breath is very good at provoking: against a server that accepted the
-// handshake and dropped the connection immediately, the client would retry at a
-// flat ~551ms forever, every attempt "succeeding" and refilling the schedule,
-// so the growth the backoff exists for would never happen. An open counts as healthy once it has LASTED (`HEALTHY_SETTLE_MS`) or once a frame has
-// actually crossed it, whichever comes first.
+// AN OPEN IS A PROMISE, NOT A PROOF. A socket that opens and closes again in
+// the same breath is very good at opening, so the backoff does not reset on
+// `onopen` alone: measured against a server that accepted the handshake and
+// dropped the connection immediately, that would retry at a flat ~551ms
+// forever, every attempt "succeeding" and refilling the schedule, and the
+// growth the backoff exists for would never happen. An open counts as healthy
+// once it has LASTED (`HEALTHY_SETTLE_MS`) or once a frame has actually
+// crossed it, whichever comes first.
 describe("the health settle window", () => {
   it("keeps growing the backoff across opens that close immediately", () => {
     vi.useFakeTimers()

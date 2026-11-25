@@ -816,14 +816,15 @@ describe("two live tabs of one provider that launched with different forms", () 
 })
 
 describe("a tab whose live process is replaced under the pane", () => {
-  // THE STALENESS DEFECT, end to end, in the bytes.
+  // STALENESS, end to end, in the bytes.
   //
   // What a tab launched with does not ride the BOOTSTRAP document, which the
   // browser refetches only on `config.changed`. A launch and a termination
-  // refresh the SPINE (`sessions.changed`) instead, so a client that had
-  // refetched config before a relaunch is corrected by it rather than
-  // resolving the OLD entry for the whole life of the new process. Both sequences below therefore START from a stale copy and
-  // are corrected by the relaunch, rather than being handed a correct one.
+  // refresh the SPINE (`sessions.changed`), so a client that had refetched
+  // config before a relaunch is corrected by the relaunch rather than
+  // resolving the OLD entry for the whole life of the new process. Both
+  // sequences below therefore START from a stale copy and are corrected by the
+  // relaunch, rather than being handed a correct one.
 
   /// One drop against whatever `mockState` currently says, returning the bytes.
   async function dropAgain(path: string) {
@@ -1120,9 +1121,9 @@ describe("when a file cannot be pasted", () => {
     expect(message).toContain("shot.png")
     // The server's own words carry the advice, so dux does not add a second
     // copy of it. The whole sentence is asserted, because a looser assertion
-    // would pass a wording defect: dux must not weld
-    // ", so it was not saved; try the drop again in a moment" onto the end of
-    // the server's already-finished sentence.
+    // would pass a wording defect: dux must not weld ", so it was not saved;
+    // try the drop again in a moment" onto the end of the server's
+    // already-finished sentence.
     expect(message).toBe(
       "Could not save shot.png: The server is already handling as many dropped " +
         "files as it allows at once. Try the drop again shortly.",

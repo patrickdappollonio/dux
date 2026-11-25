@@ -681,8 +681,8 @@ describe("a deleted agent never throws the user out of dux", () => {
   it("falls back to the owning agent when a companion terminal closes", async () => {
     // A session-owned terminal's PTY exits while the user is watching it. Its
     // agent is alive one level up, so that is the destination: ejecting all the
-    // way to home threw away a position that still exists. The deep-link path
-    // does this, and the prune path agrees with it.
+    // way to home would throw away a position that still exists. The prune
+    // path and the deep-link path agree on this.
     const mod = await loadStore("#/agent/s1/terminal/t1", [
       { id: "s1", project_id: "p1", terminals: ["t1"] },
     ])
@@ -1500,9 +1500,9 @@ describe("the changes screen keeps its place in the URL", () => {
     expect(mod.getSnapshot().mobileScreen).toBe("changes")
     expect(loc.hash).toBe("#/agent/s1/changes")
 
-    // The second round trip is the one that matters: the first Forward rewrites
-    // the entry down to the bare agent, and the screen must stay reachable by
-    // Forward.
+    // The second round trip is the one that matters: the first Forward must
+    // leave the entry naming the changes screen, not rewrite it down to the
+    // bare agent, so the screen stays reachable by Forward.
     history.back()
     history.forward()
     expect(mod.getSnapshot().mobileScreen).toBe("changes")

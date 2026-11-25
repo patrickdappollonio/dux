@@ -927,7 +927,8 @@ describe("dropToastFor", () => {
   // sentences ("...Try the drop again shortly."), while dux's own reasons do
   // not end in a terminator. Both go through the same templates, so the
   // templates cannot assume either shape. They must not append a period
-  // unconditionally, or the busy refusal would read "Try the drop again shortly..".
+  // unconditionally, or the busy refusal would read "Try the drop again
+  // shortly..".
   describe("punctuation around a reason that is already a sentence", () => {
     const serverSentence =
       "The server is already handling as many dropped files as it allows at once. Try the drop again shortly."
@@ -1385,8 +1386,8 @@ describe("dropToastFor, for a long text paste turned into a file", () => {
   })
 
   it("says it TRIED to save when the save failed, and never claims it did", () => {
-    // The rung-1 case, where the lead-in must not lie. The upload
-    // was refused, so nothing was saved; and because the paste was cancelled to
+    // The rung-1 case, where the lead-in must not lie. The upload was
+    // refused, so nothing was saved; and because the paste was cancelled to
     // make room for the file, the text was not typed either. A lead-in that
     // says "dux saved it as a file" in front of "could not save it" tells the
     // user both halves of a contradiction and neither of them is help.
