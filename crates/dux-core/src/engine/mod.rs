@@ -6446,9 +6446,7 @@ impl Engine {
     }
 
     /// The agent recorded at the folder a new standalone agent called `name`
-    /// would get in `root`. The one-agent-per-folder refusal a chosen folder
-    /// gets, which the folder's absence does not answer: an agent can be
-    /// recorded at a folder that is missing.
+    /// would get in `root`, which may be recorded there while it is missing.
     fn agent_recorded_at_new_folder(&self, root: &Path, name: &str) -> Option<&AgentSession> {
         let resolved = crate::agent_folders::folder_path_for(
             &crate::project_browser::canonical_or_original(root),
