@@ -272,7 +272,7 @@ fn identity_of(stat: &rustix::fs::Stat) -> DirectoryIdentity {
 }
 
 /// How many files a folder holds, for the delete dialog's warning.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum FolderFiles {
     /// The folder is there and holds `count` files (every entry that is not a

@@ -24,7 +24,8 @@ import {
   currentBranchLabelProse,
   branchLossProse,
   currentBranchWarningProse,
-  folderFilesSentence,
+  folderBoxLabelProse,
+  folderFilesProse,
   otherBranchesLabelProse,
   otherBranchesWarningProse,
   protectedBranchesProse,
@@ -439,9 +440,9 @@ export function DeleteSessionDialog() {
     ready === null || current !== null || currentBranchFailed(ready)
 
   const createdFolder = folder?.created_by_dux === true ? folder : null
-  const filesSentence =
+  const filesWarning =
     createdFolder !== null && deleteFolder && folderFiles?.target === deleteTarget
-      ? folderFilesSentence(folderFiles.reply.files)
+      ? folderFilesProse(folderFiles.reply.files)
       : null
 
   function reset() {
@@ -558,11 +559,11 @@ export function DeleteSessionDialog() {
             checked={deleteFolder}
             onCheckedChange={setDeleteFolder}
           >
-            Also delete its folder <InlineCode>{createdFolder.folder_label}</InlineCode>
+            {renderProse(folderBoxLabelProse(createdFolder.folder_label))}
           </CheckboxRow>
-          {filesSentence !== null && (
+          {filesWarning !== null && (
             <Notice shape="box" tone="warning" icon={TriangleAlert} announce="static">
-              {filesSentence}
+              {renderProse(filesWarning)}
             </Notice>
           )}
         </div>

@@ -428,22 +428,30 @@ export function worktreeFilesNote(
   return prose === null ? null : { prose, tone: "warning" }
 }
 
-/** What the delete dialog says, under its ticked folder box, about the files
- * in a folder dux created: how many go with it, or that dux could not count
- * them. `null` while the count is on its way, for an empty or missing folder,
- * and for a folder the user chose, which no delete touches. */
-export function folderFilesSentence(files: FolderFilesReply["files"] | undefined): string | null {
+/** The folder box's label for an agent whose folder dux created, naming the
+ * folder a tick deletes. Mirrors `folder_box_label_prose`. */
+export function folderBoxLabelProse(folderLabel: string): Prose {
+  return ["Also delete its folder ", chip(folderLabel)]
+}
+
+/** The warning under a ticked folder box: how many files go with the folder
+ * dux created, or that dux could not count them; `null` for an empty or
+ * missing folder, or while the count is on its way. Mirrors
+ * `folder_files_prose`. */
+export function folderFilesProse(files: FolderFilesReply["files"] | undefined): Prose | null {
   if (files === null || files === undefined) return null
   switch (files.state) {
     case "counted":
       if (files.count === 0) return null
-      return files.count === 1
-        ? "The folder holds 1 file. It will be deleted with the folder."
-        : `The folder holds ${files.count} files. They will be deleted with it.`
+      return [
+        files.count === 1
+          ? "The folder holds 1 file. It will be deleted with the folder."
+          : `The folder holds ${files.count} files. They will be deleted with it.`,
+      ]
     case "missing":
       return null
     case "unreadable":
-      return "dux could not count the files in the folder. Everything in it will be deleted with it."
+      return ["dux could not count the files in the folder. Everything in it will be deleted with it."]
     default:
       return assertNever(files)
   }

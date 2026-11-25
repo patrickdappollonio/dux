@@ -426,3 +426,31 @@ mod tests {
         ));
     }
 }
+
+/// The folder box's label for an agent whose folder dux created, naming the
+/// folder a tick deletes.
+pub fn folder_box_label_prose(folder_label: &str) -> Prose {
+    Prose::new()
+        .text("Also delete its folder ")
+        .name(folder_label)
+}
+
+/// The warning under a ticked folder box: how many files go with the folder
+/// dux created, or that dux could not count them. `None` for an empty or
+/// missing folder, which loses nothing.
+pub fn folder_files_prose(files: &crate::agent_folders::FolderFiles) -> Option<Prose> {
+    match files {
+        crate::agent_folders::FolderFiles::Counted { count: 0 }
+        | crate::agent_folders::FolderFiles::Missing => None,
+        crate::agent_folders::FolderFiles::Counted { count: 1 } => {
+            Some(Prose::new().text("The folder holds 1 file. It will be deleted with the folder."))
+        }
+        crate::agent_folders::FolderFiles::Counted { count } => Some(Prose::new().text(format!(
+            "The folder holds {count} files. They will be deleted with it."
+        ))),
+        crate::agent_folders::FolderFiles::Unreadable => Some(Prose::new().text(
+            "dux could not count the files in the folder. Everything in it will be deleted \
+             with it.",
+        )),
+    }
+}

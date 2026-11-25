@@ -394,6 +394,8 @@ mod tests {
         "delete_branch_loss",
         "delete_worktree_files_checking",
         "delete_worktree_files",
+        "delete_folder_label",
+        "delete_folder_files",
     ];
 
     fn build_delete_agent_box(sentence: &str, args: &Value) -> Prose {
@@ -447,6 +449,14 @@ mod tests {
             "delete_branches_checking" => crate::delete_agent_prose::branches_checking_prose(),
             "delete_worktree_files_checking" => {
                 crate::delete_agent_prose::worktree_files_checking_prose(&s("agent"))
+            }
+            "delete_folder_label" => {
+                crate::delete_agent_prose::folder_box_label_prose(&s("folder"))
+            }
+            "delete_folder_files" => {
+                let files: crate::agent_folders::FolderFiles =
+                    serde_json::from_value(args["files"].clone()).expect("files");
+                crate::delete_agent_prose::folder_files_prose(&files).unwrap_or_default()
             }
             "delete_worktree_files" => {
                 let files = &args["files"];
