@@ -1,4 +1,5 @@
-//! An editor move of a folder around a worktree whose removal is running waits for the removal.
+//! An editor move of a folder around a worktree whose removal is running
+//! waits for the removal.
 
 use std::net::SocketAddr;
 

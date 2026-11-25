@@ -68,12 +68,11 @@ use tower::ServiceExt;
 /// Run with `cargo test -- --nocapture` to see the line; the build script's
 /// `cargo:warning` says the same thing unconditionally.
 ///
-/// The reason is per-STATE, not one sentence covering both skip routes. It used to
-/// say "no previously built web/dist, so the embedded page is build.rs's notice
-/// page" whichever route had been taken, which is false on the reuse route: there
-/// IS a previous dist and the page is a real app. A printed reason nobody can
-/// trust is how people stop reading printed reasons, and this module's docs
-/// promise that the reason is printed.
+/// The reason is per-STATE, not one sentence covering both skip routes: a
+/// sentence saying the embedded page is build.rs's notice page would be false
+/// on the reuse route, where there IS a previous dist and the page is a real
+/// app. A printed reason nobody can trust is how people stop reading printed
+/// reasons, and this module's docs promise that the reason is printed.
 macro_rules! require_real_ui_build {
     ($test:literal) => {
         match dux_web::web_assets::ui_build_state() {
@@ -522,8 +521,8 @@ fn chunk_refs(js: &str) -> Vec<String> {
     found
 }
 
-/// The exact placeholder page an older `build.rs` wrote on a failed frontend
-/// build, kept verbatim so the assertions below are about the real thing.
+/// A placeholder page of the kind a build script that tolerated a failed
+/// frontend build would embed: a doctype and a `root` element, no bundle.
 const PLACEHOLDER_PAGE: &str = "<!doctype html><title>dux</title><div id=\"root\">web assets not built - run npm run build in crates/dux-web/web</div>";
 
 #[test]

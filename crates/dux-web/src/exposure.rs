@@ -2,9 +2,9 @@
 //! Tailscale Funnel, a raw TCP forward onto its port, and the `tailscale serve`
 //! routes that end at it.
 //!
-//! While dux sees (or cannot rule out) a Funnel to its port and has no login, it
-//! refuses every request. With the optional password, that knowledge feeds
-//! request classification instead (`crate::auth::provenance`):
+//! Whether dux sees (or cannot rule out) a Funnel to its port does not decide
+//! whether it serves; that knowledge feeds request classification
+//! (`crate::auth::provenance`):
 //!
 //! - While anything might hand dux a bare stream from loopback that nobody on
 //!   this machine sent (a Funnel to dux, a raw TCP forward to dux, or a state in

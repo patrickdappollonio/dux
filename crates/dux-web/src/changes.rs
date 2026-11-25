@@ -1375,8 +1375,9 @@ mod tests {
     }
 
     /// One untracked dependency directory must not become one wire row PER
-    /// FILE: a `node_modules` is ~29k rows (3.9 MB of JSON in the preview, 19.7
-    /// MB at 150k). The sweep folds a wholly untracked folder into one row that carries its file count, the way `git status`
+    /// FILE: a `node_modules` can be ~29k rows (3.9 MB of JSON measured in the
+    /// preview, 19.7 MB at 150k files). The sweep folds a wholly untracked
+    /// folder into one row that carries its file count, the way `git status`
     /// itself reports it.
     #[tokio::test]
     async fn huge_changes_repro_untracked_directory_rows_are_bounded() {

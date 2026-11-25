@@ -2082,8 +2082,8 @@ pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
 /// Wall-clock only: the phase is a function of `started.elapsed()`, never of
 /// `tick_count`, so the cue runs at the same speed whatever the frame cadence
 /// is. It expires by itself once the elapsed time passes
-/// [`overlay_dismiss::REFUSAL_BLINK_MS`], which is what guarantees it ends at
-/// rest instead of freezing mid-cycle.
+/// [`overlay_dismiss::REFUSAL_BLINK_MS`], which is what guarantees it ends
+/// at rest instead of freezing mid-cycle.
 ///
 /// `prompt` records which modal armed the cue, so a blink armed on one modal
 /// cannot flash a different modal opened within the cue's lifetime. The two
@@ -3531,9 +3531,9 @@ pub(crate) enum NameStandaloneAgentFocus {
 /// Opened from the palette it has two controls: the reference field, and the
 /// secondary "or choose an existing project" action that drops it into
 /// project-first mode. Two controls means an explicit focus enum and a focus
-/// that RENDERS. Opened from a project's own menu
-/// the project is already chosen, the secondary action is not offered, and the
-/// ring has a single enabled stop.
+/// that RENDERS. Opened from a project's own menu the project is already
+/// chosen, the secondary action is not offered, and the ring has a single
+/// enabled stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PullRequestInputFocus {
     Input,
@@ -4031,8 +4031,8 @@ pub(crate) enum PromptState {
     /// enum. `PullRequestInput` carries `PullRequestInputFocus` because it has
     /// two controls (the reference field and the project-chooser action); this
     /// modal has exactly ONE control, since the session already fixes the
-    /// project, and a one-control modal needs no
-    /// focus concept: there is nowhere for focus to move.
+    /// project, and a one-control modal needs no focus concept: there is
+    /// nowhere for focus to move.
     AttachPullRequestInput {
         session_id: String,
         /// The Pull requests modal it was opened from, which the close key
@@ -7168,8 +7168,8 @@ impl App {
     /// answered exactly like the agent surface.
     ///
     /// Scroll state is deliberately NOT part of this predicate: callers that
-    /// must suppress typing while scrolled back
-    /// combine it with [`Self::scroll_mode_active`].
+    /// must suppress typing while scrolled back combine it with
+    /// [`Self::scroll_mode_active`].
     pub(crate) fn center_typeable(&self) -> bool {
         self.focus == FocusPane::Center
             && matches!(self.fullscreen_overlay, FullscreenOverlay::None)
@@ -12822,8 +12822,8 @@ leading_branch = "main"
 
     #[test]
     fn shutdown_agents_gracefully_uses_the_top_level_timeout_not_server() {
-        // The config wiring: the TUI quit path must read the
-        // top-level `shutdown_timeout_seconds`, not `[server]` and not the 30s
+        // The TUI quit path must read the top-level
+        // `shutdown_timeout_seconds`, not `[server]` and not the 30s
         // default. We set the top-level value to 1s and the server value to a much
         // larger 20s, then time a quit with a SIGTERM-ignoring agent. If the call
         // site read the wrong field, the wait would be ~20s (or the 30s default)
@@ -12916,10 +12916,10 @@ leading_branch = "main"
         );
         signal_hook::low_level::unregister(resume_id);
 
-        // Phase 2: if the web server forced the OS
-        // disposition back to SIG_DFL (via `libc::signal`), the
-        // registry will NOT re-arm on the resume's register (the slot already
-        // exists, so no fresh `sigaction`), leaving the TUI handler dormant.
+        // Phase 2: if the web server forced the OS disposition back to SIG_DFL
+        // (via `libc::signal`), the registry would NOT re-arm on the resume's
+        // register (the slot already exists, so no fresh `sigaction`), leaving
+        // the TUI handler dormant.
         let pre_reset = Arc::new(AtomicBool::new(false));
         let pre_reset_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&pre_reset))
             .expect("register SIGURG before reset");

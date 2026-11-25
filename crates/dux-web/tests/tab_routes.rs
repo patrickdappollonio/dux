@@ -435,12 +435,12 @@ fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
 /// The drop-paste profile a tab launched with rides the SPINE, per tab, and
 /// retires with the process.
 ///
-/// It does not ride the BOOTSTRAP document, which a browser refetches only on a
-/// config change, so a client's copy would go stale for the whole life of a
+/// It does not ride the BOOTSTRAP document, which a browser refetches only on
+/// a config change, so a client's copy would go stale for the whole life of a
 /// process: a tab relaunched under a different provider would still be quoted
-/// for the previous one until a reconnect. A launch and a termination both refresh the spine, so
-/// that is where it belongs, and this drives a REAL launch and a REAL close to
-/// say so.
+/// for the previous one until a reconnect. A launch and a termination both
+/// refresh the spine, so that is where it belongs, and this drives a REAL
+/// launch and a REAL close to say so.
 ///
 /// It also pins the identity half. This harness's `[providers.claude]` block runs
 /// the command `cat`, and the published profile must say `cat`: the block NAME is

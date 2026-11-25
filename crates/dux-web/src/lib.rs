@@ -4177,8 +4177,8 @@ mod tests {
     #[tokio::test]
     async fn bind_plan_addrs_required_failure_is_fatal_and_names_the_addr() {
         // A REQUIRED address that is already held must FAIL the whole bind with the
-        // address in the error message (the operator
-        // named this address). dux.log also gets a logger::error (not asserted here
+        // address in the error message (the operator named this address).
+        // dux.log also gets a logger::error (not asserted here
         // because the test logger is process-global; the message text is the
         // contract we pin).
         let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a required addr");

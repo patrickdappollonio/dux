@@ -1210,9 +1210,9 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "");
     }
 
-    /// A changes-pane folder delete whose claim is refused leaves
-    /// its keyed busy open and its status key registered as live: no final
-    /// ever lands for it, so the "Deleting" spinner outlives the refusal.
+    /// A changes-pane folder delete whose claim is refused starts no worker,
+    /// so it retires its own keyed busy and live status key, or the
+    /// "Deleting" spinner would outlive the refusal.
     #[test]
     fn a_refused_folder_delete_claim_retires_its_busy() {
         let (mut app, worktree) = repo_app();

@@ -3880,8 +3880,8 @@ mod tests {
     }
 
     /// A standing git failure in the background poller reaches the status line.
-    /// The browser raises a warning about the same repository, so the terminal UI
-    /// must not show nothing: one fact, two screens.
+    /// The browser raises a warning about the same repository, so the terminal
+    /// UI says it too: one fact, one sentence on both screens.
     #[test]
     fn a_standing_changed_files_failure_reaches_the_status_line() {
         let mut app =

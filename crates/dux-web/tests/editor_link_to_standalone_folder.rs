@@ -1,15 +1,8 @@
-//! An editor write holds its editor ROOT,
-//! never the path it writes. A terminal's editor is rooted at the folder the
-//! terminal started in, and that folder can contain an agent's worktree (a
-//! standalone terminal starts in the home folder, which holds dux's worktrees
-//! root by default; a project terminal starts at the repository root, which
-//! holds any worktree kept inside the repository, such as `.worktrees/`). A
-//! write through such an editor into a worktree whose removal has begun is
-//! neither refused nor waited for, and a folder created there after git
-//! removed the worktree brings the worktree's folder back.
-//!
-//! This file covers a delete and a move of a link that is a standalone
-//! agent's folder, through such an editor.
+//! A terminal's editor is rooted at the folder the terminal started in, and
+//! that folder can hold a standalone agent's folder. When that folder, as dux
+//! recorded it, is a symbolic link inside the editor's root, the editor
+//! neither deletes nor moves the link: the occupancy check applies to a link
+//! that is an agent's folder as it does to any other folder.
 
 use std::net::SocketAddr;
 
@@ -128,10 +121,9 @@ async fn serve(
 
 /// A standalone agent's folder, as dux recorded it, is a symbolic link in a
 /// project's repository (the user pointed the agent at `repo/work`, a link
-/// to their real checkout). The project terminal's editor deletes `work`:
-/// the editor skips the occupancy check for any link, so the agent's folder
-/// is gone from under it, though the one occupancy rule says the agent lives
-/// exactly there.
+/// to their real checkout). A delete of `work` from the project terminal's
+/// editor asks the occupancy check, which says the agent lives exactly
+/// there, so the link stays.
 #[tokio::test]
 async fn the_editor_does_not_delete_the_link_that_is_a_standalone_agents_folder() {
     let tmp = dux_core::test_scratch::ScratchDir::new();

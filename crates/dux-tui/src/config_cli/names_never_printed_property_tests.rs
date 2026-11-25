@@ -250,9 +250,9 @@ fn env_ls_prints_a_value_only_with_show() {
     );
 }
 
-/// dux's own documented file with `line` added where a user adds one: at
-/// its very end, and first inside `[macros]` (where older documented files end) and
-/// `[keys]`, wherever those now sit.
+/// dux's own documented file with `line` added where a user adds one: at its
+/// very end, and first inside `[macros]` (where older documented files end)
+/// and `[keys]`, wherever those sit.
 fn documented_positions(line: &str) -> Vec<String> {
     crate::config::install_canonical_renderer();
     let base = crate::config::render_default_config();

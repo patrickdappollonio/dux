@@ -2175,7 +2175,7 @@ mod tests {
     /// then removes everything, so nothing is left running in a folder that
     /// is gone.
     #[test]
-    fn factory_reset_removes_a_worktree_a_recorded_dux_job_still_runs_in() {
+    fn factory_reset_ends_a_recorded_dux_job_before_removing_its_worktree() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {
@@ -2408,13 +2408,13 @@ mod tests {
         );
     }
 
-    /// A project terminal's session (recorded under the unowned
-    /// key, started at the project's repository, OUTSIDE the worktrees root)
-    /// left a job running whose working directory is agent m1's worktree.
-    /// The reset only looks at sessions started under the worktrees root, so
-    /// it neither ends this job nor keeps the folder it works in.
+    /// A project terminal's session (recorded under the unowned key, started
+    /// at the project's repository, OUTSIDE the worktrees root) left a job
+    /// running whose working directory is agent m1's worktree. The reset looks
+    /// at where each job works, not only at sessions started under the
+    /// worktrees root, so it ends this job or keeps the folder it works in.
     #[test]
-    fn factory_reset_removes_a_worktree_a_recorded_terminal_job_works_in() {
+    fn factory_reset_never_removes_a_worktree_a_recorded_terminal_job_works_in() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {

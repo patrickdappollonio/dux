@@ -2752,13 +2752,13 @@ mod tests {
         assert!(!worktree.join("out").exists());
     }
 
-    /// The TRACKED file `f.txt` has been replaced in the working
-    /// tree by a folder of the same name holding a repository of its own (a
-    /// clone with its history). git lists only ` D f.txt`, so the browser
-    /// offers discard as restoring one file, and confirms it as a file. The
-    /// route runs `git checkout -- f.txt`, which removes the folder in the way
-    /// recursively: the nested repository is deleted with no claim, no
-    /// occupancy question, no clearance and no repository confirmation.
+    /// The TRACKED file `f.txt` has been replaced in the working tree by a
+    /// folder of the same name holding a repository of its own (a clone with
+    /// its history). git lists only ` D f.txt`, so the browser offers discard
+    /// as restoring one file, and confirms it as a file. `git checkout --
+    /// f.txt` would remove the folder in the way recursively, so the route
+    /// keeps the nested repository rather than deleting it with no repository
+    /// confirmation.
     #[tokio::test]
     async fn a_tracked_file_discard_never_deletes_the_folder_that_took_its_place() {
         let (tmp, app, _state) = router_with_session_and_state().await;
@@ -3174,12 +3174,12 @@ mod tests {
         );
     }
 
-    /// The same check also decides every destructive file
-    /// operation: the changes pane's folder discard, nested-repo discard. The
-    /// web changes pane's discard route deletes an untracked folder whole
-    /// without asking the one occupancy question, so a standalone agent whose
-    /// folder sits untracked inside the worktree loses its folder (dux "never
-    /// creates, moves or removes a standalone agent's folder").
+    /// The one occupancy check also decides every destructive file operation,
+    /// the changes pane's folder and nested-repo discards included: the web
+    /// changes pane's discard route asks it before deleting an untracked
+    /// folder whole, so a standalone agent whose folder sits untracked inside
+    /// the worktree keeps its folder (dux never removes a standalone agent's
+    /// folder).
     #[tokio::test]
     async fn web_discard_does_not_delete_a_standalone_agents_folder() {
         let tmp = dux_core::test_scratch::ScratchDir::new();

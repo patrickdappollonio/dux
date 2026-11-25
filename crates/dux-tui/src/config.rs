@@ -2897,7 +2897,8 @@ pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 /// its own for. Each is named by its actions and never by the user's key.
 /// Also every newer default that starts unbound because the file already
 /// binds its key elsewhere, which names that default key, dux's own. These
-/// warn rather than refuse, because a file holding one loaded before the binding existed.
+/// warn rather than refuse, because a file holding one is a config an older
+/// dux loads, and refusing it would break a working config on upgrade.
 ///
 /// The interactive warning is worded by `extended_keys`: the config is read
 /// before dux knows what the host terminal sends, so with extended keys

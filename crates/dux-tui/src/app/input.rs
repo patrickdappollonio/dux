@@ -12059,9 +12059,9 @@ impl App {
     }
 
     /// Shared behavior for `ToggleFullscreen` landing on a dormant tab: never
-    /// launch it (only an explicit action launches). If the pane happens to be showing a fullscreen overlay,
-    /// minimize it so Ctrl-g still "does something" visible; otherwise this
-    /// is a silent no-op.
+    /// launch it (only an explicit action launches). If the pane happens to be
+    /// showing a fullscreen overlay, minimize it so Ctrl-g still "does
+    /// something" visible; otherwise this is a silent no-op.
     fn exit_interactive_without_launch(&mut self) {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
             self.fullscreen_overlay = FullscreenOverlay::None;
@@ -30768,8 +30768,8 @@ cyan = "#00ffff"
         );
     }
 
-    /// While a commit runs on its worker the box stays editable;
-    /// a message typed for the NEXT commit is wiped when the first one lands.
+    /// While a commit runs on its worker the box stays editable, and a message
+    /// typed for the NEXT commit is kept when the first one lands.
     #[test]
     fn a_message_typed_while_a_commit_runs_survives_its_final() {
         let mut app = test_app(default_bindings());
@@ -35110,8 +35110,8 @@ cyan = "#00ffff"
 
     /// A forwarded wheel is not a keystroke: stamping the window typing does
     /// would make scrolling an alt-screen agent read as Typing. It stamps the
-    /// POINTER window instead, which suppresses the repaint it
-    /// provokes without ever claiming the user typed.
+    /// POINTER window instead, which suppresses the repaint it provokes without
+    /// ever claiming the user typed.
     #[test]
     fn a_forwarded_wheel_stamps_the_pointer_window_not_the_typing_one() {
         let mut app = test_app(default_bindings());

@@ -8,9 +8,9 @@
 //!
 //! - **Sized from its content, clamped to the screen.** The dialog is
 //!   [`CONFIRM_DIALOG_WIDTH`] wide (or the screen's width, if that is less) and
-//!   exactly as tall as its wrapped prose plus its controls and buttons, so a
-//!   fixed percentage of the screen never leaves room for one row of prose on
-//!   an 80x24 terminal and drops the rest with nothing to say it had.
+//!   exactly as tall as its wrapped prose plus its controls and buttons, never
+//!   a fixed percentage of the screen: on an 80x24 terminal a percentage can
+//!   leave room for one row of prose and drop the rest with nothing to say so.
 //! - **A body too tall for the screen scrolls; it is never cut.** The controls
 //!   and buttons keep their rows and the prose gets what is left, scrolled the
 //!   way the welcome and "What's new" screens scroll theirs (the shared
