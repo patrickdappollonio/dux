@@ -53,3 +53,27 @@ fn an_upload_pasted_text_chars_below_its_floor_is_refused() {
 fn a_terminal_font_size_out_of_range_is_refused() {
     refused_naming_what_dux_uses("ui.terminal_font_size", "500", 14);
 }
+
+/// A relative agents folder is refused: it would be read against wherever
+/// dux was started.
+#[test]
+fn a_relative_standalone_agents_directory_is_refused() {
+    let dir = tempfile::tempdir().expect("create a temporary config directory");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "").expect("write an empty config file");
+    let key = lookup("defaults.standalone_agents_directory").expect("the key names a setting");
+    let error = match set_plain(&path, &key, "agents") {
+        Ok(report) => panic!(
+            "a relative folder was reported as set (now = {})",
+            report.now
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("absolute"), "{error}");
+    assert!(error.contains("nothing was changed"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the config file back"),
+        ""
+    );
+    set_plain(&path, &key, "~/agents").expect("a folder under the home directory is taken");
+}
