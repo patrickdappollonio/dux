@@ -49,8 +49,8 @@ type RealTerminal = InstanceType<typeof RealTerminal>
 // handler (TerminalPane assigns `pty.onConn = …` in its wiring effect) so a test
 // can drive a `failed`/`open` transition, and exposes a `connect` spy so we can
 // assert the Reconnect button reconnects THIS pane's socket directly rather than
-// falling back to the epoch-only store no-op that never remounts a companion
-// terminal. That no-op is the regression this file guards, for BOTH kinds.
+// falling back to the epoch-only store no-op, which never remounts a companion
+// terminal. Both kinds are covered.
 
 class TermStub {
   static instances: TermStub[] = []
@@ -698,7 +698,7 @@ afterEach(() => {
 
 // Run the same behavioral contract for both surfaces the pane serves. The
 // companion-terminal ("terminal") case is the load-bearing one: an epoch-only
-// reconnect is a NO-OP for it, so this parametrization is the regression guard.
+// reconnect is a NO-OP for it.
 // Build the pane's (union-typed) props for either surface: an agent carries
 // its owning session id, a terminal its owner ref.
 function paneProps(kind: "agent" | "terminal", id: string) {
@@ -729,7 +729,7 @@ describe.each([
     await passHandoffGrace()
     // Ignore the connect() the wiring effect already fired on mount; the button
     // must fire a fresh one on THIS socket. For a companion terminal an
-    // epoch-only reconnect would never reach here; that is the regression.
+    // epoch-only reconnect would never reach here.
     pty.connect.mockClear()
     fireEvent.click(screen.getByText("Reconnect"))
     expect(pty.connect).toHaveBeenCalledTimes(1)
@@ -803,8 +803,8 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
 
   // LOSING OWNERSHIP IS STICKY. Foregrounded and mounted changes nothing: the
   // same broadcast only re-titles the card, because sitting on an open card is
-  // not a gesture. The passive claim that used to live here is exactly what let
-  // an idle desktop beat the blipped owner back to its own pty.
+  // not a gesture, and a passive claim would let an idle desktop beat the
+  // blipped owner back to its own pty.
   it("does not claim the freed pty, even foregrounded and mounted", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
@@ -1137,7 +1137,7 @@ describe("TerminalPane take-over device naming", () => {
   const chromeMac =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-  // THE MERE-ATTACH CASE, the user-reported regression. Under attach-never-steals
+  // THE MERE-ATTACH CASE. Under attach-never-steals
   // a watcher's only word on who drives arrives on the `connected` handshake; no
   // `pty.owner` ever follows a plain attach, so the handshake must carry the
   // owner's device label or the card can only say "Active on another device".
@@ -1169,12 +1169,12 @@ describe("TerminalPane take-over device naming", () => {
     expect(screen.queryByText(/Active on/)).toBeNull()
   })
 
-  // FLIPPED. Losing the events socket used to WIPE the name while
-  // `ownerPresent` stayed true, so a flapping spine downgraded a perfectly good
-  // "Active on Chrome on macOS" to the generic copy and back again. The wipe was
-  // defending against a name going stale with no correction coming; the
-  // correction now exists (the spine's own `input_owner`, checked on the next
-  // open), so the name is kept and only ever replaced by a newer fact.
+  // Losing the events socket does not WIPE the name while `ownerPresent`
+  // stays true: a flapping spine would downgrade a perfectly good
+  // "Active on Chrome on macOS" to the generic copy and back again. A name can
+  // go stale only with no correction coming, and the correction exists (the
+  // spine's own `input_owner`, checked on the next open), so the name is kept
+  // and only ever replaced by a newer fact.
   it("KEEPS the specific name while the events socket is down", () => {
     const { rerender } = render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
@@ -2870,7 +2870,7 @@ describe("TerminalPane holds the PTY resize while a touch-scroll gesture is acti
 // being applied. Parsing the replay's `?1004h` mode-restore tail makes xterm
 // emit a focus report of its own through `onData` (measured against xterm
 // 6.0.0; see `lib/suppressViewerReports.ts` for the exact call chain), so every
-// replay applied to a pane that does not hold DOM focus used to type a spurious
+// replay applied to a pane that does not hold DOM focus would type a spurious
 // focus-OUT at the child. The claude CLI acts on focus state, so that is a real
 // input, not a cosmetic one.
 describe("TerminalPane focus reports raised by a replay", () => {
@@ -3388,16 +3388,15 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
   })
 })
 
-// THE COMPOSE-BAR GATE. The bar used to carry its own `useIsMobile()` width
-// check, so its visibility had a SECOND width opinion on top of the shell's. It
-// is now gated on the three-way `ui.compose_bar` mode resolved against
-// `pointer: coarse`.
+// THE COMPOSE-BAR GATE. The bar is gated on the three-way `ui.compose_bar` mode
+// resolved against `pointer: coarse`, with no width opinion of its own on top
+// of the shell's.
 //
 // SCOPE: this decides the BAR, not the mobile SHELL. The pane still returns the
-// desktop layout above the 768px breakpoint (that early return is layout, and
-// is deliberately untouched), so these tests hold the width inside the mobile
-// range and vary the pointer and the mode, which is exactly the axis the gate
-// now owns. The one test that varies width does so within that range.
+// desktop layout above the 768px breakpoint (that early return is layout), so
+// these tests hold the width inside the mobile range and vary the pointer and
+// the mode, which is the axis the gate owns. The one test that varies width does
+// so within that range.
 describe("TerminalPane compose bar gate", () => {
   const desktopWidth = window.innerWidth
   let pointerStub: MatchMediaStub | null = null
@@ -3433,10 +3432,8 @@ describe("TerminalPane compose bar gate", () => {
     expect(barIsUp()).toBe(false)
   })
 
-  // THE REGRESSION. Same device, same pointer, four widths inside the mobile
-  // range. The answer must not move. Under the old gate the bar was tied to a
-  // width comparison of its own; now the only thing that decides it is the
-  // pointer.
+  // Same device, same pointer, four widths inside the mobile range. The answer
+  // must not move: the only thing that decides it is the pointer.
   it("does NOT change when only the viewport width changes", () => {
     for (const coarse of [true, false]) {
       for (const width of [760, 640, 500, 320]) {
@@ -3453,8 +3450,8 @@ describe("TerminalPane compose bar gate", () => {
     }
   })
 
-  // A touchscreen laptop at a narrow window used to get the bar purely because
-  // the window was narrow. It is a FINE pointer, so it should not.
+  // A touchscreen laptop at a narrow window has a FINE pointer, so it does not
+  // get the bar just because the window is narrow.
   it("does not show the bar to a fine pointer at a phone-sized window", () => {
     pointerStub = stubCoarsePointer(false)
     setWidth(400)
@@ -3778,8 +3775,7 @@ describe("TerminalPane publishes its input group", () => {
     expect(paneInputGroupFor(["s1"])?.keysToggle).toBe(true)
   })
 
-  // THE DEFECT THIS FIXES: the press used to change nothing on a fine pointer.
-  // Both surfaces arrive together, because asking for the message box on a
+  // The press works on a fine pointer. Both surfaces arrive together, because asking for the message box on a
   // laptop brings its keys along.
   it("turns the virtual input on from a fine pointer, keys and all", async () => {
     const surface = await import("@/lib/typingSurface")
@@ -3838,8 +3834,7 @@ describe("TerminalPane publishes its input group", () => {
 // A NON-OWNER GETS NO INPUT ROW OF ITS OWN. It owns no input, so it has no
 // typing surfaces to reach and nothing to anchor: on a phone the top bar and
 // the flap are on screen outside theater, and in theater the floating pill
-// carries the items. The row it used to get existed only for the retired
-// top-bar preference, which was the one thing a viewer could still act on.
+// carries the items.
 describe("TerminalPane input group for a non-owner", () => {
   const desktopWidth = window.innerWidth
   let pointerStub: MatchMediaStub | null = null
@@ -3866,13 +3861,10 @@ describe("TerminalPane input group for a non-owner", () => {
 
   // A VIEWER, made one the way the server makes one: the `connected` handshake
   // names another connection as the pty's owner and the pane seeds its verdict
-  // from that. It used to be made by backgrounding the document, which was the
-  // pane's whole non-owner story back when a foregrounded attach really did
-  // claim; now a plain claim is refused silently, so the handshake is the only
+  // from that. A plain claim is refused silently, so the handshake is the only
   // thing that can tell a foregrounded pane it is watching rather than driving.
   // (The document stays VISIBLE here on purpose: seeding from the server has to
-  // beat the foreground guess, and hiding the document would let the old
-  // mechanism pass this suite whatever the seeding did.)
+  // beat the foreground guess.)
   const renderViewer = (state: DuxState) => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
@@ -3885,13 +3877,13 @@ describe("TerminalPane input group for a non-owner", () => {
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     renderViewer(makeState())
     expect(paneInputGroupFor(["s1"])).toBeNull()
-    // No typing surfaces for a viewer, per the tenet.
+    // No typing surfaces for a viewer.
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
   })
 
   it("gets none even with a stored top-bar preference on the bootstrap", () => {
-    // The retired preference used to be the viewer's one reason for a row.
+    // A viewer has no reason for an input row.
     const state = makeState()
     ;(
       state.bootstrap as unknown as { mobile_top_bar?: boolean }

@@ -104,26 +104,20 @@ const WORD_SEPARATORS = " \t\n"
 /// test is small and a dependency would move the thing being tested out of the
 /// repository. What it is a model OF is not "POSIX in general" but one specific
 /// program: `shlex` 1.3.0's `Shlex` iterator (`src/bytes.rs`), which is what Codex
-/// pins and therefore the only lexer whose answer matters here. It is written to
-/// mirror that source arm for arm, and the golden cases below pin the four places
-/// an earlier, looser version of this function DISAGREED with it:
+/// pins and therefore the only lexer whose answer matters here. It mirrors that
+/// source arm for arm:
 ///
-///   - a backslash-newline pair is REMOVED, inside double quotes and out; the
-///     earlier version kept the newline, which would have reported a token that
-///     the real lexer never produces;
-///   - `#` starts a comment, but only where a word would start; the earlier
-///     version had no notion of comments at all and lexed `#x` as a token;
-///   - the separators are exactly space, tab and newline; the earlier version used
-///     JavaScript's `\s`, which also splits on a carriage return, a form feed, a
-///     vertical tab and every Unicode space, none of which the real lexer splits
-///     on;
+///   - a backslash-newline pair is REMOVED, inside double quotes and out;
+///   - `#` starts a comment, but only where a word would start;
+///   - the separators are exactly space, tab and newline, not JavaScript's `\s`,
+///     which also splits on a carriage return, a form feed, a vertical tab and
+///     every Unicode space, none of which the real lexer splits on;
 ///   - a trailing backslash and an unclosed quote are ERRORS (`had_error`, which
 ///     makes `shlex::split` return `None`), which this models by throwing.
 ///
-/// None of those four could change an answer for the paths dux actually sends,
-/// because dux refuses a newline or a tab in a path. They are fixed anyway: the
-/// value of this function is entirely in being a faithful model, and a checker
-/// nobody checks proves nothing about the thing it checks.
+/// None of those could change an answer for the paths dux actually sends,
+/// because dux refuses a newline or a tab in a path. They are modelled anyway:
+/// the value of this function is entirely in being a faithful model.
 ///
 /// One deliberate divergence: `shlex::bytes::Shlex` walks BYTES, and this walks
 /// Unicode code points. Every character it gives meaning to is ASCII, so the two
@@ -183,8 +177,7 @@ function posixLex(input: string): string[] {
           throw new Error("input ended right after an unescaped backslash")
         }
         // A backslash-newline pair is a line continuation and contributes
-        // NOTHING, which is the case the earlier version of this function got
-        // wrong: it preserved whatever followed the backslash, always.
+        // NOTHING; whatever else follows a backslash is preserved.
         if (escaped !== "\n") out += escaped
       } else if (WORD_SEPARATORS.includes(ch)) break
       else out += ch
@@ -262,8 +255,7 @@ describe("posixLex (the check the quoting tests lean on)", () => {
   it("separates on a space, a tab and a newline, and on nothing else", () => {
     expect(posixLex("a\tb\nc d")).toEqual(["a", "b", "c", "d"])
     // A carriage return, a vertical tab, a form feed and a non-breaking space
-    // are ordinary characters. JavaScript's `\s` matches all four, which is why
-    // the earlier version of this lexer split on them.
+    // are ordinary characters, though JavaScript's `\s` matches all four.
     expect(posixLex("a\rb")).toEqual(["a\rb"])
     expect(posixLex("a\u000bb")).toEqual(["a\u000bb"])
     expect(posixLex("a\fb")).toEqual(["a\fb"])
@@ -355,13 +347,10 @@ describe("pastePayload", () => {
   describe("double_quoted", () => {
     it("produces the exact expected string for each awkward input", () => {
       // All FOUR characters a double quote gives meaning to are escaped: the
-      // quote, the backslash, the dollar and the backtick. The dollar and the
-      // backtick used to be left alone, on the stated reasoning that escaping
-      // them would change the bytes the CLI finally sees. That reasoning was
-      // WRONG, and the case below is the proof: shell lexing turns `\$` back
-      // into `$` and the backslash-backtick pair back into a backtick, so the
-      // escape is lossless and the form is safe even in front of something that
-      // EVALUATES rather than lexes.
+      // quote, the backslash, the dollar and the backtick. Escaping the dollar
+      // and the backtick is lossless: shell lexing turns `\$` back into `$` and
+      // the backslash-backtick pair back into a backtick, so the form is safe
+      // even in front of something that EVALUATES rather than lexes.
       expect(pastePayload(AWKWARD.plain, "double_quoted")).toBe(
         `"/home/p/shot.png" `,
       )
@@ -615,10 +604,9 @@ describe("the attachment length limit", () => {
   } as const
 
   it("belongs to the CLI, so it follows codex onto every form", () => {
-    // It used to be keyed by FORM, which was wrong in both directions, and both
-    // are pinned here. Codex configured with any of the other three forms
-    // escaped the limit entirely and dux would send an over-limit payload codex
-    // silently ignores.
+    // It is not keyed by FORM, which would be wrong in both directions: Codex
+    // configured with any of the other three forms would escape the limit
+    // entirely and dux would send an over-limit payload codex silently ignores.
     for (const form of ALL_FORMS) {
       const plan = dragDropPasteFor(published({ codex: form }), {
         kind: "agent",
@@ -938,8 +926,8 @@ describe("dropToastFor", () => {
   // A refusal reason is the SERVER's own words and the server writes whole
   // sentences ("...Try the drop again shortly."), while dux's own reasons do
   // not end in a terminator. Both go through the same templates, so the
-  // templates cannot assume either shape. They used to append a period
-  // unconditionally, and the busy refusal read "Try the drop again shortly..".
+  // templates cannot assume either shape. They must not append a period
+  // unconditionally, or the busy refusal would read "Try the drop again shortly..".
   describe("punctuation around a reason that is already a sentence", () => {
     const serverSentence =
       "The server is already handling as many dropped files as it allows at once. Try the drop again shortly."
@@ -992,18 +980,17 @@ describe("dropToastFor", () => {
 })
 
 describe("a drop whose files did not all end the same way", () => {
-  // The four defects this covers, with the values the old code produced:
+  // Four properties of the outcome message:
   //
-  //  - The saved-but-not-sent rung never added the rename note, so a mixed drop
-  //    reported only "Saved to ~/second, but the path was not sent: ...", losing
-  //    a.png -> a-1.png entirely, exactly when the user has to find it by hand.
-  //  - Renames among the SENT files were dropped the moment anything else was
-  //    not sent, for the same reason.
-  //  - Only the last successful upload's folder was kept, so two files in two
-  //    folders read "Saved 2 files to ~/second", which was false for the first.
-  //  - Success said "pasted their paths", which dux cannot know: a take-over
-  //    between the courtesy check and the socket frame makes the server drop it
-  //    with no acknowledgement.
+  //  - The saved-but-not-sent rung adds the rename note, so a mixed drop
+  //    reports a.png -> a-1.png when the user has to find the file by hand.
+  //  - Renames among the SENT files are kept even when something else was not
+  //    sent.
+  //  - Every upload's folder is reported, so two files in two folders do not
+  //    read "Saved 2 files to ~/second".
+  //  - Success does not say "pasted their paths", which dux cannot know: a
+  //    take-over between the courtesy check and the socket frame makes the
+  //    server drop it with no acknowledgement.
   const mixed: DropOutcome[] = [
     sent("a.png", "a-1.png", "~/first"),
     notSent("b.png", "b-1.png", "~/second"),
@@ -1126,11 +1113,8 @@ describe("stranded files whose reasons differ", () => {
   // The uploads are sequential, so the reasons genuinely differ within one
   // drop: a reconnect strands the first file ("the connection dropped"), and
   // another device taking over strands a later one ("another device took over
-  // input"). The rung took notSent[0].reason and applied it to all of them, so
-  // the second file's reason was discarded and the message said the connection
-  // had dropped when it had not. Recorded before the fix, for the two files
-  // below: "Saved, but the path was not sent: the connection dropped. The file
-  // is at a.png (/home/p/code/app/a.png), b.png (/home/p/code/app/b.png)."
+  // input"). Each file's own reason is reported, not notSent[0].reason for
+  // all of them.
   const dropped = "the connection dropped"
   const takeover = "another device took over input"
 
@@ -1219,13 +1203,12 @@ describe("what a refused upload is reported as", () => {
     expect(reason).not.toMatch(/\.$/)
   })
 
-  // The old version appended its own tail unconditionally, and the server's
-  // body already ends in "Try the drop again shortly.", so the user was told
-  // twice and the second copy was comma-spliced into the middle of the server's
+  // dux must not append its own tail unconditionally: the server's body
+  // already ends in "Try the drop again shortly.", so the user would be told
+  // twice and the second copy comma-spliced into the middle of the server's
   // own sentence: "...Try the drop again shortly, so it was not saved; try the
-  // drop again in a moment". The previous assertions did not catch it: they
-  // only checked that the advice was present at all and that no period was
-  // doubled.
+  // drop again in a moment". Checking only that the advice is present and that
+  // no period is doubled would not catch it.
   it("does not tell the user to retry twice when the server already said so", () => {
     const reason = dropRefusalReason(503, busyBody)
     const retries = reason.toLowerCase().match(/\btry\b[^.!?]*\bagain\b/g) ?? []
@@ -1402,7 +1385,7 @@ describe("dropToastFor, for a long text paste turned into a file", () => {
   })
 
   it("says it TRIED to save when the save failed, and never claims it did", () => {
-    // The rung-1 case, and the one the lead-in used to lie about. The upload
+    // The rung-1 case, where the lead-in must not lie. The upload
     // was refused, so nothing was saved; and because the paste was cancelled to
     // make room for the file, the text was not typed either. A lead-in that
     // says "dux saved it as a file" in front of "could not save it" tells the

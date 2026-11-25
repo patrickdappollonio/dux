@@ -238,10 +238,9 @@ describe("Changes-pane visibility", () => {
     ).resolves.toBe(false)
   })
 
-  // `toggleChangesPane` used to be reachable from the web command palette's
-  // "toggle-remove-git-pane" entry. That surface is gone (the Changes pane is a
-  // Preferences row now), but the action itself is still live: the Changes
-  // actions menu calls it. Drive it directly.
+  // `toggleChangesPane` is not reachable from a command palette on the web (the
+  // Changes pane is a Preferences row), but the action itself is live: the
+  // Changes actions menu calls it. Drive it directly.
   it("toggleChangesPane flips the pane's visibility", async () => {
     const mod = await loadStore()
     mod.toggleChangesPane()
@@ -255,11 +254,11 @@ describe("Changes-pane visibility", () => {
   })
 })
 
-// The pane could be dragged to zero width, and the zero was nobody's business:
-// the preference still said "visible", so the header's reopen button (gated on
-// the preference alone) stayed away, and the pane's own hide item was inside the
-// zero-width pane. The pane was unreachable until a reload. These are the pure
-// halves of the fix; the panel wiring is asserted in App.test.tsx.
+// The pane can be dragged to zero width, and the zero must not make the pane
+// unreachable: the preference still says "visible", so the header's reopen
+// button (gated on the preference alone) stays away, and the pane's own hide
+// item is inside the zero-width pane. These are the pure halves; the panel
+// wiring is asserted in App.test.tsx.
 describe("Changes-pane width", () => {
   it("setChangesPanePercent clamps to 0..100 and drops a no-op write", async () => {
     const mod = await loadStore()

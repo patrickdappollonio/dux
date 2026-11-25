@@ -305,11 +305,11 @@ function makeState(): DuxState {
 /// FOCUSED on a tab running `tabProvider`, with the server publishing the forms
 /// it publishes in a real deployment.
 ///
-/// The two are kept DIFFERENT by every caller, and that is the point. An earlier
-/// version set both to the same value, so it would have passed unchanged if
-/// resolution had regressed from the focused tab's provider to the session's. A
-/// session and its focused tab genuinely differ whenever a tab is retargeted or
-/// added with another provider, which is the ordinary case this has to get right.
+/// The two are kept DIFFERENT by every caller, and that is the point: a test
+/// that set both to the same value would pass unchanged if resolution
+/// regressed from the focused tab's provider to the session's. A session and
+/// its focused tab genuinely differ whenever a tab is retargeted or added with
+/// another provider, which is the ordinary case this has to get right.
 function stateRunning(sessionProvider: string, tabProvider: string): DuxState {
   const s = makeState()
   const session = s.spine!.sessions[0]
@@ -612,9 +612,7 @@ describe("the paste form follows the provider running in the pane", () => {
   }
 
   it("gives a TERMINAL the shell-safe path, whatever its owning agent runs", async () => {
-    // This test used to pin the opposite, and pinning it was the whole problem:
-    // a terminal got the path BARE, on the reasoning that it runs a shell rather
-    // than that CLI. That reasoning is inverted. Running a shell is exactly why
+    // A terminal gets the path QUOTED, not bare: running a shell is exactly why
     // the path must be quoted, because the shell is what would split a space,
     // expand a `$` and RUN a command substitution the moment the user presses
     // Enter on the line the path was pasted into.
@@ -630,10 +628,10 @@ describe("the paste form follows the provider running in the pane", () => {
   })
 
   it("makes a hostile path inert in a TERMINAL: a dollar, a backtick and a space", async () => {
-    // The case the bare form shipped wrong. Bare, this line reads as three
-    // words, one of them a command substitution that DELETES A DIRECTORY and
-    // one a substitution that runs `whoami`, and the shell would act on all of
-    // it. Quoted, the whole thing is one literal argument.
+    // Bare, this line reads as three words, one of them a command substitution
+    // that DELETES A DIRECTORY and one a substitution that runs `whoami`, and
+    // the shell would act on all of it. Quoted, the whole thing is one literal
+    // argument.
     const path = "/tmp/p1/$(rm -rf ~) `whoami`/shot.png"
     expect(await dropOnTerminalOwnedBy("claude", path)).toEqual([
       "'/tmp/p1/$(rm -rf ~) `whoami`/shot.png' ",
@@ -649,10 +647,10 @@ describe("the paste form follows the provider running in the pane", () => {
   })
 
   it("sends a very long path to a TERMINAL, because a shell has no such limit", async () => {
-    // The paste-length limit used to be keyed by FORM, and a terminal always
-    // uses the shell-safe form, so a terminal inherited codex's composer limit.
-    // dux withheld a perfectly good path from a shell and told the user it was
-    // too long for "this agent", which is not even what it was talking to.
+    // The paste-length limit is not keyed by FORM: a terminal always uses the
+    // shell-safe form, and must not inherit codex's composer limit, or dux
+    // would withhold a perfectly good path from a shell and tell the user it was
+    // too long for "this agent", which is not what it is talking to.
     //
     // 2000 characters, comfortably past codex's threshold, and it goes out.
     const longPath = `/tmp/p1/${"a".repeat(1_992)}`
@@ -700,11 +698,11 @@ describe("the paste form follows the provider running in the pane", () => {
 
 describe("which CLI a pane is actually talking to", () => {
   // A provider's BLOCK NAME is free text the user picks; the `command` is what
-  // says which CLI runs. The measured paste-length limit used to be keyed by the
-  // name, so it answered for the wrong tool in both directions: a real Codex
-  // under any other name got no limit and was handed oversized paths it silently
-  // ignores, and an unrelated CLI merely NAMED codex had valid long paths
-  // withheld from it. Both directions are asserted on the bytes.
+  // says which CLI runs. The measured paste-length limit is keyed by the
+  // command, so a real Codex under any other name gets its limit and is not
+  // handed oversized paths it silently ignores, and an unrelated CLI merely
+  // NAMED codex does not have valid long paths withheld. Both directions are
+  // asserted on the bytes.
 
   const longPath = `/tmp/p1/${"a".repeat(1_992)}`
 
@@ -820,12 +818,11 @@ describe("two live tabs of one provider that launched with different forms", () 
 describe("a tab whose live process is replaced under the pane", () => {
   // THE STALENESS DEFECT, end to end, in the bytes.
   //
-  // What a tab launched with used to ride the BOOTSTRAP document, which the
+  // What a tab launched with does not ride the BOOTSTRAP document, which the
   // browser refetches only on `config.changed`. A launch and a termination
   // refresh the SPINE (`sessions.changed`) instead, so a client that had
-  // refetched config before a relaunch kept resolving the OLD entry for the
-  // whole life of the new process: nothing but a reconnect or a restart
-  // corrected it. Both sequences below therefore START from a stale copy and
+  // refetched config before a relaunch is corrected by it rather than
+  // resolving the OLD entry for the whole life of the new process. Both sequences below therefore START from a stale copy and
   // are corrected by the relaunch, rather than being handed a correct one.
 
   /// One drop against whatever `mockState` currently says, returning the bytes.
@@ -1107,8 +1104,8 @@ describe("when a file cannot be pasted", () => {
   })
 
   it("says a busy server is temporary, which a 413 does not", async () => {
-    // The status was carried and never read, so this refusal used to be worded
-    // exactly like the permanent one above.
+    // The status is read, so this refusal is not worded like the permanent one
+    // above.
     const { FileDropApiError } = await import("@/lib/fileDropApi")
     uploadDroppedFile.mockRejectedValue(
       new FileDropApiError(
@@ -1122,8 +1119,8 @@ describe("when a file cannot be pasted", () => {
     const message = toastText(vi.mocked(toast.error).mock.calls[0][0])
     expect(message).toContain("shot.png")
     // The server's own words carry the advice, so dux does not add a second
-    // copy of it. The whole sentence is asserted, because the bug this replaces
-    // was a wording defect that every looser assertion passed: dux used to weld
+    // copy of it. The whole sentence is asserted, because a looser assertion
+    // would pass a wording defect: dux must not weld
     // ", so it was not saved; try the drop again in a moment" onto the end of
     // the server's already-finished sentence.
     expect(message).toBe(
@@ -1274,11 +1271,8 @@ describe("the drop overlay", () => {
   it("offers nothing at all when file drop is switched off", async () => {
     // `[server] file_drop_max_bytes = 0` is documented as switching the feature
     // off, and the server refuses every upload when it is. The browser's gate
-    // checked ownership, whether this is a phone, and what was being dragged,
-    // but never whether the feature existed, so a disabled dux still advertised
-    // a drop target, still accepted the drop, and only then produced a toast
-    // full of the server's refusals. Recorded before the fix: the overlay
-    // rendered and uploadDroppedFile was called once per file.
+    // must therefore also check that the feature exists: a disabled dux must not
+    // advertise a drop target or call uploadDroppedFile.
     mockState = makeState()
     mockState.bootstrap!.file_drop_max_bytes = 0
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
@@ -1296,11 +1290,10 @@ describe("the drop overlay", () => {
   it("offers nothing while the setting is not known yet", async () => {
     // Bootstrap and the workspace load in parallel, so there is a real window
     // in which the pane is on screen and dux does not yet know whether file
-    // drop exists. The gate defaulted that window to ENABLED, so a drag landing
-    // in it advertised a drop target and uploaded, even for a dux with the
-    // feature switched off. The previous test could not see this because it
-    // pre-seeded the setting. Recorded before the fix: the overlay rendered and
-    // uploadDroppedFile was called once.
+    // drop exists. The gate must not default that window to ENABLED, or a drag
+    // landing in it would advertise a drop target and upload, even for a dux
+    // with the feature switched off. Unlike the previous test, the setting is
+    // not pre-seeded.
     uploadDroppedFile.mockResolvedValue(saved("shot.png"))
     mockState = makeState()
     mockState.bootstrap = null
@@ -1316,9 +1309,8 @@ describe("the drop overlay", () => {
     // The other half of the same window: the drag starts while the answer is
     // unknown or the feature is on, and the bootstrap document lands saying it
     // is off. The gate then refuses the matching dragleave and drop, so nothing
-    // is left that could clear the overlay and it would sit on the pane until
-    // it unmounted. Recorded before the fix: the overlay was still in the
-    // document after the setting arrived.
+    // is left that could clear the overlay, and it must not sit on the pane
+    // until it unmounts.
     mockState = makeState()
     mockState.bootstrap!.file_drop_max_bytes = 1024
     const { rerender } = render(

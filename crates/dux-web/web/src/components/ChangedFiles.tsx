@@ -870,7 +870,7 @@ function GroupHeader({
 // browser makes them do.
 //
 // It matches the `⋯` on variant as well as geometry. It navigates rather than
-// acts, and the tenet would let it be quieter, but a ghost glyph beside an
+// acts, so it could be quieter, but a ghost glyph beside an
 // outlined square read as a decoration rather than a control, so the two share
 // the header's one outline treatment.
 //
@@ -1088,7 +1088,7 @@ function ChangesHeader({
               * which therefore stay ABSENT for it rather than disabled, here
               * and in every other menu.
               *
-              * Refresh is greyed too, as the user asked, and nothing waits on
+              * Refresh is greyed too, and nothing waits on
               * it: the server refuses a refresh of a quiet pane anyway, and
               * the folder is looked at again without one. While an agent is
               * selected the web's changes service polls it (every 2s while

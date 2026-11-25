@@ -30,7 +30,7 @@ import { hasRenderableBody, NO_NOTES_EXPLANATION } from "@/lib/releaseNotes"
 //
 // Every colour is a token, and this screen introduces no accent hue of its own.
 
-/** The duck's column width and the art inside it, from the approved mock. */
+/** The duck's column width and the art inside it. */
 const ART_COLUMN = "w-[152px]"
 const DUCK_SIZE = "w-[118px]"
 
@@ -81,7 +81,7 @@ function FirstLoad({ open, onClosed }: { open: boolean; onClosed: () => void }) 
         },
       ]
     : [
-        // The approved order: Close, then the primary that ends the row.
+        // Order: Close, then the primary that ends the row.
         { label: "Close", tone: "plain", onSelect: () => closeFirstLoad() },
         {
           label: "Open full notes",
@@ -108,8 +108,8 @@ function FirstLoad({ open, onClosed }: { open: boolean; onClosed: () => void }) 
       // the browser's Back must not be what closes it. Opened from the menu, it
       // is an ordinary dialog and Back closes it.
       historyEntry={state.automatic !== true}
-      // The approved design: a corner close and only the screen's own buttons
-      // in the footer, where a report would otherwise end with a Close.
+      // A corner close and only the screen's own buttons in the footer, where a
+      // report would otherwise end with a Close.
       closeAt="corner"
       size="w700"
       title={

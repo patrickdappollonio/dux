@@ -159,7 +159,7 @@ export function ComposeBar({
   }
 
   // A press on the frame's padding, the strip above and below the text that
-  // used to belong to the textarea. It lands the caret in the box by hand
+  // is not the textarea. It lands the caret in the box by hand
   // rather than leaving it to the browser, which would move focus to the frame
   // and dismiss the soft keyboard. A press on the box itself is the browser's.
   const onFramePointerDown = (event: React.PointerEvent) => {

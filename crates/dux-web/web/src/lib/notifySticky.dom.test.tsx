@@ -193,7 +193,7 @@ describe("an ordinary notification", () => {
     )
   })
 
-  it("is pinned open by a fixed id under the same burst, which is the bug the id removal fixes", async () => {
+  it("is pinned open by a fixed id under the same burst, which is why no id is fixed", async () => {
     // The counterexample, so the test above is measuring something. Same
     // cadence, same window, one shared id: the countdown never gets to finish.
     setStatusClearSeconds(0.25)

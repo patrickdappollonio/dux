@@ -215,8 +215,8 @@ describe("resolvedTypingSurface", () => {
     expect(resolvedTypingSurface("auto", false, null)).toBe("direct")
   })
 
-  // The whole point of the fix: an explicit choice wins on EVERY device, in
-  // both directions. Turning the message box on where the browser thinks it is
+  // An explicit choice wins on EVERY device, in both directions. Turning the
+  // message box on where the browser thinks it is
   // not needed is allowed.
   it("lets an explicit choice win in both directions on either pointer", () => {
     expect(resolvedTypingSurface("auto", false, "compose")).toBe("compose")
@@ -296,8 +296,8 @@ describe("terminalKeysApply", () => {
     expect(terminalKeysApply("always", false, null)).toBe(true)
   })
 
-  // The inert-toggle bug: choosing the message box on a laptop used to leave
-  // the keys behind, because the key row was gated on the pointer alone.
+  // Choosing the message box on a laptop brings the keys along: the key row is
+  // not gated on the pointer alone.
   it("brings the keys to a fine pointer that chose the message box", () => {
     expect(terminalKeysApply("auto", false, "compose")).toBe(true)
   })

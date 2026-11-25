@@ -63,9 +63,10 @@ export type CreationMenuItem = CreationMenuAction | CreationMenuSeparator
 export const NEW_AGENT_PLAIN_ID = "new-agent-plain"
 
 /** What starting a standalone agent is: its icon and the store action that
- *  opens its folder picker. The "New standalone agent…" item and the New agent
- *  picker's footer both read it, so the second door cannot grow a second flow
- *  or a different glyph. */
+ *  opens its dialog, which begins with a name step (dux creates a folder named
+ *  after the agent) and offers choosing an existing folder instead. The "New
+ *  standalone agent…" item and the New agent picker's footer both read it, so
+ *  the second door cannot grow a second flow or a different glyph. */
 export const STANDALONE_AGENT_CREATION = {
   icon: FolderOpen,
   run: () => openStandaloneAgentPicker(),

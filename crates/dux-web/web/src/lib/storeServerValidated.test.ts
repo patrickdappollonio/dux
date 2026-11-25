@@ -17,9 +17,9 @@ vi.mock("./reloadPage", () => ({ reloadPage }))
 
 // JSDOM DELIBERATELY, AND WITHOUT IT THE FILE TESTS THE WRONG BRANCH. The store
 // runs `boot()` only where there is a `window`, so in the default node
-// environment this file exercised the path no browser ever takes: no boot, no
-// baseline read, no sockets. The regression pinned below lives entirely inside
-// what boot does, so it is only reachable here.
+// environment this file would exercise the path no browser ever takes: no boot,
+// no baseline read, no sockets. What is pinned below lives entirely inside what
+// boot does, so it is only reachable here.
 
 // THE PTY RETRY GATE IS "VALIDATED", NOT "OPEN".
 //
@@ -173,16 +173,15 @@ describe("the PTY retry gate", () => {
     expect(serverValidated()).toBe(true)
   })
 
-  // THE REGRESSION THIS TEST EXISTS FOR. `boot()` arms `skipNextEventsOnOpenLoad`
-  // so the first events open does not duplicate the load the boot driver already
-  // performed, and the run-identity probe used to live ONLY inside the branch
-  // that flag skips. So on a freshly loaded page the signal was never set, the
-  // PTY gate never opened, and a dropped PTY socket re-armed its retry timer
-  // forever without ever attempting one: a terminal that lost its socket on a
-  // fresh page never came back, with no cover and no Reconnect box to say so.
-  // Measured in the preview container. Boot itself now answers the question,
-  // because the baseline read that boot performs is BY CONSTRUCTION a round trip
-  // to the very server this tab loaded from.
+  // `boot()` arms `skipNextEventsOnOpenLoad` so the first events open does not
+  // duplicate the load the boot driver already performed, so the run-identity
+  // probe must not live ONLY inside the branch that flag skips: otherwise on a
+  // freshly loaded page the signal is never set, the PTY gate never opens, and
+  // a dropped PTY socket re-arms its retry timer forever without ever
+  // attempting one (a terminal that lost its socket never comes back, with no
+  // cover and no Reconnect box to say so). Boot itself answers the question,
+  // because the baseline read that boot performs is BY CONSTRUCTION a round
+  // trip to the very server this tab loaded from.
   it("is RELEASED by boot alone, before any events open, on a freshly loaded page", async () => {
     await settle()
     expect(serverValidated()).toBe(true)
@@ -196,11 +195,11 @@ describe("the PTY retry gate", () => {
   })
 
   // THE BASELINE HAS THE SAME HOLE. `loadServerIdentityBaseline` is
-  // fire-and-forget, so a page loaded during a blip used to keep a null baseline
+  // fire-and-forget, so a page loaded during a blip would keep a null baseline
   // for its whole life, and a null baseline never reports a change: the
-  // run-identity hard reload was silently switched off for that tab. It re-asks
-  // now, backing off, and never gives up while it has no baseline, because a
-  // reconnect has nothing to compare a new run against until it does.
+  // run-identity hard reload would be silently switched off for that tab. It
+  // re-asks, backing off, and never gives up while it has no baseline, because
+  // a reconnect has nothing to compare a new run against until it does.
   it("keeps asking for a missing boot baseline, so a restart after the endpoint recovers still reloads", async () => {
     // Rebuild the store with the endpoint already unreachable, so the read boot
     // itself performs is the one that comes back unknown.

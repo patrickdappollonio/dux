@@ -664,11 +664,10 @@ describe("when an image paste cannot be taken", () => {
   })
 
   it("lets a viewer's paste chord reach the browser, so the refusal is reachable at all", async () => {
-    // The refusal above is only ever seen if a native paste event fires, and
-    // the key handler used to swallow the chord for a non-owner: no event, no
-    // capture listener, no toast. Only on Linux and Windows, since `Cmd+v`
-    // classifies as passthrough and never reached that branch, so the bug was
-    // platform-asymmetric on top of being silent.
+    // The refusal above is only ever seen if a native paste event fires, so the
+    // key handler must not swallow the chord for a non-owner (no event, no
+    // capture listener, no toast). Only on Linux and Windows, since `Cmd+v`
+    // classifies as passthrough and never reaches that branch.
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
     act(() => notifyPtyOwner("s1", "someone-else", undefined, undefined))

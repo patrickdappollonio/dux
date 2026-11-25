@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest"
 // Drift guard for the traced duck favicon path. The committed DUCK_PATH in
 // favicon.ts is produced by `scripts/gen-duck-favicon.mjs`. That is a MANUAL,
 // ad-hoc regeneration step (potrace output is nondeterministic, and jimp/potrace
-// are not devDependencies); nothing in CI re-runs it, and the maintainer
-// validates the duck visually before committing. This test only guards the
+// are not devDependencies); nothing in CI re-runs it, so the duck is
+// validated visually before committing. This test only guards the
 // committed value's shape so it can never silently become empty/truncated/
 // malformed (e.g. a bad merge, a botched hand-edit, or a wrong-image trace).
 

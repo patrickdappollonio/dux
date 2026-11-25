@@ -8,7 +8,7 @@
 // Tailwind sorts them. Redefining a variant keeps its place in the stylesheet,
 // but `max-md` is not a variant of its own: it is the functional `max` variant
 // with the value `md`, so a `@custom-variant max-md` is a new variant sorted
-// after every other one, and would win every tie it used to lose (against
+// after every other one, and would win every tie it should lose (against
 // `sm:`, `md:`, `pointer-coarse:`, the `data-*` variants and the rest).
 // Redefining `max` itself keeps `max-md` where it always sorted; every other
 // `max-*` stays the media query Tailwind builds.

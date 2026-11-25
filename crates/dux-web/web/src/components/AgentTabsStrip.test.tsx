@@ -439,7 +439,7 @@ describe("AgentTabsStrip order and the first-tab pin", () => {
 
 describe("AgentTabsStrip phone height", () => {
   // A deliberate per-axis relaxation of the 40px touch-target floor (see the
-  // tenet and the justification at the pill): the pill drops to 36px VERTICALLY
+  // justification at the pill): the pill drops to 36px VERTICALLY
   // because its vertical neighbours are the header above (no tap target beside a
   // pill) and the PTY below (a cheap mis-tap), while every horizontal size is
   // kept because the horizontal neighbours are other tabs.

@@ -280,11 +280,11 @@ describe("the answer deadline", () => {
     beat.stop()
   })
 
-  // THE OUTAGE, which is what the deadline used to punish. `pendingSince` was
-  // cleared only by a reopen, so during a drop the deadline kept running against
-  // a beat nobody could answer, and every period past it dropped the CONNECTING
-  // attempt and started the reconnect over. The socket refusing frames is the
-  // evidence: nothing is being asked, so nothing is overdue.
+  // THE OUTAGE, which the deadline must not punish. If `pendingSince` were
+  // cleared only by a reopen, the deadline would keep running during a drop
+  // against a beat nobody could answer, and every period past it would drop the
+  // CONNECTING attempt and start the reconnect over. The socket refusing frames
+  // is the evidence: nothing is being asked, so nothing is overdue.
   it("stops timing an outstanding beat once the socket refuses frames", () => {
     const { beat, advance, stalls, state } = setup()
     beat.start()

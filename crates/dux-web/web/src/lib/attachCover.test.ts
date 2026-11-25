@@ -95,10 +95,8 @@ describe("the cover clears on the applied replay, never on the socket opening", 
                 // about a healthy socket that never sent a screen, so a socket
                 // that is not open must never produce it: the visible clock is
                 // reset by `pty.onOpen` alone and keeps running across a drop,
-                // so a slow reconnect used to slam an opaque panel over a
-                // perfectly good frozen picture. The loop covered this input all
-                // along and only asserted "not none", which is exactly why it
-                // did not catch it.
+                // so a slow reconnect must not slam an opaque panel over a
+                // perfectly good frozen picture.
                 if (cover.kind === "box" && cover.reason === "no-screen") {
                   expect(socket).toBe("open")
                 }

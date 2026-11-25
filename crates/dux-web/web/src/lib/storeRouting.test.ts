@@ -546,9 +546,9 @@ async function openNewTerminal(
 
 describe("a deleted agent never throws the user out of dux", () => {
   it("keeps the user inside the app after a deep-linked agent is deleted", async () => {
-    // The reported bug: arriving on `#/agent/s1` sets the terminal screen
-    // without pushing an entry, so collapsing the screen by stepping back
-    // walked past dux onto the browser's new-tab page.
+    // Arriving on `#/agent/s1` sets the terminal screen without pushing an
+    // entry, so collapsing the screen by stepping back must not walk past dux
+    // onto the browser's new-tab page.
     const mod = await loadStore("#/agent/s1", [
       { id: "s1", project_id: "p1" },
       { id: "s2", project_id: "p1" },
@@ -682,7 +682,7 @@ describe("a deleted agent never throws the user out of dux", () => {
     // A session-owned terminal's PTY exits while the user is watching it. Its
     // agent is alive one level up, so that is the destination: ejecting all the
     // way to home threw away a position that still exists. The deep-link path
-    // already did this; the prune path used to disagree with it.
+    // does this, and the prune path agrees with it.
     const mod = await loadStore("#/agent/s1/terminal/t1", [
       { id: "s1", project_id: "p1", terminals: ["t1"] },
     ])
@@ -1465,9 +1465,9 @@ describe("moving in pushes, and Back unwinds exactly", () => {
 })
 
 // The changes screen is a position like any other, so the URL has to keep
-// naming it. Resolving a route used to commit the target first and set the
-// screen second, so the URL was written from a half-applied route and the
-// `/changes` segment was stripped off the address the user was looking at.
+// naming it. Resolving a route must not commit the target first and set the
+// screen second, or the URL would be written from a half-applied route and the
+// `/changes` segment stripped off the address the user was looking at.
 describe("the changes screen keeps its place in the URL", () => {
   it("keeps the address it booted on", async () => {
     const mod = await loadStore("#/agent/s1/changes", [
@@ -1500,9 +1500,9 @@ describe("the changes screen keeps its place in the URL", () => {
     expect(mod.getSnapshot().mobileScreen).toBe("changes")
     expect(loc.hash).toBe("#/agent/s1/changes")
 
-    // The second round trip is the one that used to fail: the first Forward
-    // rewrote the entry down to the bare agent, so the screen became
-    // permanently unreachable by Forward.
+    // The second round trip is the one that matters: the first Forward rewrites
+    // the entry down to the bare agent, and the screen must stay reachable by
+    // Forward.
     history.back()
     history.forward()
     expect(mod.getSnapshot().mobileScreen).toBe("changes")
@@ -1876,9 +1876,9 @@ describe("a failing history write is reported as what it is", () => {
   })
 
   it("does not throw out of a user's click", async () => {
-    // The guard used to sit only around the spine apply, so every user-driven
-    // navigation was unprotected: a refused write threw into the click handler
-    // AFTER the screen had already moved.
+    // The guard sits around user-driven navigation as well as the spine apply:
+    // a refused write must not throw into the click handler AFTER the screen
+    // has already moved.
     const mod = await loadStore("", [
       { id: "s1", project_id: "p1" },
       { id: "s2", project_id: "p1" },
@@ -2902,9 +2902,9 @@ describe("the editor rides the URL", () => {
   })
 
   it("escapes a dead standalone link onto a real surface, never the boot spinner", async () => {
-    // The blocker: a standalone tab whose agent is gone used to keep
-    // `standaloneEditor` true with `editorTarget` null, and the not-found
-    // screen's only button then landed the shell on its boot spinner forever.
+    // A standalone tab whose agent is gone must not keep `standaloneEditor`
+    // true with `editorTarget` null, or the not-found screen's only button
+    // lands the shell on its boot spinner forever.
     const mod = await loadStore("#/editor/agent/missing", [
       { id: "s1", project_id: "p1" },
     ])
@@ -3629,7 +3629,7 @@ describe("journeys a fuzzer found", () => {
 
   // Only with the Navigation API: without it nothing tells this Back from a
   // link, so the entry resolves as a link does and is rewritten, which is the
-  // tenet's stated fallback for such a browser.
+  // fallback for such a browser.
   it.each([true])(
     "lands Back on an earlier load's bare agent entry without copying it (Navigation API %s)",
     async (nav) => {
@@ -3680,7 +3680,7 @@ describe("journeys a fuzzer found", () => {
 // - a landing on a closed tab raises exactly one toast saying so, and no other
 //   landing raises one.
 //
-// What the tenet itself exempts is exempted, and only that: without the
+// Only the stated exemption is exempted, and only that: without the
 // Navigation API a browser rewrites rather than going onto an exact entry, so
 // identical neighbours and still presses are allowed there; an entry written
 // before a reload is not this page's, so it is never gone onto; and a Forward

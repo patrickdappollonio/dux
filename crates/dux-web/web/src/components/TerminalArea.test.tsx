@@ -1050,9 +1050,9 @@ describe("TerminalArea dock", () => {
   })
 
   // The stopped agent's band holds the top of a maximized terminal, with Start
-  // at its right end, where the pill tucked 12px into the stack used to sit
-  // over Start and its focus ring. A browser must show Start whole, with the
-  // pill below the band.
+  // at its right end. A pill tucked 12px into the stack would sit over Start
+  // and its focus ring. A browser must show Start whole, with the pill below
+  // the band.
   it("tucks the pill under a stopped agent's band rather than over its Start", async () => {
     const rect = vi
       .spyOn(HTMLElement.prototype, "getBoundingClientRect")

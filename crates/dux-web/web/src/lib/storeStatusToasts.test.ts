@@ -471,7 +471,7 @@ describe("engine status → sonner toast routing", () => {
     // The async worktree-removal delete emits a `delete:{id}` busy whose final
     // arrives later keyed identically. Both ride `status` events; the busy adopts
     // the key as its sonner id so the final replaces it in place (otherwise the
-    // spinner strands on the anonymous slot, the reported worktree-delete bug).
+    // spinner strands on the anonymous slot).
     const mod = await loadStore()
     const { toast } = await import("sonner")
 

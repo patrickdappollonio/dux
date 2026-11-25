@@ -101,7 +101,7 @@ export function syncBeforeUnloadGuard(anyDirty: boolean): void {
 }
 
 // The restart-reload escape hatch, called by `reloadPage()` immediately before
-// reloading: that reload is silent by tenet and must win over the guard, at the
+// reloading: that reload is silent and must win over the guard, at the
 // cost of the drafts.
 export function disarmBeforeUnloadGuard(): void {
   syncBeforeUnloadGuard(false)

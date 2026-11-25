@@ -98,7 +98,7 @@ describe("worktreeDeleteReport", () => {
 })
 
 describe("leftoverDeleteReport", () => {
-  // The user's decision: no toast from a left-over folder delete stays on
+  // No toast from a left-over folder delete stays on
   // screen until closed, a warning included.
   it.each([true, false])("never pins the toast (warning: %s)", (warning) => {
     const r = leftoverDeleteReport({

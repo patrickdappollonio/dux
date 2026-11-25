@@ -92,9 +92,10 @@ describe("the module's own visibility wiring", () => {
 })
 
 // A pane that stops and restarts its heartbeat (an unmount and remount of the
-// same module, a target switch) used to be left with the clock `stop()` had
-// disposed: the listener was gone, so the clock counted HIDDEN time as visible
-// and the deadline elapsed against a page that had been in a pocket.
+// same module, a target switch) must not be left with the clock `stop()`
+// disposed: with the listener gone, the clock would count HIDDEN time as
+// visible and the deadline would elapse against a page that had been in a
+// pocket.
 describe("a heartbeat that is started again after being stopped", () => {
   it("still pauses its deadline while the page is hidden", () => {
     const { beat, advance, stalls } = setup()

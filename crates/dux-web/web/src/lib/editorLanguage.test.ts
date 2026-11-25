@@ -26,7 +26,7 @@ const REGISTRY: RegisteredLanguage[] = [
   { id: "toml", aliases: ["TOML"], extensions: [".toml"] },
   { id: "shell", aliases: ["Shell", "sh"], extensions: [".sh"] },
   { id: "dockerfile", aliases: ["Dockerfile"], filenames: ["Dockerfile"] },
-  // A hand-registered grammar that shipped without an alias.
+  // A hand-registered grammar with no alias.
   { id: "duckscript" },
 ]
 

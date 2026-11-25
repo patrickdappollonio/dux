@@ -120,7 +120,7 @@ describe("openFile", () => {
 
   // EditorBody's Monaco buffers are keyed by tab id, and a
   // preview-replace reuses the tab's id while swapping its path. If the
-  // replaced tab kept a stale `dirty: true` from the file it used to hold,
+  // replaced tab kept a stale `dirty: true` from the file it held before,
   // the strip's dirty dot and the close-confirm gating would misfire against
   // content that no longer exists in this tab. The reducer must always land
   // on `dirty: false` for the replaced tab.

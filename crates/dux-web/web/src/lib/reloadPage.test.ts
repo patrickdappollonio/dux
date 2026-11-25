@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { syncBeforeUnloadGuard } from "./editorDrafts"
 import { reloadPage } from "./reloadPage"
 
-// The server-restart reload is silent by tenet: no prompt, no toast, no
+// The server-restart reload is silent: no prompt, no toast, no
 // banner. The beforeunload guard (armed while an editor tab is dirty) would
 // turn it into a browser prompt, so `reloadPage()` must disarm the guard
 // BEFORE calling reload. Drafts are lost on a restart reload, deliberately:

@@ -25,7 +25,7 @@ vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })
 // not-found for a vanished agent, and the overlay Dialog stands down while
 // the tab is the standalone surface so EditorBody can never mount twice.
 // Also pinned: the phone header folds its secondary controls into one ⋯
-// menu (the row-actions tenet), keeping only the explorer toggle and Save
+// menu, keeping only the explorer toggle and Save
 // inline, while the desktop header keeps today's inline controls.
 
 if (!Element.prototype.getAnimations) {

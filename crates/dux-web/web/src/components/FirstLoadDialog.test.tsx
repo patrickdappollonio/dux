@@ -217,7 +217,7 @@ describe("FirstLoadDialog", () => {
       expect(add.className).toContain("bg-primary")
       expect(site.className).toContain("border-border")
       // And nothing else: two buttons in the footer, the website first, and
-      // the way out is the corner close, per the approved design.
+      // the way out is the corner close.
       expect(footerControls()).toEqual(["Visit the website", "Add a project"])
       const close = screen.getByRole("button", { name: "Close" })
       expect(footer().contains(close)).toBe(false)

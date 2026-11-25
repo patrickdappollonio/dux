@@ -2084,7 +2084,7 @@ describe("the status bar's language picker", () => {
 
   // The stub above cannot see what the real transition does to a Monaco model
   // (Monaco does not load under vitest at all), and the wrapper's own effect
-  // SKIPS an undefined language, which is the bug. The decision that fixes it
+  // SKIPS an undefined language. The decision that covers it
   // is `autoRevertLanguageId`, tested un-stubbed in lib/editorLanguage.test.ts;
   // this asserts only that the picker clears the prop, which is its half.
   it("follows a rename, so a correction is not silently reverted", async () => {

@@ -232,7 +232,7 @@ export function ModalDoors({
   // A phone stacks them one to a row, where half its width cannot hold a
   // door's icon and label on one line; a computer gives every door an equal
   // column, with a rule between neighbours. The stacked doors touch, as a
-  // menu's items do (the user's choice of 2026-11-22): each is a full-width row
+  // menu's items do: each is a full-width row
   // at least 44px tall, over the 40px touch floor, so a tap on one cannot land
   // on the other, and a gap would add nothing to telling them apart.
   const ruled = !phone && doors.length > 1

@@ -219,11 +219,10 @@ describe("buffer seeds and the diff-then-code switch", () => {
 
 // --- Disk freshness ---------------------------------------------------------
 //
-// The bug these back: a file open in the editor never refreshed after an agent
-// edited it on disk, and saving the stale buffer destroyed the agent's work.
-// The event-driven half of the fix reuses the changed-files signal the diff
-// view already watches, but with one crucial difference the plan review
-// insisted on: a moved signal triggers a metadata CHECK, never a reload. Two
+// What these back: a file open in the editor must refresh after an agent
+// edits it on disk, or saving the stale buffer destroys the agent's work.
+// The event-driven half reuses the changed-files signal the diff
+// view already watches, but with one crucial difference: a moved signal triggers a metadata CHECK, never a reload. Two
 // legitimate no-op movers exist (the user's own save, and slice lifecycle
 // churn), and a reload on either would throw away a draft for nothing.
 

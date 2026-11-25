@@ -4,8 +4,8 @@ import { cn } from "@/lib/utils"
 
 // The one chip for a name inside prose: a branch, a path, a file, a command, an
 // agent, project or terminal name, a pull request number. The chip is what
-// tells the name apart from the sentence around it, so callers drop the quotes
-// they used to wrap it in. Sized relative to its surroundings, so it sits in a
+// tells the name apart from the sentence around it, so callers never wrap it
+// in quotes. Sized relative to its surroundings, so it sits in a
 // dialog title as comfortably as in body text. To a screen reader it is plain
 // inline text.
 //

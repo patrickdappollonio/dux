@@ -371,7 +371,7 @@ describe("ProjectsDialog", () => {
     expect(button.getAttribute("aria-expanded")).toBe("false")
   })
 
-  // The touch-target tenet: on a coarse pointer the trigger is 40px, so no
+  // The touch-target floor: on a coarse pointer the trigger is 40px, so no
   // revealed state of its wrapper may cap it narrower, or a focused or open
   // trigger is clipped to 32px on a tablet at desktop width.
   it("never caps the revealed trigger narrower than its touch size", () => {

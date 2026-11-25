@@ -242,7 +242,7 @@ describe("sessionsApi", () => {
     expect(lastCall(fetchMock).headers["x-connection-id"]).toBeUndefined()
   })
 
-  // #10: the existing-branch 409 carries a structured JSON body; the client
+  // The existing-branch 409 carries a structured JSON body; the client
   // parses it onto the error so the store can open the confirm dialog instead
   // of silently swallowing the 409.
   it("parses the existing-branch 409 body into a typed conflict", async () => {

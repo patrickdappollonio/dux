@@ -985,9 +985,9 @@ describe("the one periodic frame", () => {
 
 // THE GATE IS WIRED, AND IT PUSHES AS WELL AS BLOCKING.
 //
-// Nothing used to assert that `PtySocket` hands `serverValidated` to the base as
-// its `canRetry`: deleting that one property left the whole suite green while
-// every PTY socket in the app attached to servers it had not identified.
+// `PtySocket` must hand `serverValidated` to the base as its `canRetry`:
+// without that one property every PTY socket in the app would attach to
+// servers it had not identified.
 describe("the run-identity retry gate", () => {
   it("holds a dropped socket shut while the run has not been validated", () => {
     vi.useFakeTimers()

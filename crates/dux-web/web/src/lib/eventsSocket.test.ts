@@ -200,11 +200,11 @@ describe("EventsSocket", () => {
   })
 
   it("leaves a breadcrumb when a frame cannot be parsed", () => {
-    // A dropped frame used to be entirely silent, and the frames on this socket
-    // now include the whole workspace document: a truncated or malformed one
-    // would show up as a sidebar that quietly stops updating, with nothing
-    // anywhere to say why. The size is in the message because size is the most
-    // likely thing to have gone wrong.
+    // A dropped frame is not silent, and the frames on this socket include the
+    // whole workspace document: a truncated or malformed one would show up as a
+    // sidebar that quietly stops updating, with nothing anywhere to say why. The
+    // size is in the message because size is the most likely thing to have gone
+    // wrong.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     const sock = new EventsSocket("ws://x/ws/events")
     sock.connect()
@@ -264,11 +264,9 @@ describe("EventsSocket", () => {
     expect(states).toEqual(["connecting", "open", "closed", "connecting"])
   })
 
-  // FLIPPED, both of these. They used to assert the events socket gave up after
-  // its attempt budget and emitted `failed`, and that a manual connect() then
-  // restored it. The budget is gone: the spine is what the whole app rides on,
-  // and abandoning it while the tab is open only ever produced a page that had
-  // quietly stopped updating. It retries indefinitely instead.
+  // The events socket has no attempt budget: the spine is what the whole app
+  // rides on, and abandoning it while the tab is open would only produce a page
+  // that has quietly stopped updating. It retries indefinitely.
   //
   // The events socket does NOT park while hidden, which is the other half of the
   // policy: attention indicators and OS notifications ride this socket precisely
