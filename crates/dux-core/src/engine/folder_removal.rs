@@ -1,25 +1,5 @@
-//! Deleting the folder dux created for a standalone agent, once the agent has
-//! been deleted and every process it ran there has gone.
-//!
-//! In order:
-//!
-//! 1. When the delete begins, the folder is claimed, so nothing new starts in
-//!    it, and the removal is held.
-//! 2. The agent's record is deleted in the same transaction that writes the
-//!    removal down (`pending_folder_removals`); a record that could not be
-//!    deleted lets the removal go and the folder stays with its agent.
-//! 3. The removal waits for the agent's tabs and terminals to reap.
-//! 4. A worker asks every question a worktree removal asks before git runs
-//!    (processes the agent left running, a shell standing in the folder, an
-//!    operation or a create holding it, a removal around it, an agent or a
-//!    project in it), then whether any program at all is working in it, and
-//!    deletes it through [`crate::agent_folders::remove_created_folder`],
-//!    which checks it is still the folder dux created.
-//! 5. The written-down removal is forgotten, whatever the outcome, and the
-//!    outcome is said on the shared status lane.
-//!
-//! A removal still written down when dux starts is finished then, the same
-//! way, with a status saying so.
+//! Deleting the folder dux created for a standalone agent once its record is
+//! gone and its processes have stopped, after the checks a worktree removal makes.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -236,9 +216,7 @@ impl Engine {
         let op = folder_removal_op(&removal, resumed);
         let pending = self.begin_status_op(&op);
         let _ = self.worker_tx.send(WorkerEvent::PollerStatus(pending));
-        // What the engine is running is known only here: a terminal or an
-        // agent in the folder, one still stopping there, an agent on its way to
-        // it, a project in it.
+        // The PTYs dux runs and the creates under way are known only here.
         if let Some(occupant) = self.folder_occupant(
             &removal.path,
             Some(&removal.session_id),
@@ -373,11 +351,8 @@ struct FolderRemovalInputs {
     db_path: PathBuf,
 }
 
-/// The removal itself, on a worker thread: every check a worktree removal
-/// makes before git runs, then whether any program is working in the folder,
-/// then the deletion, which checks the folder is still the one dux created.
-/// Nothing is ended: a standalone agent's processes never are. The claim is
-/// finished on every exit. A panic becomes an `Err`.
+/// The removal, on a worker thread. Nothing is ended, and the claim is
+/// finished on every exit; a panic becomes an `Err`.
 fn perform_created_folder_removal(
     session_id: &str,
     folder: &Path,

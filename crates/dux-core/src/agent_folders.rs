@@ -209,17 +209,9 @@ pub enum RemovedFolder {
 }
 
 /// Delete the folder dux created at `path`, and everything in it, while the
-/// directory there still has `identity`: the same device and inode numbers,
-/// and a marker file holding the same mark.
-///
-/// Nothing is followed: a folder on the way to `path` that is now a symbolic
-/// link, a symbolic link or a file at `path`, a directory there with other
-/// numbers, or one whose marker file is missing, is not a plain file, or holds
-/// another mark is refused and left alone, and so is any folder when
-/// `identity` has no mark. Inside the folder a symbolic link is removed as a
-/// link and never followed, and every entry is reached relative to the
-/// directory that was checked. The marker file goes last, so a deletion that
-/// stops part way leaves a folder dux still recognises.
+/// directory there still has `identity`, mark included; no symbolic link is
+/// followed. The marker file goes last, so a deletion that stops part way
+/// leaves a folder dux still recognises.
 ///
 /// # Errors
 ///

@@ -565,12 +565,7 @@ pub(crate) fn occupant_in(
 }
 
 /// What keeps the folder dux created for standalone agent `owner` from being
-/// deleted, judged by [`occupant_in`] over `agents` and `projects` (each
-/// project as its name and repository path) as recorded: another agent whose
-/// folder is it or inside it, or a project whose repository is it or inside
-/// it. A factory reset asks this; the engine asks [`occupant_in`] with the
-/// same agents and projects and what it is running besides, so the two never
-/// disagree about a record.
+/// deleted, by [`occupant_in`] over recorded `agents` and `projects` (name, path).
 pub fn created_folder_occupant(
     folder: &std::path::Path,
     owner: &str,

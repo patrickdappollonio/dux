@@ -809,12 +809,8 @@ impl FolderOrigin {
 }
 
 /// What tells the directory dux created apart from anything later put at the
-/// same path: its device and inode numbers, and the random mark dux wrote
-/// into the marker file inside it (see [`crate::agent_folders::MARKER_FILE_NAME`]).
-///
-/// The numbers alone are not enough, because a filesystem hands a freed inode
-/// number to the next directory it creates; a new folder at the same path
-/// does not carry the mark. dux deletes the folder only when all three match.
+/// same path: its device and inode numbers, which a filesystem reuses, and the
+/// random mark in its marker file (see [`crate::agent_folders::MARKER_FILE_NAME`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectoryIdentity {
     /// The device the directory is on.
