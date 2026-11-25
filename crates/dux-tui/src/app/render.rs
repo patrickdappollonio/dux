@@ -12041,16 +12041,8 @@ impl App {
             OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
     }
 
-    /// The standalone-agent name field, the terminal-UI twin of the web
-    /// dialog's name step.
-    ///
-    /// For a new folder the field opens with a generated name and the line
-    /// under it names the folder dux creates, following what is typed; a
-    /// button under that leads on to the folder browser. For a folder picked
-    /// in the browser, the folder's own name is what an empty field resolves
-    /// to, so it is written into the label, and the folder is on its own line
-    /// underneath, home-collapsed: the browser is gone by the time this modal
-    /// is up, and the path is what says which folder was picked.
+    /// The standalone-agent name field. A new folder's is followed by the folder
+    /// it names and a button on to the browser; a picked folder's says its default.
     fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::NameStandaloneAgent {
             folder,

@@ -93,10 +93,8 @@ impl App {
         }
     }
 
-    /// Palette command (`new-standalone-agent`): ask for the agent's name,
-    /// pre-filled with a generated one, and dux creates its folder in the
-    /// standalone agents folder. The modal's button leads on to the folder
-    /// browser for a folder the user already has.
+    /// Ask for a new standalone agent's name, pre-filled; dux creates its folder,
+    /// and the modal's button leads on to the folder browser instead.
     pub(crate) fn open_new_standalone_agent(&mut self) {
         let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
         input.insert_str(&crate::git::docker_style_name());
@@ -148,11 +146,8 @@ impl App {
         let PromptState::NameStandaloneAgent { folder, input, .. } = &self.prompt else {
             return None;
         };
-        // No branch is created here, but the name follows the agent-name rules
-        // the engine enforces. In a picked folder an empty field means the
-        // folder's own name converted into one; a new folder is named after
-        // the agent, so its name is required. The provider is the global
-        // default, retargetable afterwards.
+        // In a picked folder an empty name means the folder's own; a new folder
+        // is named after the agent, so its name is required.
         Some(match folder {
             crate::app::StandaloneFolder::New => self
                 .engine

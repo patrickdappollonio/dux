@@ -485,9 +485,7 @@ export function DeleteSessionDialog() {
     }
   }, [askOffer, deleteTarget, asked])
 
-  // Counted once per open of an agent whose folder dux created, so the warning
-  // says how much goes with the folder. A failed ask says nothing more than
-  // the box does.
+  // Counted once per open; a failed count leaves the box to speak alone.
   const askFiles = isOpen && createdFolder !== null
   useEffect(() => {
     if (!askFiles || !deleteTarget) return

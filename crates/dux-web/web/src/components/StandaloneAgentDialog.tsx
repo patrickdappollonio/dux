@@ -43,13 +43,8 @@ interface StepParts {
   body: ReactNode
 }
 
-/**
- * The first step: a name, pre-filled with a generated one, and dux creates the
- * agent's folder in the standalone agents folder. The folder the name gives is
- * said under the field as it is typed, and a name whose folder is already
- * there is refused before the server is asked; the server refuses it again,
- * atomically, when it creates the folder.
- */
+/** The name step: dux creates the agent's folder, named after it. A taken name
+ * is refused here, and again atomically by the server's create. */
 function useNewFolderStep(onUseExisting: () => void): StepParts {
   const [name, setName] = useState("")
   const [generating, setGenerating] = useState(true)
@@ -152,10 +147,8 @@ function useNewFolderStep(onUseExisting: () => void): StepParts {
             />
           )}
         </FormGroup>
-        {/* The way to the other kind of standalone agent, quieter than the
-          * footer's actions. 40px tall under a finger and on a phone; on a
-          * computer its neighbours are the field above and the footer's rule
-          * below, both clear of it by the body's gap. */}
+        {/* 40px under a finger and on a phone; on a computer its neighbours, the
+          * field and the footer's rule, are clear of it by the body's gap. */}
         <Button
           variant="ghost"
           className="self-start max-md:min-h-10 pointer-coarse:min-h-10"
@@ -368,10 +361,8 @@ function useExistingFolderStep(): StepParts {
   }
 }
 
-/** One modal in two steps: the name step, and the existing-folder picker
- * behind it, whose Back returns to the name. Both steps keep what they hold
- * while the other is shown, and the modal is one, so its history entry and
- * focus carry across the change of step. */
+/** One modal in two steps, so its history entry carries across them; each step
+ * keeps what it holds while the other is shown. */
 function StandaloneAgentSteps({ open, onClosed }: { open: boolean; onClosed: () => void }) {
   const [step, setStep] = useState<"name" | "folder">("name")
   const named = useNewFolderStep(() => setStep("folder"))

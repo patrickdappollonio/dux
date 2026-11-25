@@ -4044,18 +4044,8 @@ pub(crate) enum PromptState {
     /// with a selection cursor, Enter opens the selected one, and every other
     /// key comes from the `PullRequestList` bindings.
     PullRequests(PullRequestsPrompt),
-    /// Name the standalone agent about to run in the folder the user just
-    /// picked in the browser.
-    ///
-    /// One single-line field, so Enter submits and the modal needs no confirm
-    /// button. For a new folder it also offers the way on to the folder
-    /// browser, so focus moves between the field and that button.
-    ///
-    /// For a folder the user picked an empty field is the ordinary case (the
-    /// agent takes the folder's own name); for a new folder the name is
-    /// required, because it names the folder, and the field opens with a
-    /// generated one. Closing the prompt abandons the creation: no agent, and
-    /// nothing written anywhere.
+    /// Name a standalone agent, in a new folder or one picked in the browser.
+    /// One single-line field, so Enter submits; closing it creates nothing.
     NameStandaloneAgent {
         /// Where the agent runs.
         folder: StandaloneFolder,

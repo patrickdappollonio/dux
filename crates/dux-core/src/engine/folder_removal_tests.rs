@@ -333,3 +333,27 @@ fn a_folder_another_agent_reaches_through_a_link_is_kept() {
     assert!(text.contains("now works in it"), "{text}");
     assert!(folder.join("theirs.txt").exists());
 }
+
+/// Renaming an agent whose folder dux created leaves the folder where it is,
+/// and the record still says dux created it, also once read back from disk.
+#[test]
+fn renaming_keeps_the_folder_and_that_dux_created_it() {
+    let (mut engine, tmp) = test_engine();
+    let folder = created_agent(&mut engine, "otter", &tmp.path().join("agents"));
+    let _ = engine
+        .apply_wire(crate::wire::WireCommand::RenameSession {
+            session_id: "otter".to_string(),
+            title: "badger".to_string(),
+            rename_branch: false,
+        })
+        .unwrap();
+    let session = engine.sessions.iter().find(|s| s.id == "otter").unwrap();
+    assert_eq!(session.title.as_deref(), Some("badger"));
+    assert_eq!(session.folder_path(), Some(folder.to_str().unwrap()));
+    assert!(session.workspace.folder_created_by_dux());
+    assert!(folder.is_dir());
+    let stored = engine.session_store.load_sessions().unwrap();
+    let stored = stored.iter().find(|s| s.id == "otter").unwrap();
+    assert_eq!(stored.title.as_deref(), Some("badger"));
+    assert!(stored.workspace.folder_created_by_dux());
+}

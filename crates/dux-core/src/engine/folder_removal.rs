@@ -245,10 +245,8 @@ enum FolderRemovalOutcome {
     Occupied(StatusText),
 }
 
-/// The first of `candidates` whose path is `folder` or lies inside it, both
-/// compared with every symbolic link resolved, so a path that reaches the
-/// folder through a link still counts. A candidate whose path no longer
-/// resolves is compared as written.
+/// The first of `candidates` at or inside `folder`, compared with symbolic links
+/// resolved; a path that no longer resolves is compared as written.
 fn created_folder_occupant(
     folder: &Path,
     candidates: &[(PathBuf, StatusText)],
