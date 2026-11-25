@@ -7,6 +7,150 @@ pub(crate) const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracket paste mode end marker: `ESC [ 201 ~`
 pub(crate) const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
 
+/// How long a bracketed paste may go without a byte before its end marker
+/// is no longer waited for. A paste cut short (a dropped link, a file that
+/// holds the start marker) would otherwise swallow every key, Escape
+/// included.
+pub(crate) const UNFINISHED_PASTE_WAIT: Duration = Duration::from_secs(1);
+
+/// The fewest bytes one read of the rest of a cut-off paste holds for it to
+/// count as the paste still arriving. A terminal delivers a paste in reads of
+/// hundreds or thousands of bytes; keys typed by hand, `CSI … u` keys and
+/// mouse reports included, are a few dozen bytes between two reads.
+pub(crate) const PASTE_SIZED_READ: usize = 256;
+
+/// The longest the rest of a cut-off paste is dropped, however it keeps
+/// arriving.
+pub(crate) const CUT_PASTE_DROP_LIMIT: Duration = Duration::from_secs(5);
+
+/// Whether the last bracketed-paste marker in `bytes` opens a paste; `None`
+/// when `bytes` holds neither marker.
+pub(crate) fn last_paste_marker_opens(bytes: &[u8]) -> Option<bool> {
+    bytes
+        .windows(BRACKET_PASTE_START.len())
+        .rev()
+        .find_map(|window| match window {
+            BRACKET_PASTE_START => Some(true),
+            BRACKET_PASTE_END => Some(false),
+            _ => None,
+        })
+}
+
+/// The longest held start of the paste start marker that is a whole key a
+/// person types by hand: `ESC` (Escape) and `ESC [` (Alt-[), held only for
+/// the key that may follow. `ESC [ 2` and longer are the start of a sequence
+/// the terminal sends in one write (Insert, F9 to F12, the paste marker).
+const HAND_TYPED_MARKER_START: usize = 2;
+
+/// Whether `bytes`, held when its reader ended, is a start of the paste start
+/// marker that cannot be a key typed by hand, and so may be a paste cut in
+/// two.
+pub(crate) fn is_cut_paste_start(bytes: &[u8]) -> bool {
+    bytes.len() > HAND_TYPED_MARKER_START
+        && bytes.len() < BRACKET_PASTE_START.len()
+        && BRACKET_PASTE_START.starts_with(bytes)
+}
+
+/// The rest of a bracketed paste whose reader ended before the paste did,
+/// dropped from what the terminal sends so that no reader takes it as keys.
+/// It ends with the paste's end marker, at the first read that comes
+/// [`UNFINISHED_PASTE_WAIT`] or more after the last read of
+/// [`PASTE_SIZED_READ`] bytes or more (or after the reader ended, when none
+/// has come), and at the first read [`CUT_PASTE_DROP_LIMIT`] or more after
+/// the reader ended. That read and what follows are read as usual.
+///
+/// Keys typed by hand come in reads far smaller than [`PASTE_SIZED_READ`],
+/// so they do not keep the rest of a paste going: once the paste stops
+/// arriving, they are dropped for at most [`UNFINISHED_PASTE_WAIT`]. A paste that keeps
+/// arriving in reads of that size, with no stall of [`UNFINISHED_PASTE_WAIT`]
+/// between them, is dropped to its end marker for up to
+/// [`CUT_PASTE_DROP_LIMIT`]; what arrives after that is read as keys.
+#[derive(Debug)]
+pub(crate) struct PasteRemainder {
+    /// How many bytes of the start marker have arrived, while the reader
+    /// ended part way through it; `None` once the paste has begun.
+    start_matched: Option<usize>,
+    /// How many leading bytes of the end marker the bytes dropped so far end
+    /// with.
+    matched: usize,
+    /// When the reader ended.
+    cut: Instant,
+    /// When the last read of [`PASTE_SIZED_READ`] bytes or more came, or the
+    /// reader ended when none has.
+    last: Instant,
+}
+
+impl PasteRemainder {
+    /// The rest of a paste whose reader ended at `now` holding `held`, the
+    /// paste's bytes it had not finished reading.
+    pub(crate) fn after(held: &[u8], now: Instant) -> Self {
+        let mut remainder = Self {
+            start_matched: None,
+            matched: 0,
+            cut: now,
+            last: now,
+        };
+        // Bytes a reader holds unfinished never hold a whole end marker.
+        let _ = remainder.end_in(held);
+        remainder
+    }
+
+    /// What follows a reader that ended at `now` holding `begun`, a start of
+    /// the paste start marker that [`is_cut_paste_start`] accepts: a paste
+    /// when the bytes after it complete the marker, dropped with them. The
+    /// first byte that does not is read as usual, and the marker bytes before
+    /// it are dropped.
+    pub(crate) fn after_start_of_marker(begun: &[u8], now: Instant) -> Self {
+        debug_assert!(is_cut_paste_start(begun));
+        Self {
+            start_matched: Some(begun.len()),
+            matched: 0,
+            cut: now,
+            last: now,
+        }
+    }
+
+    /// Where the paste ends in `bytes`, one read made at `now`: the index
+    /// just past its end marker, or 0 when the dropping ended before this
+    /// read (see [`PasteRemainder`]). `None` when every byte belongs to the
+    /// paste.
+    pub(crate) fn end_in_read(&mut self, bytes: &[u8], now: Instant) -> Option<usize> {
+        if now.saturating_duration_since(self.cut) >= CUT_PASTE_DROP_LIMIT
+            || now.saturating_duration_since(self.last) >= UNFINISHED_PASTE_WAIT
+        {
+            return Some(0);
+        }
+        if bytes.len() >= PASTE_SIZED_READ {
+            self.last = now;
+        }
+        self.end_in(bytes)
+    }
+
+    fn end_in(&mut self, bytes: &[u8]) -> Option<usize> {
+        for (index, &byte) in bytes.iter().enumerate() {
+            if let Some(started) = self.start_matched {
+                if byte != BRACKET_PASTE_START[started] {
+                    return Some(index);
+                }
+                self.start_matched =
+                    Some(started + 1).filter(|&next| next < BRACKET_PASTE_START.len());
+                continue;
+            }
+            // The marker's one Escape is its first byte, so a byte that breaks
+            // a partial match can only start a new one by being that Escape.
+            self.matched = if byte == BRACKET_PASTE_END[self.matched] {
+                self.matched + 1
+            } else {
+                usize::from(byte == BRACKET_PASTE_END[0])
+            };
+            if self.matched == BRACKET_PASTE_END.len() {
+                return Some(index + 1);
+            }
+        }
+        None
+    }
+}
+
 /// Focus-in report (DEC private mode 1004): `ESC [ I`.
 pub(crate) const FOCUS_GAINED_SEQ: &[u8] = b"\x1b[I";
 /// Focus-out report (DEC private mode 1004): `ESC [ O`.
@@ -495,6 +639,7 @@ fn utf8_sequence(buf: &[u8]) -> Option<usize> {
 /// Returns `(complete, remainder)`: fully received sequences, and the trailing
 /// bytes that could start an incomplete one (a partial CSI or UTF-8 character).
 /// Boundaries only; the splitter does not interpret what a sequence means.
+#[cfg(test)]
 pub(crate) fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     let mut sequences: Vec<&[u8]> = Vec::new();
     let mut i = 0;
@@ -516,6 +661,75 @@ pub(crate) fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_remainder_ends_after_an_end_marker_split_across_reads_and_held_bytes() {
+        let now = Instant::now();
+        let mut remainder = PasteRemainder::after(b"ab\x1b[2", now);
+        assert_eq!(remainder.end_in_read(b"0", now), None);
+        assert_eq!(remainder.end_in_read(b"1~xy", now), Some(2));
+    }
+
+    #[test]
+    fn a_paste_remainder_ends_at_an_end_marker_behind_a_broken_one() {
+        let now = Instant::now();
+        let mut remainder = PasteRemainder::after(b"", now);
+        assert_eq!(
+            remainder.end_in_read(b"\x1b[20\x1b\x1b[201~z", now),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn a_held_start_of_the_start_marker_is_a_paste_only_when_the_marker_completes() {
+        let now = Instant::now();
+        let mut paste = PasteRemainder::after_start_of_marker(b"\x1b[2", now);
+        assert_eq!(paste.end_in_read(b"0", now), None);
+        assert_eq!(paste.end_in_read(b"0~a\r\x1b[201~x", now), Some(10));
+        let mut key = PasteRemainder::after_start_of_marker(b"\x1b[2", now);
+        assert_eq!(key.end_in_read(b"0;5~x", now), Some(1));
+        assert!(is_cut_paste_start(b"\x1b[2"));
+        assert!(!is_cut_paste_start(b"\x1b"));
+        assert!(!is_cut_paste_start(b"\x1b["));
+        assert!(!is_cut_paste_start(b""));
+        assert!(!is_cut_paste_start(BRACKET_PASTE_START));
+        assert!(!is_cut_paste_start(b"\x1b[3"));
+    }
+
+    #[test]
+    fn a_paste_remainder_ends_once_the_paste_has_gone_quiet() {
+        let now = Instant::now();
+        let mut remainder = PasteRemainder::after(b"", now);
+        let almost = now + (UNFINISHED_PASTE_WAIT / 2);
+        assert_eq!(remainder.end_in_read(b"abc", almost), None);
+        let quiet = almost + UNFINISHED_PASTE_WAIT;
+        assert_eq!(remainder.end_in_read(b"x", quiet), Some(0));
+    }
+
+    #[test]
+    fn only_reads_of_paste_size_keep_a_paste_remainder_going() {
+        let now = Instant::now();
+        let half = UNFINISHED_PASTE_WAIT / 2;
+        let mut remainder = PasteRemainder::after(b"", now);
+        assert_eq!(remainder.end_in_read(b"a", now + half), None);
+        assert_eq!(remainder.end_in_read(b"b", now + half * 2), Some(0));
+
+        let big = vec![b'p'; PASTE_SIZED_READ];
+        let mut remainder = PasteRemainder::after(b"", now);
+        assert_eq!(remainder.end_in_read(&big, now + half), None);
+        assert_eq!(remainder.end_in_read(b"b", now + half * 2), None);
+        assert_eq!(remainder.end_in_read(&big, now + half * 3), Some(0));
+    }
+
+    #[test]
+    fn the_last_paste_marker_says_whether_a_paste_is_open() {
+        assert_eq!(last_paste_marker_opens(b"ab"), None);
+        assert_eq!(last_paste_marker_opens(b"\x1b[200~ab"), Some(true));
+        assert_eq!(
+            last_paste_marker_opens(b"\x1b[200~a\x1b[201~b"),
+            Some(false)
+        );
+    }
 
     #[test]
     fn alt_with_a_multibyte_character_is_one_sequence() {

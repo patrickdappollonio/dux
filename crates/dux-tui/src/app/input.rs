@@ -4,6 +4,7 @@ use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focu
 use super::modal::{
     ModalKeyStep, binding_lookup_is_suppressed, click_target, focus_move_step, modal_key_step,
 };
+use super::pty_ownership::PtyWrite;
 use super::row_card::changes_agent_row;
 use super::*;
 use crate::numeric::{u32_to_u16_wrapping, usize_to_u16_wrapping};
@@ -177,31 +178,6 @@ pub(super) fn trim_debug_input_lines(lines: &mut Vec<Line<'static>>) -> u16 {
     u16::try_from(lines.len()).unwrap_or(u16::MAX)
 }
 
-/// Maximum size of `loading_input_buf`. During the loading phase we
-/// accumulate bytes only to detect a (possibly multi-byte) `ToggleFullscreen`
-/// binding. Since any realistic binding fits in well under this cap, we
-/// truncate to the trailing window to bound memory and scan cost even when
-/// the user pastes large amounts of text while the agent is starting.
-const LOADING_INPUT_BUF_MAX: usize = 64;
-
-/// Append `bytes` to `buf`, keeping at most `max` trailing bytes. Used to
-/// bound `loading_input_buf` so it cannot grow without bound when the user
-/// pastes large content during the agent loading phase.
-fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
-    if bytes.len() >= max {
-        // The new chunk alone fills or exceeds the cap: drop prior state
-        // and keep only the trailing `max` bytes of the new chunk.
-        buf.clear();
-        buf.extend_from_slice(&bytes[bytes.len() - max..]);
-        return;
-    }
-    buf.extend_from_slice(bytes);
-    if buf.len() > max {
-        let drop = buf.len() - max;
-        buf.drain(..drop);
-    }
-}
-
 /// What one raw sequence is to the fullscreen key reader.
 enum RawKeyDecode {
     /// Matched and forwarded by its bytes: a classic-shaped sequence, or any
@@ -234,6 +210,12 @@ thread_local! {
     /// The error every read on this thread fails with instead of reading, for
     /// a test that needs a read to fail the same way on every system.
     pub(super) static READ_FAILS_WITH: std::cell::Cell<Option<rustix::io::Errno>> =
+        const { std::cell::Cell::new(None) };
+
+    /// A byte the maximized pane's reader, on this thread, handles as an
+    /// event that asks dux to quit, for a test of what happens to that answer:
+    /// no key typed into a maximized pane quits dux.
+    pub(super) static RAW_BYTE_ASKS_TO_QUIT: std::cell::Cell<Option<u8>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -685,11 +667,19 @@ impl RawInputDispatch {
             return;
         }
         self.needs_selection_clear = true;
-        if !self.is_scrolled_back
-            && self.may_write_pty
-            && app.write_into_focused_pty(&self.forward_batch)
-        {
+        let written = if !self.is_scrolled_back && self.may_write_pty {
+            app.write_into_focused_pty_as(&self.forward_batch)
+        } else {
+            PtyWrite::Refused
+        };
+        if written != PtyWrite::Refused {
             self.forwarded.note(&self.forward_batch);
+        }
+        // A dropped batch reached the program with none of its markers.
+        if written == PtyWrite::Queued
+            && let Some(opens) = crate::raw_input::last_paste_marker_opens(&self.forward_batch)
+        {
+            app.raw_paste.program_in_paste = opens;
         }
         self.forward_batch.clear();
     }
@@ -1197,16 +1187,6 @@ impl App {
     }
 
     fn route_key_before_bindings(&mut self, key: KeyEvent) -> Result<KeyRoute> {
-        if !matches!(self.prompt, PromptState::None) {
-            return self.handle_prompt_key(key).map(KeyRoute::Return);
-        }
-        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
-            self.handle_startup_log_viewer_key(key);
-            return Ok(KeyRoute::Return(false));
-        }
-        if self.macro_bar.is_some() {
-            return Ok(KeyRoute::Return(self.handle_macro_bar_key(key)));
-        }
         debug_assert!(
             !matches!(
                 self.input_target,
@@ -1283,18 +1263,19 @@ impl App {
         if card_owns_center && self.handle_takeover_card_key(key, claim) {
             return true;
         }
-        if !card_owns_center && self.center_typeable() && typing_owns_key {
-            if !self.scroll_mode_active() {
-                self.forward_typing_key_to_center(&key);
-                return true;
-            }
-            if self.engine.config.ui.tab_reaches_agent
-                && matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
-            {
-                return true;
-            }
+        if !typing_owns_key {
+            return false;
         }
-        false
+        if self.keys_type_into_program() {
+            self.forward_typing_key_to_center(&key);
+            return true;
+        }
+        // Scrolled back, Tab reaching the agent is swallowed rather than
+        // moving panes.
+        !card_owns_center
+            && self.center_typeable()
+            && self.engine.config.ui.tab_reaches_agent
+            && matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
     }
 
     fn should_defer_global_key(&self, key: &KeyEvent) -> bool {
@@ -1462,8 +1443,44 @@ impl App {
         self.in_input_pass(Ok(false), |app| app.route_key(key))
     }
 
-    fn route_key(&mut self, key: KeyEvent) -> Result<bool> {
+    /// Where the windowed interface sends the next key it reads: the rungs
+    /// [`Self::route_key`] dispatches on, in its order, and for the window
+    /// the program [`Self::route_minimized_center_key`] types into.
+    pub(super) fn key_destination(&self) -> KeyDestination {
         if self.server_log_viewer.is_some() {
+            return KeyDestination::ServerLog;
+        }
+        if !matches!(self.prompt, PromptState::None) {
+            return KeyDestination::Dialog(std::mem::discriminant(&self.prompt));
+        }
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            return KeyDestination::StartupLog;
+        }
+        if self.macro_bar.is_some() {
+            return KeyDestination::MacroBar;
+        }
+        KeyDestination::Window {
+            focus: self.focus,
+            target: self.input_target,
+            program: if self.keys_type_into_program() {
+                self.selected_terminal_surface_id()
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Whether a typing key the windowed interface reads goes to the focused
+    /// part's program.
+    fn keys_type_into_program(&self) -> bool {
+        self.center_typeable()
+            && !self.scroll_mode_active()
+            && !self.takeover_card_owns_center_key()
+    }
+
+    fn route_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let destination = self.key_destination();
+        if destination == KeyDestination::ServerLog {
             self.handle_server_log_key(key);
             return Ok(false);
         }
@@ -1478,6 +1495,15 @@ impl App {
             && self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
         {
             return Ok(false);
+        }
+        match destination {
+            KeyDestination::Dialog(_) => return self.handle_prompt_key(key),
+            KeyDestination::StartupLog => {
+                self.handle_startup_log_viewer_key(key);
+                return Ok(false);
+            }
+            KeyDestination::MacroBar => return Ok(self.handle_macro_bar_key(key)),
+            KeyDestination::ServerLog | KeyDestination::Window { .. } => {}
         }
         match self.route_key_before_bindings(key)? {
             KeyRoute::Continue => {}
@@ -3437,8 +3463,7 @@ impl App {
         let held = self.terminal_input.take_bytes();
         let first: &[u8] = if held.is_empty() {
             if !self.wait_for_terminal(terminal, Duration::from_millis(poll_ms))? {
-                self.resolve_pending_bare_esc(terminal, &mut buf)?;
-                return Ok(false);
+                return self.resolve_pending_bare_esc(terminal, &mut buf);
             }
             let n = self.read_terminal(terminal, &mut buf)?;
             if n == 0 {
@@ -3452,11 +3477,11 @@ impl App {
         // the macro bar) can move before the child echoes anything.
         self.mark_frame_dirty();
 
-        if self.consume_loading_raw_input(first) {
+        let Some(start) = self.raw_input_after_loading(first) else {
             return Ok(false);
-        }
+        };
 
-        if self.process_raw_input_bytes(first) {
+        if self.process_raw_input_bytes(&first[start..]) {
             return Ok(true);
         }
 
@@ -3464,17 +3489,66 @@ impl App {
             return Ok(true);
         }
 
-        self.resolve_pending_bare_esc(terminal, &mut buf)?;
-        Ok(false)
+        self.resolve_pending_bare_esc(terminal, &mut buf)
     }
 
     pub(super) fn reset_raw_input_state(&mut self) {
         self.input_target = InputTarget::None;
         self.terminal_selection = None;
-        self.raw_paste.in_bracket = false;
+        self.end_forwarding_raw_input();
+    }
+
+    /// End the forwarding reader, the maximized pane's: the start of a key it
+    /// holds is dropped, and a paste it is in is closed for the program it was
+    /// going to and its rest dropped as it arrives, so whatever comes next
+    /// reaches the reader that takes input then on its own.
+    ///
+    /// The held bytes are the start of a key typed at the program before the
+    /// reader changed, most often an Alt-[ or Alt-O typed by hand, which the
+    /// reader holds until the next key. Handed on, they would sit in front of
+    /// the next key typed at the new reader and turn it into another key, and
+    /// a held Escape would be read there as Escape. Dropped, every key typed
+    /// after the change does what it does with nothing held. The start of a
+    /// key that a read cut in two is dropped the same way, and the rest of
+    /// that key is read as keys of its own.
+    ///
+    /// For a reader that something other than a key it read stopped: a key
+    /// that stops it hands the rest of its read on instead.
+    pub(super) fn end_forwarding_raw_input(&mut self) {
+        self.close_paste_for_forwarded_program();
+        let held = self.raw_input_parser.pending().to_vec();
+        if self.raw_input_parser.in_bracket_paste() {
+            self.cut_paste_off(&held);
+        } else {
+            self.cut_key_start_off(&held);
+        }
+        self.clear_forwarding_raw_input();
+    }
+
+    /// Forget what the forwarding reader holds, keeping only whether its
+    /// program is inside a paste. Used when a key stops the reader: its read
+    /// was parsed past that key, so the parser's state is about the bytes the
+    /// key hands on, which the next reader reads whole.
+    fn clear_forwarding_raw_input(&mut self) {
+        self.raw_input_read_while_loading = false;
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
-        self.loading_input_buf.clear();
+        self.raw_paste = super::RawPaste {
+            program_in_paste: self.raw_paste.program_in_paste,
+            ..super::RawPaste::default()
+        };
+    }
+
+    /// Send the end marker of a paste whose start marker the forwarding reader
+    /// queued for its program, through the typing gate. Refused, the program
+    /// stays in that paste: another device drives its row and may be pasting.
+    fn close_paste_for_forwarded_program(&mut self) {
+        if !std::mem::take(&mut self.raw_paste.program_in_paste) {
+            return;
+        }
+        if let Some(pty_id) = self.forwarding_reader_pty.clone() {
+            let _ = self.write_into_pty(&pty_id, crate::raw_input::BRACKET_PASTE_END);
+        }
     }
 
     fn raw_input_target_available(&mut self) -> bool {
@@ -3495,23 +3569,28 @@ impl App {
         false
     }
 
-    /// Suppress bytes until the provider has visible output while retaining
-    /// only enough incomplete input to recognize a split control sequence.
-    fn consume_loading_raw_input(&mut self, bytes: &[u8]) -> bool {
-        if let Some(provider) = self.selected_terminal_surface_client()
-            && !provider.has_output()
+    /// Where in `bytes`, one read, the program's input starts: `None` while
+    /// the program has printed nothing, the loading phase taking every byte
+    /// and watching them only for a focus report and a key or click that
+    /// leaves fullscreen. The first read once it has printed ends what the
+    /// reader holds from the loading phase, as a hand-over with no key does,
+    /// so nothing typed while the program loaded reaches it: the start of a
+    /// key is dropped, and the rest of a paste is dropped up to its end
+    /// marker.
+    fn raw_input_after_loading(&mut self, bytes: &[u8]) -> Option<usize> {
+        if self
+            .selected_terminal_surface_client()
+            .is_some_and(|provider| !provider.has_output())
         {
-            append_capped(&mut self.loading_input_buf, bytes, LOADING_INPUT_BUF_MAX);
-            if !self.scan_loading_phase(bytes) {
-                let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
-                let start = self.loading_input_buf.len() - remainder.len();
-                self.loading_input_buf = self.loading_input_buf[start..].to_vec();
-            }
-            return true;
+            self.raw_input_read_while_loading = true;
+            self.scan_loading_phase(bytes);
+            return None;
         }
-
-        self.loading_input_buf.clear();
-        false
+        if !self.raw_input_read_while_loading {
+            return Some(0);
+        }
+        self.end_forwarding_raw_input();
+        Some(self.paste_remainder_in(bytes))
     }
 
     /// Drain immediately available chunks within one frame budget so a large
@@ -3545,10 +3624,10 @@ impl App {
             // A chunk that lands while the provider is still loading gets the
             // loading phase's treatment, as the first chunk did, rather than
             // being read and then dropped.
-            if self.consume_loading_raw_input(&buf[..n2]) {
+            let Some(start) = self.raw_input_after_loading(&buf[..n2]) else {
                 break;
-            }
-            let should_exit = self.process_raw_input_bytes(&buf[..n2]);
+            };
+            let should_exit = self.process_raw_input_bytes(&buf[start..n2]);
             if should_exit {
                 return Ok(true);
             }
@@ -3556,6 +3635,8 @@ impl App {
         Ok(false)
     }
 
+    /// Decide a held lone Escape or Alt-] after the Escape timeout, with
+    /// whatever one more read brings. Returns whether the app should exit.
     fn resolve_pending_bare_esc(
         &mut self,
         terminal: std::os::fd::BorrowedFd<'_>,
@@ -3572,14 +3653,16 @@ impl App {
         }
 
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
-        if self.wait_for_terminal(terminal, Duration::ZERO)? {
-            let n = self.read_terminal(terminal, buf)?;
-            if n != 0 {
-                return Ok(self.process_raw_input_bytes(&buf[..n]));
-            }
-        }
-
-        Ok(self.process_raw_input_bytes(&[]))
+        let n = if self.wait_for_terminal(terminal, Duration::ZERO)? {
+            self.read_terminal(terminal, buf)?
+        } else {
+            0
+        };
+        // An empty read decides the held key on its own.
+        let Some(start) = self.raw_input_after_loading(&buf[..n]) else {
+            return Ok(false);
+        };
+        Ok(self.process_raw_input_bytes(&buf[start..n]))
     }
 
     fn parse_raw_input_sequences(&mut self, bytes: &[u8]) -> Vec<crate::raw_input::ParsedSequence> {
@@ -4212,7 +4295,10 @@ impl App {
         bytes.extend_from_slice(tail);
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
-        self.raw_paste = super::RawPaste::default();
+        self.raw_paste = super::RawPaste {
+            program_in_paste: self.raw_paste.program_in_paste,
+            ..super::RawPaste::default()
+        };
         self.terminal_input.give_back(&bytes);
     }
 
@@ -4221,6 +4307,13 @@ impl App {
     /// `poll_and_forward_raw_input` reads the bytes and calls this; a test can
     /// call it directly, without real stdin I/O.
     pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> bool {
+        #[cfg(test)]
+        if RAW_BYTE_ASKS_TO_QUIT
+            .get()
+            .is_some_and(|quit| bytes.contains(&quit))
+        {
+            return true;
+        }
         let sequences = self.parse_raw_input_sequences(bytes);
         let tail = self.raw_input_parser.pending().to_vec();
         let mut plan = self.classify_raw_input_sequences(&sequences);
@@ -13785,12 +13878,7 @@ impl App {
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.terminal_selection = None;
-        self.raw_paste.in_bracket = false;
-        self.raw_paste.normalize = false;
-        self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
-        self.raw_input_buf.clear();
-        self.raw_input_parser.clear();
-        self.loading_input_buf.clear();
+        self.clear_forwarding_raw_input();
         let key = self.bindings.label_for(Action::ToggleFullscreen);
         if return_to_projects {
             // Same truthfulness rule as `close_top_overlay`: promise typing
@@ -13815,15 +13903,16 @@ impl App {
         }
     }
 
-    /// Scan `loading_input_buf` for a `ToggleFullscreen` key sequence or a
-    /// mouse left-click outside the fullscreen overlay. Returns `true` if
-    /// either was found and interactive mode was exited. Used during the
-    /// loading phase when all other input is suppressed.
-    pub(crate) fn scan_loading_phase_exit(&mut self) -> bool {
-        let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
-        for seq in &sequences {
-            // Check for the fullscreen toggle keybinding, by meaning for a
-            // decoded `CSI … u` key and by bytes for everything else.
+    /// The index in `sequences` of the first `ToggleFullscreen` key or left
+    /// click outside the fullscreen overlay, pasted content aside.
+    fn loading_phase_exit(&self, sequences: &[crate::raw_input::ParsedSequence]) -> Option<usize> {
+        sequences.iter().position(|parsed| {
+            let seq = parsed.bytes.as_slice();
+            if parsed.in_bracket_paste {
+                return false;
+            }
+            // By meaning for a decoded `CSI … u` key and by bytes for
+            // everything else.
             let toggles = match self.decoded_extended_key(seq) {
                 RawKeyDecode::Key(key) => {
                     key.kind != crossterm::event::KeyEventKind::Release
@@ -13836,25 +13925,16 @@ impl App {
                     Some((Action::ToggleFullscreen, _))
                 ),
             };
-            if toggles {
-                self.exit_interactive_mode();
-                return true;
-            }
-            // Check for a left-click outside the fullscreen overlay, mirroring
-            // the click-outside dismiss in process_raw_input_bytes.
-            if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
-                let outside_overlay =
-                    matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
-                        && !self.mouse_layout.focused_term.is_some_and(|rect| {
-                            contains_point(rect, mouse_ev.column, mouse_ev.row)
-                        });
-                if outside_overlay {
-                    self.exit_interactive_mode();
-                    return true;
-                }
-            }
-        }
-        false
+            // The same click-outside dismiss `process_raw_input_bytes` makes.
+            let clicks_outside = crate::raw_input::parse_sgr_mouse(seq).is_some_and(|mouse_ev| {
+                matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
+                    && !self
+                        .mouse_layout
+                        .focused_term
+                        .is_some_and(|rect| contains_point(rect, mouse_ev.column, mouse_ev.row))
+            });
+            toggles || clicks_outside
+        })
     }
 
     /// Scan parsed loading-phase sequences for terminal focus reports (DEC mode
@@ -13890,17 +13970,31 @@ impl App {
     }
 
     /// Feed newly-read loading-phase bytes through the shared
-    /// `raw_input_parser`, then scan for a focus report and an
-    /// `ToggleFullscreen` trigger. Focus is applied first so a focus report
-    /// bundled in the same read as a `ToggleFullscreen` trigger is still
-    /// observed even though `scan_loading_phase_exit` returns early on a
-    /// match. Returns whether interactive mode was exited.
+    /// `raw_input_parser`, apply the focus reports among them, and leave
+    /// fullscreen on a key or click that asks to, handing what followed it on
+    /// to the next reader. No bytes means the Escape wait has ended, which
+    /// decides a held lone Escape or Alt-] as the forwarding path does.
+    /// Returns whether fullscreen was left.
     pub(crate) fn scan_loading_phase(&mut self, new_bytes: &[u8]) -> bool {
-        let sequences = self.raw_input_parser.feed_sequences(new_bytes);
+        let mut sequences = self.raw_input_parser.feed_sequences(new_bytes);
+        if new_bytes.is_empty() {
+            sequences.extend(self.raw_input_parser.resolve_pending_esc());
+        }
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
         self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
         self.scan_loading_phase_focus(&sequences);
-        self.scan_loading_phase_exit()
+        let Some(exit) = self.loading_phase_exit(&sequences) else {
+            return false;
+        };
+        let tail = self.raw_input_parser.pending().to_vec();
+        let rest = sequences
+            .into_iter()
+            .skip(exit + 1)
+            .map(|parsed| parsed.bytes)
+            .collect();
+        self.exit_interactive_mode();
+        self.hand_on_rest_of_read(rest, &tail);
+        true
     }
 }
 
@@ -36384,7 +36478,6 @@ cyan = "#00ffff"
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
         app.raw_paste.in_bracket = true;
         app.raw_input_buf = b"pending".to_vec();
-        app.loading_input_buf = b"loading".to_vec();
 
         let (stand_in, _keyboard) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
         let terminal = std::os::fd::AsFd::as_fd(&stand_in);
@@ -36399,7 +36492,6 @@ cyan = "#00ffff"
         assert_eq!(app.raw_input_buf, Vec::<u8>::new());
         assert_eq!(app.raw_input_parser.pending(), b"");
         assert!(!app.raw_input_parser.in_bracket_paste());
-        assert_eq!(app.loading_input_buf, Vec::<u8>::new());
     }
 
     #[test]
@@ -36409,7 +36501,6 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.raw_input_parser.feed_sequences(b"\x1b");
         app.raw_input_buf = b"\x1b".to_vec();
-        app.loading_input_buf = b"loading".to_vec();
 
         let (stand_in, _keyboard) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
         let terminal = std::os::fd::AsFd::as_fd(&stand_in);
@@ -36421,7 +36512,6 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.raw_input_parser.pending(), b"");
         assert_eq!(app.raw_input_buf, Vec::<u8>::new());
-        assert_eq!(app.loading_input_buf, Vec::<u8>::new());
         assert_eq!(app.status.message(), "Agent disconnected.");
     }
 
@@ -36796,12 +36886,10 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
 
-        // Default ToggleFullscreen is Ctrl-g (0x07). Put it in loading_input_buf
-        // as scan_loading_phase_exit reads from there.
-        app.loading_input_buf = vec![0x07];
+        // Default ToggleFullscreen is Ctrl-g (0x07).
         assert!(
-            app.scan_loading_phase_exit(),
-            "scan_loading_phase_exit must detect Ctrl-g"
+            app.scan_loading_phase(&[0x07]),
+            "scan_loading_phase must detect Ctrl-g"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -36826,10 +36914,9 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         // Full sequence in one buffer.
-        app.loading_input_buf = b"\x1b[H".to_vec();
         assert!(
-            app.scan_loading_phase_exit(),
-            "scan_loading_phase_exit must detect a multi-byte ToggleFullscreen"
+            app.scan_loading_phase(b"\x1b[H"),
+            "scan_loading_phase must detect a multi-byte ToggleFullscreen"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -36841,13 +36928,11 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
-        app.loading_input_buf = b"\x1b[103;5:3u".to_vec();
         assert!(
-            !app.scan_loading_phase_exit(),
+            !app.scan_loading_phase(b"\x1b[103;5:3u"),
             "a release is not the toggle"
         );
-        app.loading_input_buf = b"\x1b[103;5u".to_vec();
-        assert!(app.scan_loading_phase_exit());
+        assert!(app.scan_loading_phase(b"\x1b[103;5u"));
         assert_eq!(app.input_target, InputTarget::None);
     }
 
@@ -36861,9 +36946,8 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         // First "read" delivers only the ESC byte, not a complete sequence.
-        app.loading_input_buf = vec![0x1b];
         assert!(
-            !app.scan_loading_phase_exit(),
+            !app.scan_loading_phase(&[0x1b]),
             "incomplete sequence must not trigger exit"
         );
         assert_eq!(
@@ -36872,17 +36956,9 @@ cyan = "#00ffff"
             "should still be in interactive mode"
         );
 
-        // Simulate the remainder trimming that poll_and_forward_raw_input
-        // does: keep only the incomplete remainder.
-        let (_, remainder) = crate::raw_input::split_sequences(&app.loading_input_buf);
-        let keep = remainder.len();
-        let start = app.loading_input_buf.len() - keep;
-        app.loading_input_buf = app.loading_input_buf[start..].to_vec();
-
         // Second "read" delivers the rest of the sequence.
-        app.loading_input_buf.extend_from_slice(b"[H");
         assert!(
-            app.scan_loading_phase_exit(),
+            app.scan_loading_phase(b"[H"),
             "completed sequence across reads must trigger exit"
         );
         assert_eq!(app.input_target, InputTarget::None);
@@ -36897,9 +36973,8 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         // Regular ASCII input should not trigger exit.
-        app.loading_input_buf = b"hello".to_vec();
         assert!(
-            !app.scan_loading_phase_exit(),
+            !app.scan_loading_phase(b"hello"),
             "regular input must not trigger exit"
         );
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -36907,66 +36982,19 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn append_capped_keeps_trailing_bytes_on_large_chunk() {
-        let mut buf = b"prefix".to_vec();
-        let big: Vec<u8> = (0..200u8).collect();
-        super::append_capped(&mut buf, &big, super::LOADING_INPUT_BUF_MAX);
-        assert_eq!(
-            buf.len(),
-            super::LOADING_INPUT_BUF_MAX,
-            "buffer must be capped to the configured maximum"
-        );
-        // When the incoming chunk alone exceeds the cap, prior prefix is
-        // discarded and only the trailing window of the new chunk remains.
-        let expected_tail: Vec<u8> =
-            (200 - u8::try_from(super::LOADING_INPUT_BUF_MAX)
-                .expect("the loading buffer cap fits in a byte")..200u8)
-                .collect();
-        assert_eq!(buf, expected_tail);
-    }
-
-    #[test]
-    fn append_capped_drops_oldest_bytes_on_incremental_overflow() {
-        // Fill exactly to cap with distinct leading bytes.
-        let mut buf: Vec<u8> = (0..u8::try_from(super::LOADING_INPUT_BUF_MAX)
-            .expect("the loading buffer cap fits in a byte"))
-            .collect();
-        // Append 5 more bytes: should drop the first 5.
-        super::append_capped(
-            &mut buf,
-            &[0xA, 0xB, 0xC, 0xD, 0xE],
-            super::LOADING_INPUT_BUF_MAX,
-        );
-        assert_eq!(buf.len(), super::LOADING_INPUT_BUF_MAX);
-        assert_eq!(
-            &buf[buf.len() - 5..],
-            &[0xA, 0xB, 0xC, 0xD, 0xE],
-            "most recent bytes must be preserved at the tail"
-        );
-        assert_eq!(
-            buf[0], 5,
-            "first 5 original bytes (0..=4) must have been dropped"
-        );
-    }
-
-    #[test]
-    fn loading_phase_cap_still_matches_exit_interactive_at_tail() {
-        // Ensure that after a large paste, a trailing single-byte
+    fn loading_phase_toggle_after_a_long_read_still_exits() {
+        // Ensure that after a long run of typing, a trailing single-byte
         // ToggleFullscreen (Ctrl-g) still triggers exit.
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
 
-        // Fill the buffer with filler past the cap, then put Ctrl-g at the
-        // tail. append_capped would have done the same; we prepare the
-        // post-cap state directly here.
-        let mut filler: Vec<u8> = vec![b'x'; super::LOADING_INPUT_BUF_MAX - 1];
+        let mut filler: Vec<u8> = vec![b'x'; 4095];
         filler.push(0x07);
-        app.loading_input_buf = filler;
         assert!(
-            app.scan_loading_phase_exit(),
-            "Ctrl-g at the tail of a capped buffer must still trigger exit"
+            app.scan_loading_phase(&filler),
+            "Ctrl-g at the tail of a long read must still trigger exit"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -36984,9 +37012,8 @@ cyan = "#00ffff"
 
         // Click at (1,1) which is inside the left pane, outside focused_term
         // (focused_term starts at x=21). SGR coords are 1-based, so (2,2).
-        app.loading_input_buf = sgr_mouse_down(2, 2);
         assert!(
-            app.scan_loading_phase_exit(),
+            app.scan_loading_phase(&sgr_mouse_down(2, 2)),
             "left-click outside overlay must trigger exit during loading"
         );
         assert_eq!(app.input_target, InputTarget::None);
@@ -37003,9 +37030,8 @@ cyan = "#00ffff"
 
         // Click at (30, 5) which is inside focused_term (x=21..76, y=1..17).
         // SGR coords are 1-based so (31, 6).
-        app.loading_input_buf = sgr_mouse_down(31, 6);
         assert!(
-            !app.scan_loading_phase_exit(),
+            !app.scan_loading_phase(&sgr_mouse_down(31, 6)),
             "left-click inside overlay must not trigger exit during loading"
         );
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -37022,9 +37048,8 @@ cyan = "#00ffff"
 
         // Right-click outside the overlay. SGR button 2 = right button.
         // Format: ESC [ < 2 ; cx ; cy M
-        app.loading_input_buf = b"\x1b[<2;2;2M".to_vec();
         assert!(
-            !app.scan_loading_phase_exit(),
+            !app.scan_loading_phase(b"\x1b[<2;2;2M"),
             "right-click must not trigger exit during loading"
         );
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -37041,9 +37066,8 @@ cyan = "#00ffff"
 
         // Scroll-up outside the overlay. SGR button 64 = scroll up.
         // Format: ESC [ < 64 ; cx ; cy M
-        app.loading_input_buf = b"\x1b[<64;2;2M".to_vec();
         assert!(
-            !app.scan_loading_phase_exit(),
+            !app.scan_loading_phase(b"\x1b[<64;2;2M"),
             "scroll events must not trigger exit during loading"
         );
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -37058,9 +37082,8 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         // No mouse layout installed, so focused_term is None.
         // Any left-click should be treated as outside.
-        app.loading_input_buf = sgr_mouse_down(50, 10);
         assert!(
-            app.scan_loading_phase_exit(),
+            app.scan_loading_phase(&sgr_mouse_down(50, 10)),
             "left-click must exit when focused_term rect is not set"
         );
         assert_eq!(app.input_target, InputTarget::None);
@@ -37077,9 +37100,8 @@ cyan = "#00ffff"
         install_mouse_layout(&mut app);
 
         // Click outside focused_term (which also covers terminal overlays).
-        app.loading_input_buf = sgr_mouse_down(2, 2);
         assert!(
-            app.scan_loading_phase_exit(),
+            app.scan_loading_phase(&sgr_mouse_down(2, 2)),
             "left-click outside must exit terminal interactive mode during loading"
         );
         assert_eq!(app.input_target, InputTarget::None);
@@ -37740,11 +37762,6 @@ cyan = "#00ffff"
         let mut input = Vec::new();
         input.extend_from_slice(b"\x1b[I");
         input.push(0x07);
-
-        // Mirror poll_and_forward_raw_input's own bookkeeping: it appends
-        // newly-read bytes into loading_input_buf (which scan_loading_phase_exit
-        // reads from) before calling scan_loading_phase.
-        app.loading_input_buf = input.clone();
 
         let exited = app.scan_loading_phase(&input);
 

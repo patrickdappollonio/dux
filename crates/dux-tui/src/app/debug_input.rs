@@ -22,7 +22,9 @@ use super::input::{ESC_AMBIGUITY_TIMEOUT, trim_debug_input_lines};
 use super::{App, PromptState};
 use crate::host_keys::Host;
 use crate::keybindings::BindingScope;
-use crate::raw_input::{BRACKET_PASTE_END, BRACKET_PASTE_START, ParsedSequence};
+use crate::raw_input::{
+    BRACKET_PASTE_END, BRACKET_PASTE_START, ParsedSequence, UNFINISHED_PASTE_WAIT,
+};
 use crate::theme::Theme;
 
 /// How the time at the start of a row is written.
@@ -48,12 +50,6 @@ const BYTES_NOT_SEEN: &str = "(bytes not seen)";
 
 /// What the key row says for a sequence that is no key dux can read.
 const CANNOT_READ: &str = "dux cannot read this key";
-
-/// How long a bracketed paste may go without a byte before the debugger
-/// stops waiting for its end marker. A paste cut short (a dropped link, a
-/// file that holds the start marker) would otherwise swallow every key,
-/// Escape included.
-const UNFINISHED_PASTE_WAIT: Duration = Duration::from_secs(1);
 
 /// A bracketed paste still arriving through the debugger's reader.
 #[derive(Debug)]
@@ -359,6 +355,23 @@ impl App {
     pub(super) fn end_debug_raw_input(&mut self) {
         let partial = self.debug_raw_input.take_partial_sequence();
         self.terminal_input.give_back(&partial);
+        self.debug_raw_input = DebugRawInput::default();
+    }
+
+    /// End the debugger's reader when something other than a key it read
+    /// closed the debugger: the start of a key it holds is dropped, and the
+    /// rest of a paste it is counting is dropped as it arrives.
+    pub(super) fn end_debug_raw_input_cut_off(&mut self) {
+        if !self.debug_raw_input.reading {
+            return;
+        }
+        let in_paste = self.debug_raw_input.parser.in_bracket_paste();
+        let held = self.debug_raw_input.take_partial_sequence();
+        if in_paste {
+            self.cut_paste_off(&held);
+        } else {
+            self.cut_key_start_off(&held);
+        }
         self.debug_raw_input = DebugRawInput::default();
     }
 

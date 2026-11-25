@@ -3020,7 +3020,6 @@ mod tests {
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
         app.raw_paste.in_bracket = true;
         app.raw_input_buf = b"pending".to_vec();
-        app.loading_input_buf = b"loading".to_vec();
 
         // Wait for END OF INPUT *and* a reaped exit status, then let a single
         // drain_events observe it. See `wait_for_pty_eof`: a PTY missing either
@@ -3044,7 +3043,6 @@ mod tests {
         assert_eq!(app.raw_input_buf, Vec::<u8>::new());
         assert_eq!(app.raw_input_parser.pending(), b"");
         assert!(!app.raw_input_parser.in_bracket_paste());
-        assert_eq!(app.loading_input_buf, Vec::<u8>::new());
     }
 
     /// The TUI exit-prune teardown must clear EVERY runtime map keyed by the

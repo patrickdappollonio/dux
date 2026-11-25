@@ -142,6 +142,17 @@ pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) ->
     }
 }
 
+/// What became of a write into a pty through the typing gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PtyWrite {
+    /// Queued for the program, after every write queued before it.
+    Queued,
+    /// Let through, then dropped whole by the pty's full write queue.
+    Dropped,
+    /// Refused by the gate, or there is no program.
+    Refused,
+}
+
 /// What prose calls a driver that gave dux no name for itself. The status line
 /// has to finish its sentence, so it needs a noun phrase where the card simply
 /// changes its title.
@@ -281,33 +292,55 @@ impl App {
     /// ([`dux_core::engine::Engine::note_pty_used`]), so a macro sent from the
     /// bar exempts a brief run from the rapid-exit failure just as typing does.
     pub(crate) fn write_into_focused_pty(&mut self, bytes: &[u8]) -> bool {
-        let Some(pty_id) = self.selected_terminal_surface_id() else {
-            return false;
-        };
-        let seat = self.pty_ownership_for(&pty_id);
-        let Some(provider) = self.selected_terminal_surface_client() else {
-            return false;
+        self.write_into_focused_pty_as(bytes) != PtyWrite::Refused
+    }
+
+    /// [`Self::write_into_focused_pty`], saying whether the bytes were queued
+    /// or dropped by a full write queue.
+    pub(crate) fn write_into_focused_pty_as(&mut self, bytes: &[u8]) -> PtyWrite {
+        match self.selected_terminal_surface_id() {
+            Some(pty_id) => self.write_into_pty(&pty_id, bytes),
+            None => PtyWrite::Refused,
+        }
+    }
+
+    /// Write `bytes` into `pty_id`'s program through the same gate.
+    pub(crate) fn write_into_pty(&mut self, pty_id: &str, bytes: &[u8]) -> PtyWrite {
+        let seat = self.pty_ownership_for(pty_id);
+        let Some(provider) = self.pty_client_for(pty_id) else {
+            return PtyWrite::Refused;
         };
         let Some(seat) = seat else {
-            let _ = provider.write_bytes(bytes);
-            self.engine.note_pty_used(&pty_id, bytes);
-            return true;
+            let queued = provider.enqueue_bytes(bytes);
+            if !queued {
+                dux_core::pty::log_dropped_pty_write();
+            }
+            self.engine.note_pty_used(pty_id, bytes);
+            return if queued {
+                PtyWrite::Queued
+            } else {
+                PtyWrite::Dropped
+            };
         };
         // The enqueue leaves a full queue unreported, because logging takes the
         // log-file mutex and writes to disk under the ownership lock.
-        let mut queue_full = false;
-        let wrote = seat.owners.write_if_owner(&pty_id, seat.conn_id, || {
-            queue_full = !provider.enqueue_bytes(bytes);
+        let mut queued = false;
+        let wrote = seat.owners.write_if_owner(pty_id, seat.conn_id, || {
+            queued = provider.enqueue_bytes(bytes);
         });
-        if queue_full {
+        if !wrote {
+            Self::log_refused_pty_write(pty_id, &seat);
+            return PtyWrite::Refused;
+        }
+        if !queued {
             dux_core::pty::log_dropped_pty_write();
         }
-        if wrote {
-            self.engine.note_pty_used(&pty_id, bytes);
+        self.engine.note_pty_used(pty_id, bytes);
+        if queued {
+            PtyWrite::Queued
         } else {
-            Self::log_refused_pty_write(&pty_id, &seat);
+            PtyWrite::Dropped
         }
-        wrote
     }
 
     /// Say at debug why a write was dropped. The two refusals are one rung with

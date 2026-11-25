@@ -1,7 +1,34 @@
 //! The contract for how the terminal UI reads its own terminal: input is never
-//! lost, duplicated, reordered or misrouted because of which reader happened
-//! to be reading when it arrived, and a resize ends every reader's wait at
-//! once without a storm of them ever holding a wait past its timeout. The
+//! duplicated, reordered or misrouted because of which reader happened to be
+//! reading when it arrived, and a resize ends every reader's wait at once
+//! without a storm of them ever holding a wait past its timeout. A hand-over
+//! that a key causes passes every byte after that key on to the next reader.
+//! One that no key causes (a dialog a worker opens, a program exiting, another
+//! program selected) ends what the reader held unfinished: the start of a key
+//! is dropped, and a paste is closed for the program it was going to and its
+//! rest dropped up to its end marker, so it never acts as keys. The dropping
+//! also ends at the next change of reader with no key, and before the first read
+//! that comes `UNFINISHED_PASTE_WAIT` (one second) or more after the last
+//! read of `PASTE_SIZED_READ` (256) bytes or more, or after the cut when no
+//! read that size has come, or `CUT_PASTE_DROP_LIMIT` (five seconds) or more
+//! after the cut; that read is read as keys. Keys typed by hand come in reads
+//! far smaller than that, so they are dropped for at most one second after
+//! the cut or the last read that size. What the maximized pane holds from
+//! while its program was still loading ends the same way when the program
+//! first prints, so nothing typed while it loaded reaches it. A held start of
+//! the paste start marker three bytes or longer (`ESC [ 2` on) counts as a
+//! paste once the bytes after it complete the marker; a held Escape or Alt-[
+//! is a key typed by hand and is dropped alone. The end marker goes through
+//! the typing gate, so a program in a row another device drives stays in the
+//! paste. The windowed interface stays the reader while the place its keys go
+//! changes, and ends what it holds the same way when that place changes
+//! between polls, which no key it read did: a dialog a worker opens over it,
+//! or the program its keys go to exiting. Where its keys go is the server log
+//! viewer, else the open dialog, else the startup log viewer, else the macro
+//! bar, else the focused pane and input target and, while keys are typed into
+//! a program, which program; held input survives every other change, such as
+//! a program starting or exiting or focus moving under an open dialog or the
+//! macro bar. The
 //! `resize` module says how each half is tested: the first by a signal that
 //! cannot interrupt the waiting thread, so only the wake can end the wait.
 //!
@@ -43,6 +70,11 @@ pub(super) enum Program {
     Plain,
     /// Asks for SGR mouse reports and focus reports.
     ReadsMouse,
+    /// Turns bracketed paste on, as shells and the coding CLIs do.
+    ReadsPastes,
+    /// Prints nothing, so its pane stays in the phase where a program is
+    /// still loading.
+    Silent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,17 +296,45 @@ fn prompt_name(prompt: &PromptState) -> String {
         .to_string()
 }
 
-/// The app, and the serving state that has to outlive it when a browser drives.
-fn app_typing_into(received: &Path, setup: Setup) -> (App, Option<Box<dyn std::any::Any>>) {
-    let enable = if setup.program == Program::ReadsMouse {
-        "\\033[?1000h\\033[?1006h\\033[?1004h"
-    } else {
-        ""
+/// The shell script of a program that says ready and writes what it receives
+/// to `received`.
+fn program_script(received: &Path, program: Program) -> String {
+    let enable = match program {
+        Program::Plain => "",
+        Program::ReadsMouse => "\\033[?1000h\\033[?1006h\\033[?1004h",
+        Program::ReadsPastes => "\\033[?2004h",
+        Program::Silent => {
+            return format!("stty raw -echo; exec cat > '{}'", received.display());
+        }
     };
-    let script = format!(
+    format!(
         "stty raw -echo; printf '{enable}ready'; exec cat > '{}'",
         received.display()
-    );
+    )
+}
+
+/// A program writing what it receives to `received`, once it has said ready.
+fn ready_program(received: &Path, program: Program) -> PtyClient {
+    let client = PtyClient::spawn(
+        "sh",
+        &["-c".to_string(), program_script(received, program)],
+        Path::new("."),
+        5,
+        80,
+        100,
+    )
+    .expect("spawn a program");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !client.has_output() {
+        assert!(Instant::now() < deadline, "the program never said ready");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    client
+}
+
+/// The app, and the serving state that has to outlive it when a browser drives.
+fn app_typing_into(received: &Path, setup: Setup) -> (App, Option<Box<dyn std::any::Any>>) {
+    let script = program_script(received, setup.program);
     let (mut app, serving) = if setup.driver == Driver::Browser {
         let (app, recorded, seat) =
             super::pty_ownership::tests::app_with_a_live_pty_running(&script);
@@ -313,10 +373,15 @@ fn app_typing_into(received: &Path, setup: Setup) -> (App, Option<Box<dyn std::a
     }
     app.focus = FocusPane::Center;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !app
-        .selected_terminal_surface_client()
-        .is_some_and(PtyClient::has_output)
-    {
+    // A silent program is ready once its shell has opened the file it writes
+    // to, which it does after turning echo off.
+    let ready = |app: &App| match setup.program {
+        Program::Silent => received.exists(),
+        _ => app
+            .selected_terminal_surface_client()
+            .is_some_and(PtyClient::has_output),
+    };
+    while !ready(&app) {
         assert!(Instant::now() < deadline, "the program never said ready");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -901,6 +966,41 @@ mod waiting {
         escape_then_x(MAXIMIZED, &[b'a'; 4095]);
     }
 
+    /// The maximized pane waits out the Escape timeout before deciding a lone
+    /// Escape and reads once more; an event in that read that asks dux to
+    /// quit ends the poll with the answer to quit. The event comes from a
+    /// test byte, since no key typed into the pane quits dux; it is typed on
+    /// another thread a third of the way into the wait, and a case where it
+    /// lands after the wait's read is run again.
+    #[test]
+    fn a_quit_read_after_the_escape_wait_ends_the_poll() {
+        use crate::app::input::{ESC_AMBIGUITY_TIMEOUT, RAW_BYTE_ASKS_TO_QUIT};
+        use std::io::Write as _;
+
+        for _ in 0..20 {
+            let mut rig = Rig::new(MAXIMIZED);
+            rig.type_bytes(b"\x1b");
+            let mut keyboard = rig.keyboard.try_clone().expect("the keyboard");
+            let typist = std::thread::spawn(move || {
+                std::thread::sleep(ESC_AMBIGUITY_TIMEOUT / 3);
+                keyboard.write_all(b"q").expect("type q");
+            });
+            RAW_BYTE_ASKS_TO_QUIT.set(Some(b'q'));
+            let quit = rig.app.poll_run_input_from(rig.terminal.as_fd());
+            RAW_BYTE_ASKS_TO_QUIT.set(None);
+            typist.join().expect("the typist");
+            if !quit && rig.terminal_has_bytes() {
+                continue;
+            }
+            assert!(
+                quit,
+                "the read after the Escape wait asked to quit and the poll went on"
+            );
+            return;
+        }
+        panic!("the byte never landed inside the Escape wait");
+    }
+
     /// The status screen's turn reads what is ready and returns: the serve
     /// loop that calls it does the waiting.
     #[test]
@@ -1128,6 +1228,137 @@ mod maximize_and_back {
             assert!(!rig.app.debug_raw_input.holds_partial_sequence());
         }
     }
+
+    const LOADING: Setup = Setup {
+        program: Program::Silent,
+        ..MAXIMIZED
+    };
+
+    /// While the program has printed nothing yet the maximized pane drops what
+    /// is typed at it, but keys read with the leave key, after it, reach the
+    /// windowed interface as they do typed a moment later: here the palette
+    /// key opens the palette.
+    #[test]
+    fn keys_after_the_leave_key_while_the_program_loads_reach_the_windowed_interface() {
+        let palette = default_bindings()
+            .byte_patterns_for(Action::OpenPalette)
+            .into_iter()
+            .next()
+            .expect("the palette has a default key");
+        let pieces: &[&[u8]] = &[b"ab", TOGGLE, &palette];
+        let want = assert_burst_matches_paced(LOADING, pieces);
+        assert_eq!(want.prompt, "Command");
+        assert_eq!(want.fullscreen, FullscreenOverlay::None);
+        assert_eq!(want.received, "");
+        assert_every_cut_matches(LOADING, &pieces.concat(), &want);
+    }
+
+    /// A paste that holds the leave key while the program loads is one paste:
+    /// the pane stays maximized and nothing of it acts in the window.
+    #[test]
+    fn a_paste_that_holds_the_leave_key_while_the_program_loads_is_one_paste() {
+        let typed = b"\x1b[200~a\x07b\r\x1b[201~";
+        let want = burst(LOADING, typed);
+        assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
+        assert_eq!(want.prompt, "None");
+        assert_eq!(want.received, "");
+        assert_every_cut_matches(LOADING, typed, &want);
+    }
+
+    /// A lone Escape typed while the program loads is dropped when the wait
+    /// that decides it ends, as is what is typed after it.
+    #[test]
+    fn a_lone_escape_typed_while_the_program_loads_never_reaches_it() {
+        let mut rig = Rig::new(LOADING);
+        rig.type_bytes(b"\x1b");
+        for _ in 0..5 {
+            rig.turn();
+        }
+        rig.type_bytes(b"ab");
+        for _ in 0..5 {
+            rig.turn();
+        }
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// A program that prints nothing until `go` exists and then writes what
+    /// it receives to the rig's file, put behind the agent pane in place of
+    /// the one there; returns `go`.
+    fn a_program_that_loads_until_told(rig: &mut Rig) -> PathBuf {
+        let go = rig.received.with_file_name("go");
+        let script = format!(
+            "stty raw -echo; while [ ! -e '{}' ]; do sleep 0.01; done; \
+             printf ready; exec cat > '{}'",
+            go.display(),
+            rig.received.display()
+        );
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), script],
+            Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn a program");
+        let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+        rig.app.engine.providers.insert(tab, client);
+        go
+    }
+
+    /// The program `a_program_that_loads_until_told` put behind the pane
+    /// prints, ending the phase where it is still loading.
+    fn the_program_finishes_loading(rig: &Rig, go: &Path) {
+        std::fs::write(go, b"").expect("tell the program to print");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !rig
+            .app
+            .selected_terminal_surface_client()
+            .is_some_and(PtyClient::has_output)
+        {
+            assert!(Instant::now() < deadline, "the program never printed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Alt-[ typed while the program loads, held for the key that may follow,
+    /// is dropped when the program prints: the next key typed reaches the
+    /// program as itself.
+    #[test]
+    fn an_alt_bracket_typed_while_the_program_loads_never_joins_the_key_after_it() {
+        let mut rig = Rig::new(LOADING);
+        let go = a_program_that_loads_until_told(&mut rig);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        the_program_finishes_loading(&rig, &go);
+        rig.type_bytes(b"A");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "A");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// A lone Escape typed while the program loads and still held when the
+    /// program prints, before the wait that decides it has ended, never
+    /// reaches the program.
+    #[test]
+    fn an_escape_typed_while_the_program_loads_never_reaches_it_once_it_prints() {
+        let mut rig = Rig::new(LOADING);
+        let go = a_program_that_loads_until_told(&mut rig);
+        rig.type_bytes(b"\x1b");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b");
+        the_program_finishes_loading(&rig, &go);
+        rig.settle();
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
 }
 
 /// Keys around a key that opens a dialog or an overlay, or takes over the pane
@@ -1163,6 +1394,38 @@ mod dialogs_and_take_over {
         let want = assert_burst_matches_paced(MAXIMIZED, pieces);
         assert_eq!(want.received, "abcd");
         assert_every_cut_matches(MAXIMIZED, &pieces.concat(), &want);
+    }
+
+    /// The macro bar key with nothing to show ends the maximized pane's batch
+    /// and hands the rest of its read on; bytes the pane reads after that
+    /// read, here because the typing is longer than one read, reach the
+    /// program after the rest that was handed on.
+    #[test]
+    fn keys_in_the_read_after_one_the_macro_bar_key_ended_reach_the_program_after_it() {
+        let macro_bar = default_key(Action::OpenMacroBar);
+        let long: Vec<u8> = (0..2 * 4096)
+            .map(|i| b'a' + u8::try_from(i % 26).expect("a letter"))
+            .collect();
+        let pieces: &[&[u8]] = &[b"ab", &macro_bar, &long];
+        let typed = [&b"ab"[..], &long].concat();
+        for (how, outcome) in [
+            ("typed one at a time", paced(MAXIMIZED, pieces)),
+            ("in one write", burst(MAXIMIZED, &pieces.concat())),
+        ] {
+            let received = outcome.received.as_bytes();
+            let first_difference = received
+                .iter()
+                .zip(&typed)
+                .position(|(got, sent)| got != sent);
+            assert!(
+                received == typed,
+                "{how}: the program received {} of {} bytes, the first out of place at {:?}",
+                received.len(),
+                typed.len(),
+                first_difference
+            );
+            assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent, "{how}");
+        }
     }
 
     /// With the take-over card up in fullscreen, typing reaches nothing until
@@ -1246,6 +1509,977 @@ mod hand_overs_without_a_key {
             outcome.received, "x",
             "the windowed pane types into the program"
         );
+    }
+
+    /// The dialog a config reload that failed opens, as the worker's answer
+    /// opens it.
+    fn a_worker_opens_a_dialog(rig: &mut Rig) {
+        rig.app.apply_reaction(
+            dux_core::engine::EventReaction::OpenConfigReloadFailedModal(
+                "the config does not parse".to_string(),
+            ),
+        );
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+    }
+
+    /// Escape, in a read of its own, closes the dialog.
+    fn close_the_dialog(rig: &mut Rig) {
+        rig.type_bytes(b"\x1b");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "None");
+    }
+
+    /// The program behind the agent pane ends and the run loop's sweep sees it.
+    fn the_agent_exits(rig: &mut Rig) {
+        let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+        rig.app.engine.providers[&tab].terminate();
+        sweep_until(rig, |app| !app.engine.providers.contains_key(&tab));
+    }
+
+    fn sweep_until(rig: &mut Rig, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(&rig.app) {
+            assert!(Instant::now() < deadline, "the program never exited");
+            std::thread::sleep(Duration::from_millis(5));
+            rig.app.drain_events();
+        }
+    }
+
+    /// The agent pane maximized again over a program that has just started.
+    fn maximize_a_new_agent_program(rig: &mut Rig) {
+        let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+        let client = ready_program(&rig.received, Program::Plain);
+        rig.app.engine.providers.insert(tab, client);
+        rig.app.focus = FocusPane::Center;
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+    }
+
+    /// Alt-[ as a classic terminal sends it, held by the maximized pane for a
+    /// key that may follow, when a worker opens a dialog: the next key typed
+    /// into the pane once the dialog is closed is that key, as it is typed
+    /// with no Alt-[ before it.
+    #[test]
+    fn the_start_of_a_key_held_when_a_worker_opens_a_dialog_is_dropped() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// A paste the maximized pane is in when a worker opens a dialog ends
+    /// there: its end marker is dropped, and once the dialog is closed the
+    /// fullscreen toggle leaves the pane rather than being pasted.
+    #[test]
+    fn a_paste_open_when_a_worker_opens_a_dialog_ends_with_the_hand_over() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"\x1b[201~");
+        rig.settle();
+        close_the_dialog(&mut rig);
+        rig.type_bytes(TOGGLE);
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "abc");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::None);
+    }
+
+    /// The start of a key the maximized pane holds when its agent exits is
+    /// not put in front of what is typed into the pane once the agent is
+    /// back and the pane maximized again.
+    #[test]
+    fn the_start_of_a_key_held_when_the_agent_exits_never_reaches_its_next_program() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        the_agent_exits(&mut rig);
+        assert_eq!(rig.app.fullscreen_overlay, FullscreenOverlay::None);
+        rig.turn();
+        maximize_a_new_agent_program(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// The same for a paste open when the agent exits: the pane maximized
+    /// over its next program is not in it, so the toggle leaves the pane.
+    #[test]
+    fn a_paste_open_when_the_agent_exits_does_not_reach_its_next_program() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        the_agent_exits(&mut rig);
+        rig.turn();
+        maximize_a_new_agent_program(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        rig.type_bytes(TOGGLE);
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::None);
+    }
+
+    /// A terminal in the agent's dock running a program that writes what it
+    /// receives to `received`, maximized; returns its id.
+    fn maximize_a_dock_terminal(rig: &mut Rig, received: &Path, program: Program) -> String {
+        let id = "dock-terminal".to_string();
+        rig.app.engine.companion_terminals.insert(
+            id.clone(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
+                label: id.clone(),
+                foreground_cmd: None,
+                client: ready_program(received, program),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+                list_after: None,
+            },
+        );
+        rig.app.rebuild_left_items();
+        rig.app.active_terminal_id = Some(id.clone());
+        rig.app.session_surface = crate::model::SessionSurface::Terminal;
+        rig.app.focus = FocusPane::Center;
+        rig.app.input_target = InputTarget::Terminal;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        rig.draw();
+        assert_eq!(rig.app.selected_terminal_surface_id(), Some(id.clone()));
+        id
+    }
+
+    /// The start of a key a maximized terminal holds when it exits is not
+    /// put in front of what is typed into the agent pane maximized after it.
+    #[test]
+    fn the_start_of_a_key_held_when_a_terminal_exits_never_reaches_the_agent() {
+        let mut rig = Rig::new(WINDOWED);
+        let elsewhere = rig.received.with_file_name("terminal received");
+        let id = maximize_a_dock_terminal(&mut rig, &elsewhere, Program::Plain);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        rig.app.engine.companion_terminals[&id].client.terminate();
+        sweep_until(&mut rig, |app| {
+            !app.engine.companion_terminals.contains_key(&id)
+        });
+        assert_eq!(rig.app.fullscreen_overlay, FullscreenOverlay::None);
+        rig.turn();
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.focus = FocusPane::Center;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// The start of a key held by the maximized pane of one program is not
+    /// put in front of what is typed into another program's maximized pane,
+    /// even when no poll ran between them while the pane was not maximized.
+    #[test]
+    fn the_start_of_a_key_held_for_one_program_never_reaches_another() {
+        let mut rig = Rig::new(WINDOWED);
+        let elsewhere = rig.received.with_file_name("terminal received");
+        maximize_a_dock_terminal(&mut rig, &elsewhere, Program::Plain);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// Everything `client`'s program has written to `received`, once all that
+    /// dux wrote to it before now has arrived.
+    fn everything_received(client: &PtyClient, received: &Path) -> String {
+        client.write_bytes(END_OF_CASE).expect("mark the end");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let got = std::fs::read(received).unwrap_or_default();
+            if let Some(before) = got.strip_suffix(END_OF_CASE) {
+                return String::from_utf8_lossy(before).into_owned();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the program never received the end of the case: {:?}",
+                String::from_utf8_lossy(&got)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    const READS_PASTES: Setup = Setup {
+        program: Program::ReadsPastes,
+        ..MAXIMIZED
+    };
+
+    /// A paste the maximized pane was forwarding with its markers when a
+    /// worker opens a dialog is closed for the program there, so what is
+    /// typed into the pane once the dialog is closed is typing again.
+    #[test]
+    fn a_paste_a_dialog_cuts_off_is_closed_for_a_program_that_reads_pastes() {
+        let mut rig = Rig::new(READS_PASTES);
+        assert!(
+            rig.app
+                .selected_terminal_surface_client()
+                .is_some_and(PtyClient::has_bracketed_paste)
+        );
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"\x1b[201~");
+        rig.settle();
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x\r");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "\x1b[200~abc\x1b[201~x\r");
+    }
+
+    /// The rest of a paste a dialog cut off, up to its end marker, is dropped:
+    /// its line break does not answer the dialog, and the program keeps the
+    /// part it had before the dialog opened.
+    #[test]
+    fn the_rest_of_a_paste_a_dialog_cuts_off_never_acts_on_the_dialog() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"de\r");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        rig.type_bytes(b"f\r\x1b[201~");
+        rig.settle();
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "abcx");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// A paste cut off by another program being selected is closed for the
+    /// program it was going to, and none of its rest reaches the program
+    /// selected now; what follows its end marker does.
+    #[test]
+    fn a_paste_cut_off_by_selecting_another_program_ends_in_the_program_it_was_going_to() {
+        let mut rig = Rig::new(WINDOWED);
+        let elsewhere = rig.received.with_file_name("terminal received");
+        let id = maximize_a_dock_terminal(&mut rig, &elsewhere, Program::ReadsPastes);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+        rig.type_bytes(b"d\re\x1b[201~x");
+        rig.settle();
+        let terminal_received =
+            everything_received(&rig.app.engine.companion_terminals[&id].client, &elsewhere);
+        assert_eq!(terminal_received, "\x1b[200~abc\x1b[201~");
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// The start of a key the windowed interface holds for a dialog over the
+    /// maximized pane is dropped when the dialog closes with no key, so the
+    /// next key typed into the pane is that key.
+    #[test]
+    fn the_start_of_a_key_held_for_a_dialog_that_closes_by_itself_is_dropped() {
+        let mut rig = Rig::new(MAXIMIZED);
+        a_worker_opens_a_dialog(&mut rig);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[");
+        // A dialog closing because of something other than a key.
+        rig.app.prompt = PromptState::None;
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// A paste the windowed interface is reading for a dialog over the
+    /// maximized pane, when the dialog closes with no key, reaches neither
+    /// the dialog nor the program: what follows its end marker does.
+    #[test]
+    fn a_paste_held_for_a_dialog_that_closes_by_itself_never_reaches_the_program() {
+        let mut rig = Rig::new(MAXIMIZED);
+        a_worker_opens_a_dialog(&mut rig);
+        rig.type_bytes(b"\x1b[200~ab");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[200~ab");
+        rig.app.prompt = PromptState::None;
+        rig.type_bytes(b"c\r\x1b[201~x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// A paste the input debugger is counting when a worker opens a dialog
+    /// over it is dropped up to its end marker, so its line break does not
+    /// answer the dialog.
+    #[test]
+    fn the_rest_of_a_paste_the_input_debugger_counts_never_acts_on_the_dialog_after_it() {
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.prompt = PromptState::DebugInput {
+            lines: Vec::new(),
+            scroll_offset: 0,
+        };
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"d\re\x1b[201~");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+    }
+
+    /// The rest of a paste open when the agent exits is dropped up to its end
+    /// marker, so a dux key inside it does nothing in the windowed interface.
+    #[test]
+    fn the_rest_of_a_paste_open_when_the_agent_exits_never_acts_on_the_window() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        the_agent_exits(&mut rig);
+        rig.turn();
+        let palette = default_bindings()
+            .byte_patterns_for(Action::OpenPalette)
+            .into_iter()
+            .next()
+            .expect("the palette has a default key");
+        rig.type_bytes(&[&b"d"[..], &palette, b"\x1b[201~"].concat());
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "None");
+    }
+
+    /// The start of a paste's start marker, cut off by the read and held by
+    /// the maximized pane when a worker opens a dialog, starts a paste as the
+    /// whole marker does: the rest of the paste, its line break included,
+    /// never acts on the dialog.
+    #[test]
+    fn a_paste_whose_start_marker_a_dialog_cuts_in_two_never_acts_on_the_dialog() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[20");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[20");
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"0~de\r\x1b[201~");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// The start of a key that only looked like a paste's start marker is
+    /// dropped as any held key start is, and what follows it is read as
+    /// keys: here F9 cut after `ESC[20`, then Escape, which closes the
+    /// dialog. Neither F9 nor its `~` reaches the program, and a key typed
+    /// into the pane after the dialog does.
+    #[test]
+    fn a_held_key_start_that_is_no_paste_lets_what_follows_act() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[20");
+        rig.turn();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"~");
+        rig.settle();
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// The same for the start of a paste's start marker the windowed
+    /// interface holds for a dialog that closes by itself: the paste reaches
+    /// neither the dialog nor the program, and what follows its end marker
+    /// does.
+    #[test]
+    fn a_paste_start_held_for_a_dialog_that_closes_by_itself_never_reaches_the_program() {
+        let mut rig = Rig::new(MAXIMIZED);
+        a_worker_opens_a_dialog(&mut rig);
+        rig.type_bytes(b"\x1b[20");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[20");
+        rig.app.prompt = PromptState::None;
+        rig.type_bytes(b"0~c\r\x1b[201~x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// The same for the start of a paste's start marker the input debugger
+    /// holds when a worker opens a dialog over it.
+    #[test]
+    fn a_paste_start_the_input_debugger_holds_never_acts_on_the_dialog_after_it() {
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.prompt = PromptState::DebugInput {
+            lines: Vec::new(),
+            scroll_offset: 0,
+        };
+        rig.type_bytes(b"\x1b[20");
+        rig.turn();
+        assert!(rig.app.debug_raw_input.holds_partial_sequence());
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"0~d\re\x1b[201~");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+    }
+
+    /// The start of a key the windowed interface holds when a worker opens a
+    /// dialog over it is dropped although the reader stays the same, so the
+    /// next key typed is that key in the dialog: here Escape, which closes it.
+    #[test]
+    fn the_start_of_a_key_the_window_holds_when_a_worker_opens_a_dialog_over_it_is_dropped() {
+        let mut rig = Rig::new(WINDOWED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[");
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        close_the_dialog(&mut rig);
+    }
+
+    /// A paste whose start marker the program's full write queue dropped never
+    /// opened a paste in the program, so a worker's dialog sends no end marker
+    /// for it.
+    #[test]
+    fn a_paste_start_a_full_write_queue_dropped_is_never_closed() {
+        let mut rig = Rig::new(MAXIMIZED);
+        let go = rig.received.with_file_name("go");
+        let script = format!(
+            "stty raw -echo; printf '\\033[?2004hready'; \
+             while [ ! -e '{}' ]; do sleep 0.01; done; exec cat > '{}'",
+            go.display(),
+            rig.received.display()
+        );
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), script],
+            Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn a program");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !client.has_bracketed_paste() {
+            assert!(Instant::now() < deadline, "the program never said ready");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The program reads nothing until `go` exists, so its queue fills; it
+        // is full for good once a wait frees no room in it.
+        loop {
+            while client.enqueue_bytes(b"q") {}
+            std::thread::sleep(Duration::from_millis(50));
+            if !client.enqueue_bytes(b"q") {
+                break;
+            }
+        }
+        let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+        rig.app.engine.providers.insert(tab.clone(), client);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        std::fs::write(&go, b"").expect("let the program read");
+        while !rig.app.engine.providers[&tab].enqueue_bytes(b"") {
+            assert!(
+                Instant::now() < deadline,
+                "the program never read its queue"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        let received = rig.outcome().received;
+        assert!(
+            !received.contains('\x1b'),
+            "the program received a paste marker: {:?}",
+            received.trim_start_matches('q')
+        );
+    }
+
+    /// A maximized program that reads pastes, in a row a browser drove until
+    /// this window took it over.
+    fn rig_driving_a_row_a_browser_drove() -> Rig {
+        let mut rig = Rig::new(Setup {
+            driver: Driver::Browser,
+            program: Program::ReadsPastes,
+            ..MAXIMIZED
+        });
+        take_over_from_the_card(&mut rig);
+        rig
+    }
+
+    /// Press the take-over key and draw the frame that carries the claim.
+    fn take_over_from_the_card(rig: &mut Rig) {
+        let take_over = default_bindings()
+            .byte_patterns_for(Action::FocusAgent)
+            .into_iter()
+            .next()
+            .expect("the take-over key has a default");
+        assert!(rig.app.focused_pty_takeover_card().is_some());
+        rig.type_bytes(&take_over);
+        rig.settle();
+        rig.draw();
+        assert_eq!(rig.app.focused_pty_takeover_card(), None);
+    }
+
+    /// A browser takes the row over from this window.
+    fn a_browser_takes_over(rig: &mut Rig) {
+        let seat = rig.app.pty_ownership().expect("dux serves the web");
+        let browser = seat.owners.next_conn_id();
+        seat.owners
+            .claim_for_resize(
+                "session-1-slot",
+                browser,
+                dux_core::pty_owners::ResizeIntent::TakeOver {
+                    expected_owner: None,
+                },
+                Some("Chrome"),
+                |_| {},
+            )
+            .epoch
+            .expect("the browser took the row over");
+        assert!(rig.app.focused_pty_takeover_card().is_some());
+    }
+
+    /// A paste this window opened in a program it still drives is closed for
+    /// that program when a worker opens a dialog.
+    #[test]
+    fn a_paste_a_dialog_cuts_off_is_closed_for_a_program_this_window_drives() {
+        let mut rig = rig_driving_a_row_a_browser_drove();
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        assert_eq!(rig.outcome().received, "\x1b[200~abc\x1b[201~");
+    }
+
+    /// A paste this window opened is not closed for a program whose row a
+    /// browser has taken over: the end marker is a write like any other, and
+    /// the browser may be in a paste of its own that it would end early.
+    #[test]
+    fn a_paste_a_dialog_cuts_off_is_left_open_in_a_row_a_browser_took_over() {
+        let mut rig = rig_driving_a_row_a_browser_drove();
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_browser_takes_over(&mut rig);
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        assert!(!rig.app.raw_paste.program_in_paste);
+        assert_eq!(rig.outcome().received, "\x1b[200~abc");
+    }
+
+    /// A program left inside a paste whose end marker was refused, because a
+    /// browser drove the row when it arrived, is closed once this window
+    /// drives the row again and the leave key hands input to the window.
+    #[test]
+    fn a_paste_left_open_by_a_refused_end_is_closed_when_the_leave_key_hands_over() {
+        let mut rig = rig_driving_a_row_a_browser_drove();
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_browser_takes_over(&mut rig);
+        rig.type_bytes(b"de\x1b[201~");
+        rig.settle();
+        take_over_from_the_card(&mut rig);
+        rig.type_bytes(TOGGLE);
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::None);
+        assert_eq!(outcome.received, "\x1b[200~abc\x1b[201~");
+    }
+
+    /// A cut-off paste whose end marker never comes stops being dropped once
+    /// it has gone as long without a byte as any paste may, so a key typed
+    /// after that acts.
+    #[test]
+    fn a_cut_off_paste_whose_end_never_comes_is_dropped_only_until_it_goes_quiet() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        std::thread::sleep(crate::raw_input::UNFINISHED_PASTE_WAIT + Duration::from_millis(50));
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "abcx");
+    }
+
+    /// The time the rest of a cut-off paste is measured by, stopped from now
+    /// on this thread and moved only by the case, so how long a step takes on
+    /// a loaded machine changes nothing.
+    struct PasteClock {
+        now: Instant,
+    }
+
+    impl PasteClock {
+        fn stopped() -> Self {
+            let now = Instant::now();
+            PASTE_CLOCK.set(Some(now));
+            Self { now }
+        }
+
+        fn advance(&mut self, by: Duration) {
+            self.now += by;
+            PASTE_CLOCK.set(Some(self.now));
+        }
+    }
+
+    impl Drop for PasteClock {
+        fn drop(&mut self) {
+            PASTE_CLOCK.set(None);
+        }
+    }
+
+    /// A maximized paste cut off by a worker's dialog, its end marker still
+    /// to come.
+    fn a_dialog_cuts_off_a_paste(rig: &mut Rig) {
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.settle();
+        a_worker_opens_a_dialog(rig);
+        rig.turn();
+    }
+
+    /// `n` bytes of a paste's text, the last a line break, which closes the
+    /// dialog if it is read as a key.
+    fn pasted_lines(n: usize) -> Vec<u8> {
+        let mut text = vec![b'p'; n - 1];
+        text.push(b'\r');
+        text
+    }
+
+    /// Escape typed every half second after a cut-off paste whose end marker
+    /// never comes: the Escape typed half a second after the cut is still
+    /// taken for the paste, and the one typed a second after it closes the
+    /// dialog. Typing keeps nothing dropped past that second.
+    #[test]
+    fn steady_typing_after_a_cut_off_paste_acts_a_second_after_the_cut() {
+        let mut clock = PasteClock::stopped();
+        let mut rig = Rig::new(MAXIMIZED);
+        a_dialog_cuts_off_a_paste(&mut rig);
+        let half = crate::raw_input::UNFINISHED_PASTE_WAIT / 2;
+        clock.advance(half);
+        rig.type_bytes(b"\x1b");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        clock.advance(half);
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "abcx");
+    }
+
+    /// The rest of a cut-off paste arriving as a slow link delivers it, in
+    /// reads of paste size with a stall just short of the quiet wait between
+    /// them, is dropped to its end marker: none of its line breaks closes the
+    /// dialog.
+    #[test]
+    fn the_rest_of_a_paste_arriving_with_stalls_is_dropped_to_its_end_marker() {
+        let mut clock = PasteClock::stopped();
+        let mut rig = Rig::new(MAXIMIZED);
+        a_dialog_cuts_off_a_paste(&mut rig);
+        let stall = crate::raw_input::UNFINISHED_PASTE_WAIT.mul_f32(0.9);
+        let mut waited = Duration::ZERO;
+        while waited + stall * 2 < crate::raw_input::CUT_PASTE_DROP_LIMIT {
+            clock.advance(stall);
+            waited += stall;
+            rig.type_bytes(&pasted_lines(crate::raw_input::PASTE_SIZED_READ));
+            rig.settle();
+            assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        }
+        clock.advance(stall);
+        rig.type_bytes(b"q\r\x1b[201~");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "abcx");
+    }
+
+    /// The rest of a cut-off paste that keeps arriving in reads of paste size
+    /// and never brings its end marker is dropped for at most
+    /// [`crate::raw_input::CUT_PASTE_DROP_LIMIT`] after the cut: a key read
+    /// then acts.
+    #[test]
+    fn the_rest_of_a_cut_off_paste_is_dropped_for_at_most_its_limit() {
+        let mut clock = PasteClock::stopped();
+        let mut rig = Rig::new(MAXIMIZED);
+        a_dialog_cuts_off_a_paste(&mut rig);
+        let step = crate::raw_input::UNFINISHED_PASTE_WAIT / 2;
+        let mut waited = Duration::ZERO;
+        while waited + step < crate::raw_input::CUT_PASTE_DROP_LIMIT {
+            clock.advance(step);
+            waited += step;
+            rig.type_bytes(&pasted_lines(crate::raw_input::PASTE_SIZED_READ));
+            rig.settle();
+            assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        }
+        clock.advance(crate::raw_input::CUT_PASTE_DROP_LIMIT.saturating_sub(waited));
+        close_the_dialog(&mut rig);
+    }
+
+    /// Alt-[ typed at one maximized program and held for the key that may
+    /// follow, then another program maximized: a 2 typed next reaches the
+    /// new program, because a hand-typed Alt-[ is never taken for the start
+    /// of a paste.
+    #[test]
+    fn a_key_typed_after_a_dropped_alt_bracket_reaches_the_next_program() {
+        let mut rig = Rig::new(WINDOWED);
+        let elsewhere = rig.received.with_file_name("terminal received");
+        maximize_a_dock_terminal(&mut rig, &elsewhere, Program::Plain);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        rig.app.session_surface = crate::model::SessionSurface::Agent;
+        rig.app.input_target = InputTarget::Agent;
+        rig.app.fullscreen_overlay = FullscreenOverlay::Agent;
+        rig.type_bytes(b"2x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "2x");
+    }
+
+    /// The same for Escape, held while a program loads, then another program
+    /// maximized: a `[` typed next reaches the new program.
+    #[test]
+    fn a_key_typed_after_a_dropped_escape_reaches_the_next_program() {
+        let mut rig = Rig::new(Setup {
+            program: Program::Silent,
+            ..MAXIMIZED
+        });
+        rig.type_bytes(b"\x1b");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b");
+        let elsewhere = rig.received.with_file_name("terminal received");
+        let id = maximize_a_dock_terminal(&mut rig, &elsewhere, Program::Plain);
+        rig.type_bytes(b"[x");
+        rig.settle();
+        assert_eq!(
+            everything_received(&rig.app.engine.companion_terminals[&id].client, &elsewhere),
+            "[x"
+        );
+    }
+
+    /// The shortest held start of the paste start marker that is taken for a
+    /// paste, `ESC [ 2`, held when a worker opens a dialog: the rest of the
+    /// paste never acts on the dialog.
+    #[test]
+    fn a_paste_whose_start_marker_a_dialog_cuts_after_its_third_byte_never_acts_on_the_dialog() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[2");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[2");
+        a_worker_opens_a_dialog(&mut rig);
+        rig.turn();
+        rig.type_bytes(b"00~de\r\x1b[201~");
+        rig.settle();
+        assert_eq!(prompt_name(&rig.app.prompt), "ConfigReloadFailed");
+        close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// What takes the windowed interface's keys in a case where held input
+    /// must outlast a change around it.
+    #[derive(Clone, Copy, Debug)]
+    enum Taker {
+        Palette,
+        /// A dialog with a text field: renaming the agent.
+        RenameDialog,
+        MacroBar,
+    }
+
+    const TAKERS: [Taker; 3] = [Taker::Palette, Taker::RenameDialog, Taker::MacroBar];
+
+    fn default_key(action: Action) -> Vec<u8> {
+        default_bindings()
+            .byte_patterns_for(action)
+            .into_iter()
+            .next()
+            .expect("the action has a default key")
+    }
+
+    /// Open `taker` from the agents list.
+    fn open(rig: &mut Rig, taker: Taker) {
+        rig.app.focus = FocusPane::Left;
+        match taker {
+            Taker::Palette => {
+                rig.type_bytes(&default_key(Action::OpenPalette));
+                rig.settle();
+                assert_eq!(prompt_name(&rig.app.prompt), "Command");
+            }
+            Taker::RenameDialog => {
+                rig.type_bytes(&default_key(Action::RenameSession));
+                rig.settle();
+                assert_eq!(prompt_name(&rig.app.prompt), "RenameSession");
+            }
+            Taker::MacroBar => {
+                rig.app.macro_bar = Some(MacroBarState {
+                    input: TextInput::new(),
+                    selected: 0,
+                    previous_input_target: rig.app.input_target,
+                });
+                rig.app.input_target = InputTarget::None;
+            }
+        }
+    }
+
+    /// The text typed into `taker`'s field.
+    fn typed_into(app: &App, taker: Taker) -> String {
+        match (taker, &app.prompt) {
+            (Taker::Palette, PromptState::Command { input, .. })
+            | (Taker::RenameDialog, PromptState::RenameSession { input, .. }) => input.text.clone(),
+            (Taker::MacroBar, _) => app
+                .macro_bar
+                .as_ref()
+                .expect("the macro bar is open")
+                .input
+                .text
+                .clone(),
+            (_, prompt) => panic!("{taker:?} is not open: {}", prompt_name(prompt)),
+        }
+    }
+
+    /// A paste typed into `taker`, cut by a poll, `change` made while it is
+    /// held and another poll made, arrives whole in `taker`.
+    fn assert_a_paste_outlasts(rig: &mut Rig, taker: Taker, change: impl FnOnce(&mut Rig)) {
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[200~abc");
+        change(rig);
+        rig.turn();
+        rig.type_bytes(b"def\x1b[201~");
+        rig.settle();
+        assert_eq!(typed_into(&rig.app, taker), "abcdef", "{taker:?}");
+    }
+
+    /// A terminal of the agent's dock, running a program, brought in front of
+    /// the agent without moving the keys.
+    fn bring_a_dock_terminal_to_the_front(rig: &mut Rig) {
+        let received = rig.received.with_file_name("terminal received");
+        let id = "dock-terminal".to_string();
+        rig.app.engine.companion_terminals.insert(
+            id.clone(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
+                label: id.clone(),
+                foreground_cmd: None,
+                client: ready_program(&received, Program::Plain),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+                list_after: None,
+            },
+        );
+        rig.app.rebuild_left_items();
+        rig.app.active_terminal_id = Some(id);
+        rig.app.session_surface = crate::model::SessionSurface::Terminal;
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_the_selected_program_exiting() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, the_agent_exits);
+        }
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_the_selected_program_starting() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            the_agent_exits(&mut rig);
+            rig.turn();
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, |rig| {
+                let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+                let client = ready_program(&rig.received, Program::Plain);
+                rig.app.engine.providers.insert(tab, client);
+            });
+        }
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_another_program_coming_to_the_front() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, bring_a_dock_terminal_to_the_front);
+        }
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_focus_moving_under_it() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, |rig| rig.app.focus = FocusPane::Center);
+        }
+    }
+
+    /// A paste the windowed interface is reading for a dialog a worker opened
+    /// over the macro bar, when the dialog closes with no key, reaches
+    /// neither: the macro bar gets only what follows the paste's end marker.
+    #[test]
+    fn a_paste_the_window_holds_when_its_dialog_closes_by_itself_never_reaches_the_macro_bar() {
+        let mut rig = Rig::new(WINDOWED);
+        open(&mut rig, Taker::MacroBar);
+        a_worker_opens_a_dialog(&mut rig);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[200~abc");
+        // A dialog closing because of something other than a key.
+        rig.app.prompt = PromptState::None;
+        rig.turn();
+        rig.type_bytes(b"def\x1b[201~x");
+        rig.settle();
+        assert_eq!(typed_into(&rig.app, Taker::MacroBar), "x");
+    }
+
+    /// The palette, opened over a row a browser drives, keeps a paste while
+    /// another browser takes the row over.
+    #[test]
+    fn a_paste_into_the_palette_outlasts_a_browser_taking_the_row_over() {
+        let mut rig = Rig::new(Setup {
+            driver: Driver::Browser,
+            ..WINDOWED
+        });
+        open(&mut rig, Taker::Palette);
+        assert_a_paste_outlasts(&mut rig, Taker::Palette, |rig| {
+            let seat = rig.app.pty_ownership().expect("dux serves the web");
+            let browser = seat.owners.next_conn_id();
+            seat.owners
+                .claim_for_resize(
+                    "session-1-slot",
+                    browser,
+                    dux_core::pty_owners::ResizeIntent::TakeOver {
+                        expected_owner: None,
+                    },
+                    Some("Firefox"),
+                    |_| {},
+                )
+                .epoch
+                .expect("the other browser took the row over");
+        });
     }
 }
 
