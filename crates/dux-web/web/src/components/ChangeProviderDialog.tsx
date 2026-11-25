@@ -15,7 +15,7 @@ import {
   closeChangeProvider,
   useDux,
 } from "@/lib/store"
-import { sessionLabel } from "@/lib/agentWorkspace"
+import { sessionLabel, workspacePlace } from "@/lib/agentWorkspace"
 
 // Swap which CLI an agent session uses, mirroring the TUI's
 // `change-agent-provider`. The swap is persisted for the NEXT launch and never
@@ -43,6 +43,8 @@ function ChangeProviderForm({ open, onClosed }: { open: boolean; onClosed: () =>
     spine?.sessions.find((s) => s.id === targetId),
   )
   const providers = bootstrap?.available_providers ?? []
+  // A standalone agent works in the user's folder, not a worktree.
+  const place = session ? workspacePlace(session.workspace) : "worktree"
   const [provider, setProvider] = useState<string>(() => session?.provider ?? "")
   const unchanged = session === undefined || provider === session.provider
 
@@ -79,10 +81,19 @@ function ChangeProviderForm({ open, onClosed }: { open: boolean; onClosed: () =>
       }
       description={
         <>
-          Pick the CLI this agent uses. The change takes effect the next time this agent
-          launches; the running session keeps its current provider until you reconnect it.
-          dux resumes the chosen provider&rsquo;s prior session on this worktree when one is
-          available and no other tab of that provider is already running.
+          <span>
+            Choose which CLI this agent&rsquo;s first tab runs. Its other tabs keep their own.
+            Nothing changes right now: what is running keeps its current provider until you stop
+            it and start it again.
+          </span>
+          <br />
+          <br />
+          <span>
+            The next time it starts, it runs the provider you pick here. If that provider has
+            worked in this {place} before and can pick up where it left off, dux continues that
+            conversation, unless another tab of this agent is already running the same provider.
+            Otherwise it starts a new one.
+          </span>
         </>
       }
       submit={{
