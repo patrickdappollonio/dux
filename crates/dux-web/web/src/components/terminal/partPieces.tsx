@@ -125,8 +125,12 @@ export function TerminalPaneSurface({
         )
       }}
     >
+      {/* Between a resize and the refit that follows it xterm keeps its previous,
+          possibly larger grid; an overflow reaching a scrolling ancestor oscillates the layout. */}
       <div className="absolute inset-0 overflow-hidden">
         {dragActive ? <FileDropOverlay kind={kind} /> : null}
+        {/* The padding is on this host and never on the container xterm opens into: the fit
+            addon reads that container's border-box height, padding included, and grids a row nobody sees. */}
         <div
           ref={hostRef}
           data-debug-box="xterm-host"
