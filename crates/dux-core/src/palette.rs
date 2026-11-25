@@ -277,7 +277,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         name: "clone-project",
         description: "Clone a repository and start an agent on it",
         // The web surfaces this as "Clone a repository…" in the Add project
-        // submenu of the app menu and the launcher's `⋯`, not as a command.
+        // submenu of the app menu and the launcher's `▾` menu, not as a command.
     },
     PaletteCommand {
         action: Action::CopyPath,

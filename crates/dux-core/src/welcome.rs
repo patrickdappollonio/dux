@@ -254,7 +254,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     },
     WelcomeTip {
         web: Some(
-            "`Add project…` in the launcher's `⋯` menu browses the server's own disk, so you can adopt a repo from a phone on the sofa.",
+            "`Add project…` in the launcher's `▾` menu browses the server's own disk, so you can adopt a repo from a phone on the sofa.",
         ),
         tui: Some(|cx| {
             format!(
