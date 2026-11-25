@@ -594,6 +594,13 @@ enum Mount {
 impl Filesystem {
     /// Whether this directory, directly inside one on `outer`, is on `outer`
     /// too; `None` when that cannot be told.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "only Linux has a mount answer that cannot be told"
+        )
+    )]
     fn is_on(self, outer: Self) -> Option<bool> {
         if self.device != outer.device {
             return Some(false);
