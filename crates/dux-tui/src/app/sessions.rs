@@ -93,8 +93,21 @@ impl App {
         }
     }
 
-    /// Palette command (`new-standalone-agent`): pick a folder you already
-    /// have and run a provider in it.
+    /// Palette command (`new-standalone-agent`): ask for the agent's name,
+    /// pre-filled with a generated one, and dux creates its folder in the
+    /// standalone agents folder. The modal's button leads on to the folder
+    /// browser for a folder the user already has.
+    pub(crate) fn open_new_standalone_agent(&mut self) {
+        let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
+        input.insert_str(&crate::git::docker_style_name());
+        self.prompt = PromptState::NameStandaloneAgent {
+            folder: crate::app::StandaloneFolder::New,
+            input,
+            focus: crate::app::NameStandaloneAgentFocus::Input,
+        };
+    }
+
+    /// Pick a folder you already have and run a provider in it.
     ///
     /// Reuses the add-project folder browser with the purpose switched: picking
     /// a folder here goes nowhere near the add-project validator, which rejects
@@ -117,8 +130,9 @@ impl App {
     /// here, and nothing is initialized in the user's directory.
     pub(crate) fn open_standalone_agent_name_prompt(&mut self, path: String) {
         self.prompt = PromptState::NameStandaloneAgent {
-            folder: path,
+            folder: crate::app::StandaloneFolder::Picked(path),
             input: TextInput::new().with_char_map(crate::git::agent_name_char_map),
+            focus: crate::app::NameStandaloneAgentFocus::Input,
         };
     }
 
@@ -131,14 +145,22 @@ impl App {
     pub(crate) fn planned_standalone_agent_create(
         &self,
     ) -> Option<Result<(CreateAgentRequest, dux_core::status_text::StatusText)>> {
-        let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
+        let PromptState::NameStandaloneAgent { folder, input, .. } = &self.prompt else {
             return None;
         };
         // No branch is created here, but the name follows the agent-name rules
-        // the engine enforces, and an empty field means the folder's own name
-        // converted into one. The provider is the global default, retargetable
-        // afterwards.
-        Some(self.engine.plan_standalone_agent(folder, &input.text, None))
+        // the engine enforces. In a picked folder an empty field means the
+        // folder's own name converted into one; a new folder is named after
+        // the agent, so its name is required. The provider is the global
+        // default, retargetable afterwards.
+        Some(match folder {
+            crate::app::StandaloneFolder::New => self
+                .engine
+                .plan_standalone_agent_in_new_folder(&input.text, None),
+            crate::app::StandaloneFolder::Picked(folder) => {
+                self.engine.plan_standalone_agent(folder, &input.text, None)
+            }
+        })
     }
 
     /// Confirm on the standalone name field: create the agent and close.
@@ -151,10 +173,16 @@ impl App {
     /// Create and reports the server's refusal as a toast rather than holding
     /// the folder hostage behind an open form.
     pub(crate) fn confirm_standalone_agent_name(&mut self) {
-        let PromptState::NameStandaloneAgent { input, .. } = &self.prompt else {
+        let PromptState::NameStandaloneAgent { input, folder, .. } = &self.prompt else {
             return;
         };
         let typed = input.text.trim();
+        if typed.is_empty() && *folder == crate::app::StandaloneFolder::New {
+            self.set_error(
+                "Give the agent a name first: dux names the folder it creates after the agent.",
+            );
+            return;
+        }
         if !typed.is_empty() && !crate::git::is_valid_agent_name(typed) {
             let refusal = crate::git::invalid_agent_name_refusal(typed);
             self.set_error(refusal);

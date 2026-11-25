@@ -12042,87 +12042,178 @@ impl App {
     }
 
     /// The standalone-agent name field, the terminal-UI twin of the web
-    /// dialog's name input.
+    /// dialog's name step.
     ///
-    /// The folder's own name is what an empty field resolves to, so it is written
-    /// into the label rather than left implicit, the way the web dialog's
-    /// placeholder spells it out. The folder is on its own line underneath,
-    /// home-collapsed: the browser is gone by the time this modal is up, and the
-    /// path is what says which folder was picked.
+    /// For a new folder the field opens with a generated name and the line
+    /// under it names the folder dux creates, following what is typed; a
+    /// button under that leads on to the folder browser. For a folder picked
+    /// in the browser, the folder's own name is what an empty field resolves
+    /// to, so it is written into the label, and the folder is on its own line
+    /// underneath, home-collapsed: the browser is gone by the time this modal
+    /// is up, and the path is what says which folder was picked.
     fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame<'_>) {
-        let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
+        let PromptState::NameStandaloneAgent {
+            folder,
+            input,
+            focus,
+        } = &self.prompt
+        else {
             return;
         };
-        let folder_path = PathBuf::from(folder);
-        let default_name = dux_core::git::standalone_agent_title("", &folder_path);
-        let folder_label = dux_core::home_path::shorten_home(&folder_path);
+        let new_folder = *folder == crate::app::StandaloneFolder::New;
+        // The modal is 64 wide; its border takes one column each side.
+        let inner_width = 62;
+        let (above, below) = match folder {
+            crate::app::StandaloneFolder::New => {
+                let typed = input.text.trim();
+                let root = self.engine.standalone_agents_root();
+                let folder_label = if typed.is_empty() {
+                    format!("{}/\u{2026}", dux_core::home_path::shorten_home(&root))
+                } else {
+                    dux_core::home_path::shorten_home(&dux_core::agent_folders::folder_path_for(
+                        &root, typed,
+                    ))
+                };
+                let runs_in = Prose::new()
+                    .text("The agent runs in ")
+                    .name(folder_label)
+                    .text(". dux creates the folder.");
+                (
+                    vec![Line::from(Span::styled(
+                        " Agent name:",
+                        Style::default().fg(self.theme.input_label_fg),
+                    ))],
+                    self.hanging_prose_lines(
+                        &runs_in,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                        " ",
+                        inner_width,
+                    ),
+                )
+            }
+            crate::app::StandaloneFolder::Picked(folder) => {
+                let folder_path = PathBuf::from(folder);
+                let default_name = dux_core::git::standalone_agent_title("", &folder_path);
+                let folder_label = dux_core::home_path::shorten_home(&folder_path);
+                (
+                    vec![
+                        Line::from(vec![
+                            Span::styled(
+                                " Name this agent (optional, defaults to ",
+                                Style::default().fg(self.theme.input_label_fg),
+                            ),
+                            name_chip(&default_name, &self.theme),
+                            Span::styled("):", Style::default().fg(self.theme.input_label_fg)),
+                        ]),
+                        labelled_name(
+                            " It runs in ",
+                            &folder_label,
+                            Style::default().fg(self.theme.hint_desc_fg),
+                            &self.theme,
+                        ),
+                        Line::from(Span::styled(
+                            " dux never creates, moves or removes that folder.",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        )),
+                    ],
+                    Vec::new(),
+                )
+            }
+        };
+        let field_focused = *focus == crate::app::NameStandaloneAgentFocus::Input;
+        let above_height = u16::try_from(above.len()).unwrap_or(u16::MAX);
+        let below_height = u16::try_from(below.len()).unwrap_or(u16::MAX);
+        // The labels, the field, the folder under it, the button with the
+        // blank row above it, the hint row, and the border.
+        let action_height = if new_folder { 4 } else { 0 };
+        let height = above_height
+            .saturating_add(3)
+            .saturating_add(below_height)
+            .saturating_add(action_height)
+            .saturating_add(3);
         self.render_dim_overlay(frame);
-        let area = self.centered_modal_exact(64, 9, frame.area());
+        let area = self.centered_modal_exact(64, height, frame.area());
         self.clear_overlay_area(frame, area);
 
-        let outer = self.themed_overlay_block("Name standalone agent");
+        let outer = self.themed_overlay_block(if new_folder {
+            "New standalone agent"
+        } else {
+            "Name standalone agent"
+        });
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
 
-        let [label_area, input_area, hint_area] = Layout::default()
+        let [label_area, input_area, below_area, action_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(above_height),
                 Constraint::Length(3),
-                Constraint::Length(3),
+                Constraint::Length(below_height),
+                Constraint::Length(action_height),
                 Constraint::Min(1),
             ])
             .areas(inner);
+        Paragraph::new(above).render(label_area, frame.buffer_mut());
+        Paragraph::new(below).render(below_area, frame.buffer_mut());
 
-        let labels = vec![
-            Line::from(vec![
-                Span::styled(
-                    " Name this agent (optional, defaults to ",
-                    Style::default().fg(self.theme.input_label_fg),
-                ),
-                name_chip(&default_name, &self.theme),
-                Span::styled("):", Style::default().fg(self.theme.input_label_fg)),
-            ]),
-            labelled_name(
-                " It runs in ",
-                &folder_label,
-                Style::default().fg(self.theme.hint_desc_fg),
-                &self.theme,
-            ),
-            Line::from(Span::styled(
-                " dux never creates, moves or removes that folder.",
-                Style::default().fg(self.theme.hint_desc_fg),
-            )),
-        ];
-        Paragraph::new(labels).render(label_area, frame.buffer_mut());
+        let input_inner = self.render_dialog_field(
+            frame,
+            input_area,
+            input,
+            FocusState::of(*focus, crate::app::NameStandaloneAgentFocus::Input),
+        );
 
-        // The field is the modal's only control, so it is always focused:
-        // focused border, caret drawn.
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(FocusState::Focused));
-        let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_field(
-            " ",
-            &input.text,
-            input.cursor,
-            self.theme.input_cursor_fg,
-            self.theme.input_cursor_bg,
-            FocusState::Focused,
-            input_inner.width,
-        ))
-        .block(input_block)
-        .render(input_area, frame.buffer_mut());
+        // The way on to the folder browser, with a misclick-safe blank row
+        // above it.
+        let mut use_existing = None;
+        if new_folder && action_area.height >= 4 {
+            let label = "Use an existing folder or project\u{2026}";
+            let width = button_width_for(label).min(action_area.width);
+            let button = Rect {
+                x: action_area.x + (action_area.width.saturating_sub(width)) / 2,
+                y: action_area.y + 1,
+                width,
+                height: 3,
+            };
+            Button::new(label)
+                .kind(ButtonKind::Confirm)
+                .state(button_state_for(
+                    ButtonPressedTarget::StandaloneUseExistingFolder,
+                    self.pressed_button,
+                    if field_focused {
+                        ButtonState::Normal
+                    } else {
+                        ButtonState::Focused
+                    },
+                ))
+                .render(frame, button, &self.theme);
+            use_existing = Some(button);
+        }
 
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let hints = vec![
-            Hint::key(confirm_key, "create agent"),
-            Hint::key(close_key, "cancel").pinned(),
-        ];
+        let mut hints = vec![Hint::key(
+            confirm_key,
+            if field_focused {
+                "create agent"
+            } else {
+                "use an existing folder"
+            },
+        )];
+        if new_folder {
+            hints.push(Hint::maybe_key(
+                self.bindings
+                    .label_for_text_field_dialog(Action::ToggleSelection),
+                "move focus",
+            ));
+        }
+        hints.push(Hint::key(close_key, "cancel").pinned());
         Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
             .render(hint_area, frame.buffer_mut());
-        self.overlay_layout.active = OverlayMouseLayout::NameStandaloneAgent { input: input_inner };
+        self.overlay_layout.active = OverlayMouseLayout::NameStandaloneAgent {
+            input: input_inner,
+            use_existing,
+        };
     }
 
     fn render_configure_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -28448,8 +28539,9 @@ mod tests {
         // renders the folder home-collapsed, so a fixture under $HOME would
         // come back as "~/..." and the assertion below would be a coin flip.
         app.prompt = PromptState::NameStandaloneAgent {
-            folder: "/dux-tests/ada/notes".to_string(),
+            folder: crate::app::StandaloneFolder::Picked("/dux-tests/ada/notes".to_string()),
             input: TextInput::new(),
+            focus: crate::app::NameStandaloneAgentFocus::Input,
         };
 
         let buf = draw(&mut app);
@@ -28481,13 +28573,15 @@ mod tests {
     fn the_standalone_name_modal_publishes_a_clickable_input_rect() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::NameStandaloneAgent {
-            folder: "/home/ada/notes".to_string(),
+            folder: crate::app::StandaloneFolder::Picked("/home/ada/notes".to_string()),
             input: TextInput::new(),
+            focus: crate::app::NameStandaloneAgentFocus::Input,
         };
 
         let buf = draw(&mut app);
 
-        let OverlayMouseLayout::NameStandaloneAgent { input } = app.overlay_layout.active else {
+        let OverlayMouseLayout::NameStandaloneAgent { input, .. } = app.overlay_layout.active
+        else {
             panic!(
                 "the standalone name modal must publish its input rect, got {:?}",
                 app.overlay_layout.active
@@ -28508,8 +28602,9 @@ mod tests {
             let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
             input.cursor = cursor;
             app.prompt = PromptState::NameStandaloneAgent {
-                folder: "/home/ada/notes".to_string(),
+                folder: crate::app::StandaloneFolder::Picked("/home/ada/notes".to_string()),
                 input,
+                focus: crate::app::NameStandaloneAgentFocus::Input,
             };
             draw(&mut app);
         }

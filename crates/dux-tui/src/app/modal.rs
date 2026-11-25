@@ -1345,8 +1345,9 @@ pub(super) mod tests {
             (
                 "NameStandaloneAgent",
                 PromptState::NameStandaloneAgent {
-                    folder: "/home/ada/my notes".to_string(),
+                    folder: crate::app::StandaloneFolder::Picked("/home/ada/my notes".to_string()),
                     input: TextInput::new(),
+                    focus: crate::app::NameStandaloneAgentFocus::Input,
                 },
             ),
             (

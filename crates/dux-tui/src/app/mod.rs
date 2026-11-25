@@ -3507,6 +3507,25 @@ pub(crate) enum RenameSessionFocus {
     RenameBranchCheckbox,
 }
 
+/// Where a standalone agent named in [`PromptState::NameStandaloneAgent`]
+/// runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StandaloneFolder {
+    /// A new folder dux creates for it in the standalone agents folder, named
+    /// after the agent.
+    New,
+    /// The absolute path of a folder the user picked in the browser.
+    Picked(String),
+}
+
+/// Which control has focus in the standalone name modal. The button exists
+/// only for [`StandaloneFolder::New`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NameStandaloneAgentFocus {
+    Input,
+    UseExistingFolder,
+}
+
 /// Which control has focus in the Create-Agent-From-PR modal.
 ///
 /// Opened from the palette it has two controls: the reference field, and the
@@ -4028,18 +4047,20 @@ pub(crate) enum PromptState {
     /// Name the standalone agent about to run in the folder the user just
     /// picked in the browser.
     ///
-    /// One single-line control and therefore no focus enum, like
-    /// [`PromptState::AttachPullRequestInput`]: there is nowhere for focus to
-    /// move, so Enter submits and the modal needs no confirm button.
+    /// One single-line field, so Enter submits and the modal needs no confirm
+    /// button. For a new folder it also offers the way on to the folder
+    /// browser, so focus moves between the field and that button.
     ///
-    /// An empty field is the ordinary case (the agent takes the folder's own
-    /// name); a typed one is used verbatim, since no branch is created here and
-    /// the ref-name rules deliberately do not apply. Closing the prompt abandons
-    /// the creation: no agent, and nothing written into the user's folder.
+    /// For a folder the user picked an empty field is the ordinary case (the
+    /// agent takes the folder's own name); for a new folder the name is
+    /// required, because it names the folder, and the field opens with a
+    /// generated one. Closing the prompt abandons the creation: no agent, and
+    /// nothing written anywhere.
     NameStandaloneAgent {
-        /// Absolute path of the folder the browser committed to.
-        folder: String,
+        /// Where the agent runs.
+        folder: StandaloneFolder,
         input: TextInput,
+        focus: NameStandaloneAgentFocus,
     },
     /// Clone a repository as a new project and start an agent on it: the remote's
     /// address, where the clone goes, and the first agent's name. Three
@@ -5061,9 +5082,11 @@ pub(crate) enum OverlayMouseLayout {
     AttachPullRequestInput {
         input: Rect,
     },
-    /// The standalone-agent name modal's single text field (its only control).
+    /// The standalone-agent name modal's text field, and its button on to the
+    /// folder browser when it is naming a new folder.
     NameStandaloneAgent {
         input: Rect,
+        use_existing: Option<Rect>,
     },
     /// The clone form's three single-line fields and its random-name checkbox.
     CloneProject {
@@ -7536,7 +7559,7 @@ impl App {
                 Ok(())
             }
             "new-standalone-agent" => {
-                self.open_standalone_agent_browser();
+                self.open_new_standalone_agent();
                 Ok(())
             }
             "new-standalone-terminal" => {

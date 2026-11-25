@@ -111,7 +111,7 @@ fn chooser(app: &App) -> &StandaloneProjectChooser {
 /// Open the picker, let core's rows land, then put the explorer in a folder
 /// with one child so a click on its first row has something to open.
 fn open_with_child(app: &mut App) -> PathBuf {
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(app);
     let dir = tempfile::tempdir().expect("tempdir").keep();
     let child = dir.join("child");
@@ -139,7 +139,7 @@ fn open_with_child(app: &mut App) -> PathBuf {
 
 /// Open the picker and replace its rows with `rows`.
 fn open_with_rows(app: &mut App, rows: Vec<ProjectShortcut>) {
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(app);
     app.set_checked_project_shortcuts(&ProjectShortcutList {
         caption: CAPTION,
@@ -192,8 +192,7 @@ fn picking_a_project_moves_the_explorer_to_its_folder() {
     let mut app = test_app(default_bindings());
     let project_path = PathBuf::from(&app.engine.projects[0].path);
 
-    app.execute_command("new-standalone-agent")
-        .expect("the picker opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
 
     let PromptState::BrowseProjects {
@@ -301,8 +300,7 @@ fn a_search_that_leaves_only_a_greyed_out_row_keeps_it_greyed() {
 #[test]
 fn focus_moves_between_the_chooser_and_the_explorer() {
     let mut app = test_app(default_bindings());
-    app.execute_command("new-standalone-agent")
-        .expect("the picker opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
     assert!(explorer_and_focus(&app).1);
 
@@ -329,8 +327,7 @@ fn no_projects_means_no_chooser() {
     let mut app = test_app(default_bindings());
     app.engine.sessions.clear();
     app.engine.projects.clear();
-    app.execute_command("new-standalone-agent")
-        .expect("the picker opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
 
     assert!(!chooser(&app).is_shown());
@@ -430,7 +427,7 @@ fn the_chooser_answers_the_mouse() {
 #[test]
 fn the_screen_describes_the_half_that_has_the_keys() {
     let mut app = test_app(default_bindings());
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     let opening = app.status.text();
     finish_ui_jobs(&mut app);
     assert!(explorer_and_focus(&app).1);
@@ -465,7 +462,7 @@ fn the_screen_describes_the_half_that_has_the_keys() {
 #[test]
 fn the_chooser_has_the_keys_before_any_folder_is_checked() {
     let mut app = test_app(default_bindings());
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     let (start_dir, focused) = explorer_and_focus(&app);
     assert!(
         focused,
@@ -518,7 +515,7 @@ fn the_chooser_has_the_keys_before_any_folder_is_checked() {
 #[test]
 fn a_folder_browser_key_pressed_in_the_chooser_says_where_the_keys_are() {
     let mut app = test_app(default_bindings());
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
     let before = app.status.text();
 
@@ -709,7 +706,7 @@ fn the_wheel_scrolls_both_project_choosers() {
 fn a_shortcut_worker_that_fails_says_so_and_only_to_its_own_picker() {
     let mut app = test_app(default_bindings());
     super::ui_jobs::fail_next_quiet_spawn();
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
 
     assert!(chooser(&app).is_shown(), "the projects stay listed");
@@ -726,7 +723,7 @@ fn a_shortcut_worker_that_fails_says_so_and_only_to_its_own_picker() {
 
     // The same failure arriving for a picker the user has closed.
     let mut app = test_app(default_bindings());
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
     let instance = app.browser_add.instance;
     press(&mut app, KeyCode::Esc);
@@ -911,7 +908,7 @@ fn the_picker_stays_off_the_footer_on_a_short_screen() {
 #[test]
 fn the_count_waits_for_the_folders_to_be_checked() {
     let mut app = test_app(default_bindings());
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     let pending = screen(&mut app);
     assert!(
         pending.contains("Pick a project to browse to its folder."),
@@ -925,7 +922,7 @@ fn the_count_waits_for_the_folders_to_be_checked() {
 
     let mut app = test_app(default_bindings());
     super::ui_jobs::fail_next_quiet_spawn();
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
     assert!(!screen(&mut app).contains("available"));
 }
@@ -935,7 +932,7 @@ fn the_count_waits_for_the_folders_to_be_checked() {
 #[test]
 fn the_explorer_footer_names_what_the_key_does_in_each_browser() {
     let mut app = test_app(default_bindings());
-    app.execute_command("new-standalone-agent").expect("opens");
+    app.open_standalone_agent_browser();
     finish_ui_jobs(&mut app);
     press(&mut app, KeyCode::Tab);
     let painted = screen(&mut app);
@@ -978,5 +975,80 @@ fn a_reason_takes_room_only_when_a_greyed_out_row_is_shown() {
     assert!(
         painted.contains("~/work/clients/acme/services/free"),
         "the folder is cut though nothing else needs the room:\n{painted}"
+    );
+}
+
+/// The name step the palette command opens: a generated name, the folder it
+/// gives under the field, and a button on to the folder browser.
+#[test]
+fn new_standalone_agent_asks_for_a_name_and_names_the_folder_dux_creates() {
+    let mut app = test_app(default_bindings());
+    app.execute_command("new-standalone-agent").expect("opens");
+    let PromptState::NameStandaloneAgent {
+        folder,
+        input,
+        focus,
+    } = &app.prompt
+    else {
+        panic!("expected the name step, got {:?}", app.prompt);
+    };
+    assert_eq!(*folder, super::StandaloneFolder::New);
+    assert_eq!(*focus, super::NameStandaloneAgentFocus::Input);
+    assert!(
+        dux_core::git::is_valid_agent_name(&input.text),
+        "a generated name: {:?}",
+        input.text
+    );
+    if let PromptState::NameStandaloneAgent { input, .. } = &mut app.prompt {
+        input.set_text("talk-to-me".to_string());
+    }
+    let text = screen(&mut app);
+    assert!(text.contains("New standalone agent"), "{text}");
+    assert!(text.contains("agents/talk-to-me"), "{text}");
+    assert!(text.contains("creates the folder."), "{text}");
+    assert!(text.contains("Use an existing folder or project"), "{text}");
+    let planned = app
+        .planned_standalone_agent_create()
+        .expect("the prompt is open")
+        .expect("a valid name is planned");
+    assert!(matches!(
+        planned.0,
+        dux_core::worker::CreateAgentRequest::StandaloneInNewFolder { ref title, .. }
+            if title == "talk-to-me"
+    ));
+}
+
+/// An empty name keeps the step open and says why: the folder is named after
+/// the agent.
+#[test]
+fn new_standalone_agent_refuses_an_empty_name_and_stays_open() {
+    let mut app = test_app(default_bindings());
+    app.execute_command("new-standalone-agent").expect("opens");
+    if let PromptState::NameStandaloneAgent { input, .. } = &mut app.prompt {
+        input.set_text(String::new());
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        app.prompt,
+        PromptState::NameStandaloneAgent { .. }
+    ));
+    assert!(app.status.text().contains("Give the agent a name first"));
+}
+
+/// Moving focus to the button and pressing it opens today's folder browser.
+#[test]
+fn new_standalone_agent_leads_on_to_the_folder_browser() {
+    let mut app = test_app(default_bindings());
+    app.execute_command("new-standalone-agent").expect("opens");
+    press(&mut app, KeyCode::Tab);
+    let PromptState::NameStandaloneAgent { focus, .. } = &app.prompt else {
+        panic!("expected the name step, got {:?}", app.prompt);
+    };
+    assert_eq!(*focus, super::NameStandaloneAgentFocus::UseExistingFolder);
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(app.prompt, PromptState::BrowseProjects { .. }),
+        "expected the folder browser, got {:?}",
+        app.prompt
     );
 }

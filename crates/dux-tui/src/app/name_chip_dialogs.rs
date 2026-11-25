@@ -1442,8 +1442,9 @@ fn the_standalone_name_dialog_chips_the_default_name_and_the_folder() {
     let buf = open(
         &mut app,
         PromptState::NameStandaloneAgent {
-            folder: "/srv/notes-ns".to_string(),
+            folder: crate::app::StandaloneFolder::Picked("/srv/notes-ns".to_string()),
             input: TextInput::new(),
+            focus: crate::app::NameStandaloneAgentFocus::Input,
         },
     );
     assert_chipped_on_row(&app, &buf, "defaults to", "notes-ns");
