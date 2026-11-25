@@ -920,8 +920,9 @@ Every way in asks first for one thing, the agent's name:
 
 ### Starting with only a name
 
-The name box opens with a generated two-word name, the same kind
-[Naming an agent](#naming-an-agent) describes; keep it or type your own. Under it dux says
+The name box opens empty, or with a generated two-word name when
+`enable_randomized_pet_name_by_default` is on, as [Naming an agent](#naming-an-agent)
+describes; keep it or type your own. Under it dux says
 where the agent will run, following what you type: a new folder named after the agent in
 your standalone agents folder, `agents` inside dux's own folder (beside `worktrees`)
 unless you set `standalone_agents_directory` under `[defaults]` in `config.toml`. Confirm,
@@ -930,7 +931,12 @@ and dux creates that folder and starts the agent in it.
 - The name follows the same rules as any agent's name, and it is required, because it
   names the folder. A `/` in it becomes a `-` in the folder's name.
 - A name whose folder is already there is refused: "A folder with that name is already
-  there. Pick another name." Nothing is created and what is there is left alone.
+  there. Pick another name." Nothing is created and what is there is left alone. The one
+  exception is a folder dux created for a start that was interrupted before the agent
+  existed: while it holds nothing but its `.dux-agent-folder` file and nothing is using
+  it, dux uses it again.
+- A name whose folder another agent already runs in is refused with that agent's name,
+  even when the folder itself is gone.
 - The folder is a plain folder: dux does not make it a git repository.
 - Renaming the agent later never moves or renames its folder.
 
@@ -1032,9 +1038,13 @@ deleting the agent may do with the folder.
 > is still working in it, or if dux cannot tell, it is kept and dux says why. If dux quits
 > before the agent has stopped, it finishes the deletion the next time it starts.
 >
-> dux never deletes inside another filesystem mounted in the folder. A read-only folder of
-> yours inside it is made writable so it can be deleted. If the deletion stops part way,
-> dux says where it stopped and how many files are left, and does not try again.
+> dux never deletes inside another filesystem mounted in the folder. On macOS, and on
+> Linux older than 5.8, dux cannot tell a second mount of the same disk (a bind mount)
+> inside the folder from the folder itself, and deletes what it shows: unmount it before
+> you delete the agent. A read-only folder of yours inside it is made writable so it can
+> be deleted, and gets its old permissions back if the deletion stops before deleting it.
+> If the deletion stops part way, dux says where it stopped and how many files are left,
+> and does not try again.
 
 dux tells the folder it created from any other by the hidden `.dux-agent-folder` file it
 writes into it, which holds a random mark dux also keeps in its records. You can see the
