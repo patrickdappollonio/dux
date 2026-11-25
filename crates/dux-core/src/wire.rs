@@ -6185,6 +6185,29 @@ mod tests {
         assert_eq!(refusal(&mut engine, "brave-otter"), None);
     }
 
+    /// An agent recorded at the folder a new one would get keeps that name,
+    /// even while the folder itself is missing.
+    #[test]
+    fn a_new_folder_an_agent_is_recorded_at_is_refused_though_the_folder_is_missing() {
+        let (mut engine, _tmp) = test_engine();
+        let root = engine.standalone_agents_root();
+        let folder = root.join("otter");
+        engine.sessions.push(sample_standalone_session(
+            "otter-agent",
+            &folder.to_string_lossy(),
+        ));
+        let refused = engine
+            .apply_wire(WireCommand::CreateStandaloneAgentInNewFolder {
+                name: "otter".to_string(),
+                provider: None,
+            })
+            .expect_err("the name is taken")
+            .to_string();
+        assert!(refused.contains("Pick another name."), "{refused}");
+        assert!(refused.contains("otter-agent"), "{refused}");
+        assert!(!folder.exists(), "nothing is created");
+    }
+
     /// The folder is accepted whatever it contains: a plain directory with no
     /// repository anywhere near it is the ordinary case, and the add-project
     /// validator (which rejects exactly that) must not be in the way.

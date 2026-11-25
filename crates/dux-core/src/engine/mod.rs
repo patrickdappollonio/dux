@@ -6474,6 +6474,26 @@ impl Engine {
         let provider = self.standalone_provider(provider)?;
         let root = self.standalone_agents_root();
         let folder = crate::agent_folders::folder_path_for(&root, name);
+        // The same one-agent-per-folder refusal as a chosen folder, which the
+        // folder's absence does not answer: an agent can be recorded at a
+        // folder that is missing.
+        let resolved = crate::agent_folders::folder_path_for(
+            &crate::project_browser::canonical_or_original(&root),
+            name,
+        );
+        if let Some(existing) = crate::standalone_shortcuts::directory_occupant(
+            &resolved,
+            self.sessions.iter().map(AgentSession::directory),
+        )
+        .and_then(|index| self.sessions.get(index))
+        {
+            anyhow::bail!(
+                "The standalone agent was not created at \"{}\". Agent \"{}\" already has that \
+                 folder. Pick another name.",
+                crate::home_path::shorten_home(&folder),
+                existing.display_label()
+            );
+        }
         let busy_message = crate::status_text![
             "Creating the folder ",
             q(crate::home_path::shorten_home(&folder)),
