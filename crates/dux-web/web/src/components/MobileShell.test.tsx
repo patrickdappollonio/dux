@@ -2005,13 +2005,13 @@ describe("MobileShell one part of an agent at a time", () => {
   it("draws only the shown part's strip, and both only with two of either", () => {
     mockState = partsState({ kind: "agent", sessionId: "s1", tabId: "s1" }, { terminals: ["t1", "t2"] })
     const view = render(<MobileShell />)
-    expect(screen.getByLabelText("New tab")).toBeTruthy()
+    expect(screen.getByLabelText("New agent tab")).toBeTruthy()
     expect(screen.queryByTestId("dock-strip")).toBeNull()
     view.unmount()
     mockState = partsState(dock, { terminals: ["t1", "t2"] })
     render(<MobileShell />)
     expect(screen.getByTestId("dock-strip")).toBeTruthy()
-    expect(screen.queryByLabelText("New tab")).toBeNull()
+    expect(screen.queryByLabelText("New agent tab")).toBeNull()
     // A phone has no layout to change.
     expect(screen.queryByLabelText("Maximize terminal")).toBeNull()
   })
@@ -2021,7 +2021,7 @@ describe("MobileShell one part of an agent at a time", () => {
     mockState = partsState(dock, { tabs: 2 })
     render(<MobileShell />)
     expect(screen.queryByTestId("dock-strip")).toBeNull()
-    expect(screen.getByLabelText("New tab")).toBeTruthy()
+    expect(screen.getByLabelText("New agent tab")).toBeTruthy()
   })
 
   it("draws no dock strip over the take-over card a watcher gets", () => {
@@ -2036,7 +2036,7 @@ describe("MobileShell one part of an agent at a time", () => {
     mockState = partsState(dock)
     render(<MobileShell />)
     expect(screen.queryByTestId("dock-strip")).toBeNull()
-    expect(screen.queryByLabelText("New tab")).toBeNull()
+    expect(screen.queryByLabelText("New agent tab")).toBeNull()
     expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
     // Nor the computer header's New tab…: the flap's menu is the phone's way.
     expect(screen.queryByRole("button", { name: "New tab…" })).toBeNull()

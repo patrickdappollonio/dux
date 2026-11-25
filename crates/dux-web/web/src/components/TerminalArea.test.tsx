@@ -832,7 +832,7 @@ describe("TerminalArea dock", () => {
     expect([onScreen("agent"), onScreen("dock")]).toEqual([agent, dock])
     // A part folded away keeps its strip: the provider strip's + and the
     // dock's are both there whichever part has the height.
-    expect(screen.getByLabelText("New tab")).toBeTruthy()
+    expect(screen.getByLabelText("New agent tab")).toBeTruthy()
     expect(screen.getByTestId("dock-strip")).toBeTruthy()
     expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
     // Both parts stay mounted in every layout.
@@ -849,7 +849,7 @@ describe("TerminalArea dock", () => {
       mockState = dockState({ layout })
       render(<TerminalArea />)
       await screen.findByTestId("stack-agent-box")
-      expect(screen.queryByLabelText("New tab")).toBeNull()
+      expect(screen.queryByLabelText("New agent tab")).toBeNull()
       expect(screen.queryByTestId("dock-strip")).toBeNull()
       expect(screen.getByRole("separator")).toBeTruthy()
       expect(pillLabels()).toEqual(labels)
@@ -881,7 +881,7 @@ describe("TerminalArea dock", () => {
     for (const opts of [{ terminals: 2 }, { tabs: 2 }]) {
       mockState = dockState({ layout: "split", ...opts })
       render(<TerminalArea />)
-      expect(await screen.findByLabelText("New tab")).toBeTruthy()
+      expect(await screen.findByLabelText("New agent tab")).toBeTruthy()
       expect(screen.getByLabelText("New terminal tab")).toBeTruthy()
       expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
       cleanup()
@@ -1193,7 +1193,7 @@ describe("TerminalArea dock", () => {
       const { unmount } = render(<TerminalArea />)
       await screen.findByTestId("stack-agent-box")
       watch("s1")
-      expect(screen.queryByLabelText("New tab")).toBeNull()
+      expect(screen.queryByLabelText("New agent tab")).toBeNull()
       unmount()
       resetPaneCovers()
 
@@ -1201,7 +1201,7 @@ describe("TerminalArea dock", () => {
       render(<TerminalArea />)
       await screen.findByTestId("stack-agent-box")
       watch("s1")
-      expect(outOfReach(screen.getByLabelText("New tab"))).toBe(false)
+      expect(outOfReach(screen.getByLabelText("New agent tab"))).toBe(false)
       expect(outOfReach(screen.getByTestId("stack-agent-box"))).toBe(true)
       expect(outOfReach(screen.getByTestId("stack-dock-box"))).toBe(true)
     })

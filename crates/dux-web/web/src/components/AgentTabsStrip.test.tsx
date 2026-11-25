@@ -123,12 +123,12 @@ describe("AgentTabsStrip", () => {
 
   it("disables the New tab button at the per-agent cap", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={2} />)
-    expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", true)
+    expect(screen.getByLabelText("New agent tab")).toHaveProperty("disabled", true)
   })
 
   it("also disables the provider-picker caret at the per-agent cap", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={2} />)
-    expect(screen.getByLabelText("Choose provider for new tab")).toHaveProperty(
+    expect(screen.getByLabelText("Choose provider for the new agent tab")).toHaveProperty(
       "disabled",
       true,
     )
@@ -136,13 +136,13 @@ describe("AgentTabsStrip", () => {
 
   it("clicking the main + quick-adds the project default provider (no provider arg)", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    fireEvent.click(screen.getByLabelText("New tab"))
+    fireEvent.click(screen.getByLabelText("New agent tab"))
     expect(addTabMock).toHaveBeenCalledWith("s1")
   })
 
   it("the caret opens a menu listing configured providers with the default marked", async () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    fireEvent.click(screen.getByLabelText("Choose provider for new tab"))
+    fireEvent.click(screen.getByLabelText("Choose provider for the new agent tab"))
     const menu = within(await screen.findByRole("menu"))
     expect(menu.getByText("claude")).toBeTruthy()
     expect(menu.getByText("codex")).toBeTruthy()
@@ -153,7 +153,7 @@ describe("AgentTabsStrip", () => {
 
   it("picking a provider from the caret menu adds a tab targeting it", async () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    fireEvent.click(screen.getByLabelText("Choose provider for new tab"))
+    fireEvent.click(screen.getByLabelText("Choose provider for the new agent tab"))
     const menu = within(await screen.findByRole("menu"))
     fireEvent.click(menu.getByText("opencode"))
     expect(addTabMock).toHaveBeenCalledWith("s1", "opencode")
@@ -252,8 +252,8 @@ describe("AgentTabsStrip on a row another device drives", () => {
   it("disables adding, and every change in a pill's ⋯, and still selects a tab", async () => {
     watch("other")
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", true)
-    expect(screen.getByLabelText("Choose provider for new tab")).toHaveProperty("disabled", true)
+    expect(screen.getByLabelText("New agent tab")).toHaveProperty("disabled", true)
+    expect(screen.getByLabelText("Choose provider for the new agent tab")).toHaveProperty("disabled", true)
     fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
     const menu = within(await screen.findByRole("menu"))
     expect(menu.getByText(/active on another device/i)).toBeTruthy()
@@ -270,7 +270,7 @@ describe("AgentTabsStrip on a row another device drives", () => {
   it("gates all of it while nobody drives the row, and says so truthfully", async () => {
     watch("nobody")
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", true)
+    expect(screen.getByLabelText("New agent tab")).toHaveProperty("disabled", true)
     expect(sortableProps?.disabled).toBe(true)
     fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
     const menu = within(await screen.findByRole("menu"))
@@ -292,7 +292,7 @@ describe("AgentTabsStrip on a row another device drives", () => {
   it("says why the + is disabled while the page is reconnecting, on focus", async () => {
     registerPaneCover("s1", "spinner", { row: agentRowKey("s1"), driver: "reconnecting" })
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    const holder = screen.getByLabelText("New tab").parentElement as HTMLElement
+    const holder = screen.getByLabelText("New agent tab").parentElement as HTMLElement
     act(() => holder.focus())
     expect((await screen.findAllByText("Reconnecting to this agent")).length).toBeGreaterThan(0)
   })
@@ -306,8 +306,8 @@ describe("AgentTabsStrip on a row another device drives", () => {
     const { rerender } = render(
       <AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />,
     )
-    const plus = screen.getByLabelText("New tab")
-    const chooser = screen.getByLabelText("Choose provider for new tab")
+    const plus = screen.getByLabelText("New agent tab")
+    const chooser = screen.getByLabelText("Choose provider for the new agent tab")
     blurWhenDisabled(plus)
     act(() => plus.focus())
     for (const [inFlight, focused] of [
@@ -316,8 +316,8 @@ describe("AgentTabsStrip on a row another device drives", () => {
     ] as const) {
       mockState = { ...mockState, createTabInFlight: [...inFlight] }
       rerender(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-      expect(screen.getByLabelText("New tab")).toBe(plus)
-      expect(screen.getByLabelText("Choose provider for new tab")).toBe(chooser)
+      expect(screen.getByLabelText("New agent tab")).toBe(plus)
+      expect(screen.getByLabelText("Choose provider for the new agent tab")).toBe(chooser)
       expect(document.activeElement).toBe(focused)
     }
   })
@@ -329,9 +329,9 @@ describe("AgentTabsStrip on a row another device drives", () => {
     const { rerender } = render(
       <AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />,
     )
-    fireEvent.click(screen.getByLabelText("New tab").parentElement!)
+    fireEvent.click(screen.getByLabelText("New agent tab").parentElement!)
     expect((await screen.findAllByText("Adding…")).length).toBeGreaterThan(0)
-    for (const [inFlight, text] of [[[], "New codex tab"], [["s1"], "Adding…"]] as const) {
+    for (const [inFlight, text] of [[[], "New codex agent tab"], [["s1"], "Adding…"]] as const) {
       mockState = { ...mockState, createTabInFlight: [...inFlight] }
       rerender(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
       await act(async () => {
@@ -452,8 +452,8 @@ describe("AgentTabsStrip phone height", () => {
     }
   })
 
-  // A browser check at 390px: Tab onto a pill, "New tab" and "Choose provider
-  // for new tab"; each ring is whole at the top and bottom, and the strip is
+  // A browser check at 390px: Tab onto a pill, "New agent tab" and "Choose provider
+  // for the new agent tab"; each ring is whole at the top and bottom, and the strip is
   // 2px taller than the 41px it was.
   it("pads the strip 3px a side, the ring's reach, so the scroller never cuts it", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
@@ -468,8 +468,8 @@ describe("AgentTabsStrip phone height", () => {
     // the wrong provider.
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
     const controls = [
-      screen.getByLabelText("New tab"),
-      screen.getByLabelText("Choose provider for new tab"),
+      screen.getByLabelText("New agent tab"),
+      screen.getByLabelText("Choose provider for the new agent tab"),
       ...screen.getAllByLabelText("Tab actions"),
     ]
     for (const control of controls) {
@@ -518,8 +518,8 @@ describe("AgentTabsStrip on a touch tablet", () => {
         .getAllByLabelText("Tab actions")
         .map((b): [HTMLElement, string] => [b, "after:-inset-2.5"]),
       // 24px boxes, 8px a side.
-      [screen.getByLabelText("New tab"), "after:-inset-2"],
-      [screen.getByLabelText("Choose provider for new tab"), "after:-inset-2"],
+      [screen.getByLabelText("New agent tab"), "after:-inset-2"],
+      [screen.getByLabelText("Choose provider for the new agent tab"), "after:-inset-2"],
     ]
     for (const [control, inset] of margins) {
       const classes = Array.from(control.classList)
@@ -551,7 +551,7 @@ describe("AgentTabsStrip on a touch tablet", () => {
   // what holds it must carry the 40px area that a tap reads the reason from.
   it("gives a disabled + and chooser the same 40px tap area on what holds them", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={2} />)
-    for (const label of ["New tab", "Choose provider for new tab"]) {
+    for (const label of ["New agent tab", "Choose provider for the new agent tab"]) {
       const holder = screen.getByLabelText(label).parentElement!
       expect(Array.from(holder.classList)).toEqual(
         expect.arrayContaining([
@@ -567,7 +567,7 @@ describe("AgentTabsStrip on a touch tablet", () => {
 
   it("keeps the + and chooser tap areas apart and the chooser's clear of the pane divider", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    const group = screen.getByLabelText("New tab").closest("div")!
+    const group = screen.getByLabelText("New agent tab").closest("div")!
     expect(group.className).toContain("md:pointer-coarse:gap-4")
     // And the + clear of the last pill's ⋯.
     expect(group.className).toContain("md:pointer-coarse:ml-0.5")
@@ -618,7 +618,7 @@ describe("the agent and dock strips", () => {
         screen.getAllByLabelText("Tab actions")[0].parentElement!,
         screen.getByLabelText("Terminal actions").parentElement!,
       ],
-      [screen.getByLabelText("New tab"), screen.getByLabelText("New terminal tab")],
+      [screen.getByLabelText("New agent tab"), screen.getByLabelText("New terminal tab")],
     ]
     for (const [a, d] of pairs) {
       expect(Array.from(d.classList).sort()).toEqual(Array.from(a.classList).sort())

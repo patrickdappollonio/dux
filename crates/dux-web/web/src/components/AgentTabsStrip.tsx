@@ -112,7 +112,7 @@ export function AgentTabsStrip({
         ? tabLimitHint(cap)
         : creating
           ? ADDING_TAB_HINT
-          : `New ${defaultProvider} tab`
+          : `New ${defaultProvider} agent tab`
 
   return (
     <TabStrip
@@ -180,7 +180,7 @@ function AddTabControls({
           disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
         >
           <TabStripButton
-            aria-label="New tab"
+            aria-label="New agent tab"
             disabled={disabled}
             onClick={() => addTab(sessionId)}
           >
@@ -195,7 +195,7 @@ function AddTabControls({
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
-                <TabStripButton aria-label="Choose provider for new tab" disabled={disabled} />
+                <TabStripButton aria-label="Choose provider for the new agent tab" disabled={disabled} />
               }
             >
               <ChevronDown className="size-3.5" />
