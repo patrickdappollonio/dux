@@ -3048,6 +3048,12 @@ port = 3890
             parse_value(&start, "~/code").unwrap().as_str(),
             Some("~/code")
         );
+
+        let agents = lookup("defaults.standalone_agents_directory").unwrap();
+        assert_eq!(
+            parse_value(&agents, "~/agents").unwrap().as_str(),
+            Some("~/agents")
+        );
     }
 
     #[test]
