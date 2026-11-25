@@ -2124,11 +2124,12 @@ pub(crate) fn first_config(paths: &DuxPaths) -> Config {
     config
 }
 
-fn render_first_config(paths: &DuxPaths) -> String {
+pub(crate) fn render_first_config(paths: &DuxPaths) -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
     render_config(&first_config(paths), &bindings)
 }
 
+#[cfg(test)]
 pub(crate) fn render_default_config() -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
     render_config(&Config::default(), &bindings)

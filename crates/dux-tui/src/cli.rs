@@ -771,7 +771,7 @@ fn run_regenerate(
     held_back: dux_core::config_keys::HeldBack,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    let fresh = config::render_default_config();
+    let fresh = config::render_first_config(paths);
 
     if rewrite == ConfigRewrite::Preview {
         refuse_dangling_config_link(paths)?;
@@ -2028,6 +2028,29 @@ mod tests {
                 assert!(!said.contains("standalone_agents_directory"), "{said}");
             }
         }
+    }
+
+    #[test]
+    fn config_regenerate_and_restore_docs_have_nothing_to_do_on_a_fresh_install() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+            worktrees_root: tmp.path().join("worktrees"),
+        };
+        crate::config::ensure_config(&paths).expect("first start");
+        let held_back = dux_core::config_keys::HeldBack::Masked;
+        let mut out = Vec::new();
+        run_regenerate(&paths, ConfigRewrite::Preview, held_back, &mut out).expect("regenerate");
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("nothing to do"), "{said}");
+        let mut out = Vec::new();
+        run_restore_docs(&paths, ConfigRewrite::Preview, held_back, &mut out).expect("restore");
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("nothing to do"), "{said}");
     }
 
     /// A config.toml that is a link to a file that is gone is not "no config
