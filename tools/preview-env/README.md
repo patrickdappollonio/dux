@@ -220,7 +220,7 @@ neighbours.
 
 `tui-journey.example.js` shows the journey contract. For a special capture,
 copy it to a throwaway `*.tmp.js` file and use the supplied `createAgent`,
-`createStandaloneAgent`, `palette`, `seedLooseWorktree`, `sendKeys`, `sendText`,
+`createStandaloneAgent`, `openStandaloneFolderPicker`, `palette`, `seedLooseWorktree`, `sendKeys`, `sendText`,
 `setFixture`, `captureText`, `sleep`, and `waitFor` helpers, plus the optional
 `config` export for a setting no dialog can reach and the optional `expectText`
 export, which refuses the capture unless those strings are on the screen it

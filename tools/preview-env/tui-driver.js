@@ -322,13 +322,25 @@ async function browseTo(absolutePath) {
   sendKeys("Enter")
 }
 
+/// Open the folder picker for a standalone agent: the key asks for a name for a
+/// folder dux creates, and the button under the name leads on to the picker.
+async function openStandaloneFolderPicker() {
+  await waitFor("New standalone agent")
+  // The focus key moves from the name to the button, which the confirm key
+  // presses.
+  sendKeys("Tab")
+  await waitFor("choose a folder")
+  sendKeys("Enter")
+  await waitFor("Standalone Agent In")
+}
+
 /// Create a standalone agent in a plain folder. An empty name means the folder's
 /// own name, which is what the screenshots show.
 async function createStandaloneAgent(absolutePath, label) {
   fs.mkdirSync(absolutePath, { recursive: true })
   await focusSidebar()
   sendKeys("s")
-  await waitFor("Standalone Agent In")
+  await openStandaloneFolderPicker()
   // With projects in the workspace (the driver always adds some) the picker
   // opens with its project list holding the keys, so the folder browser is
   // one focus key away: its footer names its own keys once it has them.
@@ -441,6 +453,7 @@ async function main() {
     createAgent,
     createStandaloneAgent,
     duxHome,
+    openStandaloneFolderPicker,
     focusPane,
     focusSidebar,
     palette,

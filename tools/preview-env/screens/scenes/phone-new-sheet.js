@@ -27,7 +27,7 @@ module.exports = {
     // The sheet with the Agents group the caption names and its sentences.
     await expectVisible(page, '[role="menu"]', "the launcher menu's sheet")
     await expectVisibleText(page, "New standalone agent…", { selector: '[role="menu"] span' })
-    await expectVisibleText(page, "Run an agent in any folder, no project or git needed.", {
+    await expectVisibleText(page, "Pick a name. dux creates a folder for it.", {
       selector: '[role="menu"] span',
     })
     return { x: 0, y: 0, width: 390, height: 844 }
