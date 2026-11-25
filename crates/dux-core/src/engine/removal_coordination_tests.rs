@@ -1,5 +1,4 @@
-//! Adversarial review tests for removal coordination. Each test asserts the
-//! behaviour the branch promises; a failure is a reproduced defect.
+//! Removal coordination: what the manager, the delete paths and new starts refuse while a worktree is being removed.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

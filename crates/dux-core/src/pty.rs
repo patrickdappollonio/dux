@@ -6660,7 +6660,7 @@ mod tests {
     /// leader-exit hook only runs after the reap, the order the drop's own
     /// comment ("Recorded before the reap") promises never happens.
     #[test]
-    fn review25_a_dropped_clients_hook_runs_before_its_leader_is_reaped() {
+    fn a_dropped_clients_hook_runs_before_its_leader_is_reaped() {
         let dir = tempfile::tempdir().expect("tempdir");
         let args = vec!["-c".to_string(), "exec sleep 300".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
@@ -6873,7 +6873,7 @@ mod tests {
     /// leader gone (so the session number proves nothing) and nothing
     /// recorded yet, and misses a job the shell left working in the folder.
     #[test]
-    fn review26_a_look_right_after_the_reap_misses_the_job_the_leader_left() {
+    fn a_look_right_after_the_reap_misses_the_job_the_leader_left() {
         let mut misses = 0;
         let attempts = 10;
         for _ in 0..attempts {

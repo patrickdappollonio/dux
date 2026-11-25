@@ -89,7 +89,7 @@ const ctx = { ghAvailable: true, githubIntegrationEnabled: true, canSignOut: fal
 describe("appMenuModel", () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it("lists the approved top-level entries in order", () => {
+  it("lists the top-level entries in order", () => {
     expect(appMenuModel(ctx).map((e) => [e.kind, e.id])).toEqual([
       // The creation submenus open the menu: creating is the most common
       // reason to reach for the cog.
@@ -255,7 +255,7 @@ describe("appMenuModel", () => {
     }
   })
 
-  it("opens the sort submenu with the three approved options in order", () => {
+  it("opens the sort submenu with the three options in order", () => {
     const sub = findSubmenu(appMenuModel(ctx), "sort-agents")
     expect(sub?.title).toBe("Sort agents by")
     expect(sub?.entries.map((e) => e.id)).toEqual([

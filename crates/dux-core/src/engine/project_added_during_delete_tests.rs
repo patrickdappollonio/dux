@@ -1,4 +1,4 @@
-//! Review 10: reproductions.
+//! A project added between the discard check and the delete is not deleted, and an agent delete does not fail on a refused editor claim.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -78,7 +78,7 @@ fn pump_until_removed(engine: &mut Engine) -> Result<(), String> {
 /// only the processes, and the occupant sentence was decided before the
 /// project existed. The project's repository is deleted whole.
 #[test]
-fn review10_a_project_added_between_the_discard_check_and_the_delete_is_not_deleted() {
+fn a_project_added_between_the_discard_check_and_the_delete_is_not_deleted() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -153,7 +153,7 @@ fn review10_a_project_added_between_the_discard_check_and_the_delete_is_not_dele
 /// claim's outcome as its own: the agent is gone and its worktree is kept,
 /// with an error, though nothing was in the worktree's way.
 #[test]
-fn review10_an_agent_delete_does_not_fail_because_a_refused_editor_claim_was_held() {
+fn an_agent_delete_does_not_fail_because_a_refused_editor_claim_was_held() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);

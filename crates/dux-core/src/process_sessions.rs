@@ -3039,7 +3039,7 @@ mod tests {
     /// `unknown`) whenever its shell stands in the folder: so the reset
     /// signals a process whose working directory it never read.
     #[test]
-    fn review26_a_process_whose_folder_cannot_be_read_is_never_counted_inside() {
+    fn a_process_whose_folder_cannot_be_read_is_never_counted_inside() {
         let folder = crate::worktree_ops::path_key(std::path::Path::new("/work/wt"));
         let shell = row(100, 1, 100);
         let job = row(101, 100, 100);
@@ -3536,7 +3536,7 @@ mod tests {
     /// counts the change as done, so `flush` answers "saved" and git runs
     /// with nothing written.
     #[test]
-    fn review9_flush_does_not_report_saved_when_the_database_was_busy() {
+    fn flush_does_not_report_saved_when_the_database_was_busy() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("sessions.sqlite3");
         drop(crate::storage::SessionStore::open(&db).unwrap());
@@ -3674,7 +3674,7 @@ mod tests {
     /// (here a project terminal), not "a process dux started".
     #[cfg(target_os = "linux")]
     #[test]
-    fn review9_a_restart_keeps_what_each_session_is_called() {
+    fn a_restart_keeps_what_each_session_is_called() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("sessions.sqlite3");

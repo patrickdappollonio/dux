@@ -1,4 +1,4 @@
-//! Review 22: reproductions.
+//! A switch or pull never removes a standalone agent's tracked folder or the folder a session works in.
 
 use std::path::Path;
 
@@ -44,7 +44,7 @@ fn fixture(tmp: &Path) -> std::path::PathBuf {
 /// every deleted path (`--diff-filter=d`), so the standalone agent's folder is
 /// removed from under it.
 #[test]
-fn review22_switch_removes_a_standalone_agents_tracked_folder() {
+fn switch_removes_a_standalone_agents_tracked_folder() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let folder = repo.join("docs");
@@ -74,7 +74,7 @@ fn review22_switch_removes_a_standalone_agents_tracked_folder() {
 /// A process dux started (a terminal's shell, recorded in the registry) works
 /// in `repo/docs`. The switch deletes the folder it is working in.
 #[test]
-fn review22_switch_removes_the_folder_a_dux_process_works_in() {
+fn switch_removes_the_folder_a_dux_process_works_in() {
     use std::os::unix::process::CommandExt;
     let (engine, tmp) = test_engine();
     let repo = fixture(tmp.path());

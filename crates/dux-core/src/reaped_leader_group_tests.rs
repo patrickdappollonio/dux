@@ -1,4 +1,4 @@
-//! Review 27: a reaped child's group is judged against members whose record
+//! A reaped child's group is judged against members whose record
 //! may still be in flight.
 use crate::process_sessions::{AgentProcessRegistry, process_start};
 use crate::pty::PtyClient;
@@ -70,7 +70,7 @@ fn run(record: RecordWait) -> (u32, bool) {
 }
 
 #[test]
-fn review27_control_with_the_record_landed_the_drop_kills_the_group() {
+fn control_with_the_record_landed_the_drop_kills_the_group() {
     let (job, survived) = run(RecordWait::WaitForIt);
     assert!(
         !survived,
@@ -79,7 +79,7 @@ fn review27_control_with_the_record_landed_the_drop_kills_the_group() {
 }
 
 #[test]
-fn review27_a_drop_right_after_the_reap_leaves_the_groups_job_running() {
+fn a_drop_right_after_the_reap_leaves_the_groups_job_running() {
     let (job, survived) = run(RecordWait::DropAtOnce);
     assert!(
         !survived,

@@ -1383,7 +1383,7 @@ mod tests {
     /// command runs: nothing ends the command, it runs to completion (here it
     /// succeeds), and the result still tells the user dux stopped it.
     #[test]
-    fn review8_a_keep_worktree_delete_does_not_claim_it_stopped_the_command() {
+    fn a_keep_worktree_delete_does_not_claim_it_stopped_the_command() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
         let registry = crate::process_sessions::AgentProcessRegistry::default();
@@ -1450,7 +1450,7 @@ mod tests {
     /// still `None`, so the delete ends nothing. The worker must not then
     /// start the deleted agent's command anyway, nor bring its log folder back.
     #[test]
-    fn review10_a_rerun_claimed_before_a_delete_never_starts_for_the_deleted_agent() {
+    fn a_rerun_claimed_before_a_delete_never_starts_for_the_deleted_agent() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
         let registry = crate::process_sessions::AgentProcessRegistry::default();
@@ -1631,7 +1631,7 @@ mod tests {
     /// it, no file names it, and it grows on disk in dux's config folder for
     /// as long as the job runs.
     #[test]
-    fn review15_a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
+    fn a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
         let pidfile = tmp.path().join("job.pid");
@@ -1689,7 +1689,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod review16_tests {
+mod left_running_job_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -1799,7 +1799,7 @@ mod review16_tests {
     /// it stands in for a dux that runs a startup command and then quits.
     #[test]
     #[ignore = "a helper the parent test runs in a process of its own"]
-    fn review16_helper_run_startup_command_then_quit() {
+    fn helper_run_startup_command_then_quit() {
         let Ok(dir) = std::env::var("DUX_REVIEW16_DIR") else {
             return;
         };
@@ -1833,12 +1833,12 @@ mod review16_tests {
     /// thread, so when dux quits the job's next write gets SIGPIPE and the
     /// job (a dev server, say) is killed.
     #[test]
-    fn review16_a_left_running_job_survives_dux_quitting() {
+    fn a_left_running_job_survives_dux_quitting() {
         let tmp = tempfile::tempdir().unwrap();
         let exe = std::env::current_exe().unwrap();
         let status = std::process::Command::new(exe)
             .args([
-                "startup::review16_tests::review16_helper_run_startup_command_then_quit",
+                "startup::left_running_job_tests::helper_run_startup_command_then_quit",
                 "--exact",
                 "--ignored",
                 "--test-threads=1",

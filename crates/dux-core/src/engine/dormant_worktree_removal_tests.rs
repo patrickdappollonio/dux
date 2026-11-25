@@ -1,4 +1,4 @@
-//! Adversarial review (second pass) of the worktree-removal coordination.
+//! Worktree removal never removes a folder a dormant agent's worktree lives in, and never ends an unrelated program that reused a session number.
 
 use std::path::{Path, PathBuf};
 

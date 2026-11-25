@@ -2,9 +2,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
-// Review 28 (cancel during commit). Built on review 26: "a commit's final clears the message box only if the box still
-// holds the committed text". The web's commit dialog clears and closes on the
-// commit's answer unconditionally, whatever the box holds by then.
+// Cancelling the dialog while a commit runs. A commit's final clears the
+// message box only if the box still holds the committed text, and the dialog
+// does not claim a message is being written once it was cancelled.
 
 let resolveCommit: (() => void) | null = null
 const commit = vi.hoisted(() =>
@@ -60,7 +60,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("review 28: cancelling while a commit runs", () => {
+describe("cancelling while a commit runs", () => {
   it("does not claim a message is being written when the dialog was just cancelled", async () => {
     act(() => openCommit("agent-a"))
     render(<CommitDialog />)

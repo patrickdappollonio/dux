@@ -1155,7 +1155,7 @@ fn a_job_left_by_a_shell_that_exited_is_ended_through_what_was_recorded_at_its_e
 /// `wait_with_output` returns), so the job is invisible: the removal neither
 /// ends it nor counts it, and deletes the worktree from under it.
 #[test]
-fn review7_a_startup_job_holding_the_commands_output_is_ended_before_removal() {
+fn a_startup_job_holding_the_commands_output_is_ended_before_removal() {
     let mut fx = fixture();
     let script = writer_script(&fx.pidfile);
     let session = fx.engine.sessions[0].clone();

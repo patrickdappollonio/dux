@@ -1,5 +1,4 @@
-//! Adversarial review (fifth pass): see the test.
-//! Derived from the second pass: an editor write holds its editor ROOT,
+//! An editor write holds its editor ROOT,
 //! never the path it writes. A terminal's editor is rooted at the folder the
 //! terminal started in, and that folder can contain an agent's worktree (a
 //! standalone terminal starts in the home folder, which holds dux's worktrees
@@ -8,6 +7,9 @@
 //! write through such an editor into a worktree whose removal has begun is
 //! neither refused nor waited for, and a folder created there after git
 //! removed the worktree brings the worktree's folder back.
+//!
+//! This file covers a delete and a move of a link that is a standalone
+//! agent's folder, through such an editor.
 
 use std::net::SocketAddr;
 
@@ -131,7 +133,7 @@ async fn serve(
 /// is gone from under it, though the one occupancy rule says the agent lives
 /// exactly there.
 #[tokio::test]
-async fn review11_the_editor_does_not_delete_the_link_that_is_a_standalone_agents_folder() {
+async fn the_editor_does_not_delete_the_link_that_is_a_standalone_agents_folder() {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let repo = tmp.path().join("repo");
     let real = tmp.path().join("real-checkout");
@@ -157,7 +159,7 @@ async fn review11_the_editor_does_not_delete_the_link_that_is_a_standalone_agent
 
 /// The same link, moved.
 #[tokio::test]
-async fn review11_the_editor_does_not_move_the_link_that_is_a_standalone_agents_folder() {
+async fn the_editor_does_not_move_the_link_that_is_a_standalone_agents_folder() {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let repo = tmp.path().join("repo");
     let real = tmp.path().join("real-checkout");

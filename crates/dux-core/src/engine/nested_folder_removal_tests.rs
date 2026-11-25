@@ -1,7 +1,4 @@
-//! Adversarial review: a folder dux is using INSIDE a worktree is a folder the
-//! worktree's removal deletes. Every check the branch added compares folders
-//! for equality, so something running in a subfolder of the worktree is never
-//! seen, and the removal deletes the folder out from under it.
+//! A folder dux is using INSIDE a worktree is a folder the worktree's removal deletes: checks that compare folders for equality would never see something running in a subfolder, so containment decides and the removal does not delete the folder out from under it.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -423,7 +420,7 @@ fn the_manager_refuses_a_first_worktree_being_created_through_a_symlinked_root()
     );
 }
 
-/// review9: a removal recorded in an EARLIER BOOT (the machine lost power in
+/// A removal recorded in an EARLIER BOOT (the machine lost power in
 /// the middle of a delete, which is exactly when a removal is resumed) is void
 /// as far as processes go: every pid has been handed out afresh. Its snapshot
 /// of process identities (pid plus boot-relative start time) carries no boot,
@@ -431,7 +428,7 @@ fn the_manager_refuses_a_first_worktree_being_created_through_a_symlinked_root()
 /// The identity below is built from a live process to stand for such a
 /// coincidence.
 #[test]
-fn review9_a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
+fn a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
     let (mut engine, tmp) = test_engine();
     engine.config.shutdown_timeout_seconds = 1;
     let repo = repo(tmp.path());
@@ -496,13 +493,13 @@ fn review9_a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
     );
 }
 
-/// review9: reaping PTYs runs on the engine thread (the terminal UI's own
+/// Reaping PTYs runs on the engine thread (the terminal UI's own
 /// loop). Dropping a reaped client whose terminal a disowned background job
 /// still holds open waits up to 250 ms for its reader thread, once per PTY, so
 /// an agent delete (or terminal closes) over several such PTYs freezes the
 /// engine thread for a quarter second per PTY.
 #[test]
-fn review9_reaping_ptys_held_open_by_jobs_does_not_stall_the_engine_thread() {
+fn reaping_ptys_held_open_by_jobs_does_not_stall_the_engine_thread() {
     const N: usize = 8;
     let (mut engine, tmp) = test_engine();
     let pidfile = tmp.path().join("jobs.pid");

@@ -1,4 +1,4 @@
-//! Review 23: reproductions.
+//! A switch never deletes or replaces a standalone agent's folder that is a tracked link, and a removal retries git without looking again.
 
 use std::path::Path;
 
@@ -94,7 +94,7 @@ fn standalone_at_link_survives_switch(link: LinkOnFeat) {
 /// the agent's folder: the move check only asks about deleted paths through
 /// the folders they leave empty, and a link at the top level has none.
 #[test]
-fn review23_switch_deletes_a_standalone_agents_folder_that_is_a_tracked_link() {
+fn switch_deletes_a_standalone_agents_folder_that_is_a_tracked_link() {
     standalone_at_link_survives_switch(LinkOnFeat::Deleted);
 }
 
@@ -102,7 +102,7 @@ fn review23_switch_deletes_a_standalone_agents_folder_that_is_a_tracked_link() {
 /// and writes a file there, because the check leaves every path HEAD tracks
 /// to git.
 #[test]
-fn review23_switch_replaces_a_standalone_agents_folder_that_is_a_tracked_link() {
+fn switch_replaces_a_standalone_agents_folder_that_is_a_tracked_link() {
     standalone_at_link_survives_switch(LinkOnFeat::ReplacedByFile);
 }
 
@@ -114,7 +114,7 @@ fn review23_switch_replaces_a_standalone_agents_folder_that_is_a_tracked_link() 
 /// folder removed from under it. The first failure is made with a lock that
 /// is lifted during the pause, standing in for any transient refusal.
 #[test]
-fn review23_removal_retries_git_after_the_last_look_without_looking_again() {
+fn removal_retries_git_after_the_last_look_without_looking_again() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();

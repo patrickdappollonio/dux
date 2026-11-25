@@ -1,4 +1,4 @@
-//! Review 15: reproductions.
+//! Restoring a file keeps the file, or the standalone agent's folder, that now holds its path.
 
 use std::path::{Path, PathBuf};
 
@@ -51,7 +51,7 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
 /// dir/a.txt`, which unlinks the untracked file `dir` to make room for the
 /// folder: a file the user never confirmed deleting is gone.
 #[test]
-fn review15_restoring_a_file_under_a_path_now_held_by_a_file_keeps_that_file() {
+fn restoring_a_file_under_a_path_now_held_by_a_file_keeps_that_file() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -95,7 +95,7 @@ fn review15_restoring_a_file_under_a_path_now_held_by_a_file_keeps_that_file() {
 /// restoring the tracked file removes the very same link with no clearance,
 /// and the standalone agent's folder path is now a plain file.
 #[test]
-fn review15_restoring_a_tracked_file_over_a_link_that_is_a_standalone_agents_folder_keeps_it() {
+fn restoring_a_tracked_file_over_a_link_that_is_a_standalone_agents_folder_keeps_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -138,7 +138,7 @@ fn review15_restoring_a_tracked_file_over_a_link_that_is_a_standalone_agents_fol
 /// `<worktree>/dir`. Restoring `dir/a.txt` makes git replace the link with a
 /// real directory.
 #[test]
-fn review15_restoring_a_file_beneath_a_link_that_is_a_standalone_agents_folder_keeps_it() {
+fn restoring_a_file_beneath_a_link_that_is_a_standalone_agents_folder_keeps_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);

@@ -1,4 +1,4 @@
-//! Review 20: reproductions.
+//! A switch never recurses into submodules under a global setting, and never deletes a standalone folder inside or at a submodule.
 
 use std::path::Path;
 
@@ -69,7 +69,7 @@ fn fixture(tmp: &Path) -> std::path::PathBuf {
 /// tracks a file at `scratch`, so git deletes the agent's folder. The move
 /// check never looks inside a submodule, so dux lets it happen.
 #[test]
-fn review20_recursing_switch_deletes_a_standalone_folder_inside_a_submodule() {
+fn recursing_switch_deletes_a_standalone_folder_inside_a_submodule() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let folder = repo.join("sub").join("scratch");
@@ -106,7 +106,7 @@ fn review20_recursing_switch_deletes_a_standalone_folder_inside_a_submodule() {
 /// not exist, makes git (recursing) delete the submodule's working tree, the
 /// agent's whole folder with it. The move check skips deleted entries.
 #[test]
-fn review20_recursing_switch_deletes_a_standalone_folder_that_is_a_submodule() {
+fn recursing_switch_deletes_a_standalone_folder_that_is_a_submodule() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let folder = repo.join("sub");
@@ -141,7 +141,7 @@ fn review20_recursing_switch_deletes_a_standalone_folder_that_is_a_submodule() {
 /// `switch_branch`, which then sees an existing local branch and never removes
 /// it on refusal.
 #[test]
-fn review20_refused_base_branch_switch_leaves_the_branch_it_created() {
+fn refused_base_branch_switch_leaves_the_branch_it_created() {
     let (mut engine, tmp) = test_engine();
     let upstream = tmp.path().join("upstream");
     init(&upstream);
@@ -223,7 +223,7 @@ fn run_with_global_recurse(helper: &str) {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            &format!("engine::review20_tests::{helper}"),
+            &format!("engine::recursing_switch_tests::{helper}"),
             "--ignored",
             "--nocapture",
             "--test-threads=1",

@@ -524,13 +524,13 @@ fn chunk_refs(js: &str) -> Vec<String> {
 
 /// The exact placeholder page an older `build.rs` wrote on a failed frontend
 /// build, kept verbatim so the assertions below are about the real thing.
-const HISTORICAL_PLACEHOLDER: &str = "<!doctype html><title>dux</title><div id=\"root\">web assets not built - run npm run build in crates/dux-web/web</div>";
+const PLACEHOLDER_PAGE: &str = "<!doctype html><title>dux</title><div id=\"root\">web assets not built - run npm run build in crates/dux-web/web</div>";
 
 #[test]
 fn doctype_and_root_element_are_not_evidence_of_a_build() {
     // THE FINDING, pinned. The weak assertion passes happily on the placeholder,
     // which is why a placeholder release would have been green.
-    let placeholder = HISTORICAL_PLACEHOLDER.to_lowercase();
+    let placeholder = PLACEHOLDER_PAGE.to_lowercase();
     assert!(
         placeholder.contains("<!doctype html") && placeholder.contains("id=\"root\""),
         "the placeholder satisfies both halves of the old assertion, so the old \
@@ -538,7 +538,7 @@ fn doctype_and_root_element_are_not_evidence_of_a_build() {
     );
     // The real check rejects it, because it references no built bundle.
     assert!(
-        hashed_asset_refs(HISTORICAL_PLACEHOLDER).is_empty(),
+        hashed_asset_refs(PLACEHOLDER_PAGE).is_empty(),
         "the placeholder must not look like a build"
     );
 }

@@ -1,4 +1,4 @@
-//! Review 12: reproductions.
+//! A standalone agent recorded at a link inside a worktree, and a link's delete claiming the link, not its target.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -76,7 +76,7 @@ fn pump_until_removed(engine: &mut Engine) -> Result<(), String> {
 /// comparing, so the agent is judged to live outside the worktree; the
 /// worktree's removal then deletes the very path the agent is recorded at.
 #[test]
-fn review12_a_worktree_removal_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
+fn a_worktree_removal_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -110,7 +110,7 @@ fn review12_a_worktree_removal_keeps_a_standalone_agent_recorded_at_a_link_insid
 /// The same, for the changes pane deleting an untracked folder that holds
 /// the link a standalone agent is recorded at.
 #[test]
-fn review12_a_changes_pane_folder_delete_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
+fn a_changes_pane_folder_delete_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -150,7 +150,7 @@ fn review12_a_changes_pane_folder_delete_keeps_a_standalone_agent_recorded_at_a_
 /// connection holds the database's write lock (the registry's writer, a web
 /// worker), the UI thread sits in SQLite's busy wait.
 #[test]
-fn review12_discarding_an_untracked_link_never_waits_on_the_database_on_the_engine_thread() {
+fn discarding_an_untracked_link_never_waits_on_the_database_on_the_engine_thread() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -188,7 +188,7 @@ fn review12_discarding_an_untracked_link_never_waits_on_the_database_on_the_engi
 /// the TARGET: an operation running in the target refuses the link's delete,
 /// and while the claim lives, the target itself reads as being removed.
 #[test]
-fn review12_a_links_delete_claims_the_link_not_its_target() {
+fn a_links_delete_claims_the_link_not_its_target() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -222,7 +222,7 @@ fn review12_a_links_delete_claims_the_link_not_its_target() {
 /// The other half: while a link's delete holds its claim, the link's target
 /// (another agent's worktree) refuses new work as if it were being removed.
 #[test]
-fn review12_a_links_claim_does_not_mark_its_target_as_being_removed() {
+fn a_links_claim_does_not_mark_its_target_as_being_removed() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -247,7 +247,7 @@ fn review12_a_links_claim_does_not_mark_its_target_as_being_removed() {
 /// target, whose holders include the editor's own root hold, so deleting
 /// such a link is refused every time, by the delete itself.
 #[test]
-fn review12_the_editor_can_delete_a_link_to_a_folder_around_its_root() {
+fn the_editor_can_delete_a_link_to_a_folder_around_its_root() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -269,8 +269,6 @@ fn review12_the_editor_can_delete_a_link_to_a_folder_around_its_root() {
         claim.err()
     );
 }
-
-// Tests added with the fixes for the twelfth review.
 
 /// The engine thread never reads the session database or the process table
 /// for a destructive command: every changes-pane delete (a link, a folder, a

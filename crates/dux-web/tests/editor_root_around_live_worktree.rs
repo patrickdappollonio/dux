@@ -1,5 +1,4 @@
-//! Adversarial review (fifth pass): see the test.
-//! Derived from the second pass: an editor write holds its editor ROOT,
+//! An editor write holds its editor ROOT,
 //! never the path it writes. A terminal's editor is rooted at the folder the
 //! terminal started in, and that folder can contain an agent's worktree (a
 //! standalone terminal starts in the home folder, which holds dux's worktrees
@@ -8,6 +7,9 @@
 //! write through such an editor into a worktree whose removal has begun is
 //! neither refused nor waited for, and a folder created there after git
 //! removed the worktree brings the worktree's folder back.
+//!
+//! This file covers a delete and a move of a live agent's worktree through
+//! such an editor.
 
 use std::net::SocketAddr;
 

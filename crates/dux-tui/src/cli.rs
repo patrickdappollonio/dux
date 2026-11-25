@@ -2175,7 +2175,7 @@ mod tests {
     /// then removes everything, so nothing is left running in a folder that
     /// is gone.
     #[test]
-    fn review21_factory_reset_removes_a_worktree_a_recorded_dux_job_still_runs_in() {
+    fn factory_reset_removes_a_worktree_a_recorded_dux_job_still_runs_in() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {
@@ -2414,7 +2414,7 @@ mod tests {
     /// The reset only looks at sessions started under the worktrees root, so
     /// it neither ends this job nor keeps the folder it works in.
     #[test]
-    fn review22_factory_reset_removes_a_worktree_a_recorded_terminal_job_works_in() {
+    fn factory_reset_removes_a_worktree_a_recorded_terminal_job_works_in() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {

@@ -1,4 +1,4 @@
-//! Review 24: reproductions.
+//! A switch that would delete a tracked link to another project is refused.
 
 use std::path::Path;
 
@@ -23,7 +23,7 @@ fn git(dir: &Path, args: &[&str]) {
 /// check judges the link's target instead (the containment test's canonical
 /// spelling follows the link) and refuses the switch.
 #[test]
-fn review24_switch_deleting_a_tracked_link_to_another_project_is_refused() {
+fn switch_deleting_a_tracked_link_to_another_project_is_refused() {
     let (mut engine, tmp) = test_engine();
     let tmp = tmp.path();
     let shared = tmp.join("shared");

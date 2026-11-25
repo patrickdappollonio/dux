@@ -1,4 +1,4 @@
-//! Review 8: reproductions.
+//! A project added inside a worktree being removed, the manager's recheck under the claim, and the process registry's writer.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -68,7 +68,7 @@ fn pump_until_removed(engine: &mut Engine) {
 /// A project added while an agent's worktree removal is waiting, whose
 /// repository is inside that worktree, is deleted by the removal.
 #[test]
-fn review8_a_project_added_inside_a_worktree_being_removed_is_not_deleted() {
+fn a_project_added_inside_a_worktree_being_removed_is_not_deleted() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -130,7 +130,7 @@ fn review8_a_project_added_inside_a_worktree_being_removed_is_not_deleted() {
 /// again but only matches a worktree's EXACT path, so the standalone agent's
 /// folder, inside the worktree, is deleted with it.
 #[test]
-fn review8_the_manager_recheck_under_the_claim_sees_a_standalone_agent_inside() {
+fn the_manager_recheck_under_the_claim_sees_a_standalone_agent_inside() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -174,7 +174,7 @@ fn review8_the_manager_recheck_under_the_claim_sees_a_standalone_agent_inside() 
 /// opens a new SQLite connection and rewrites the whole registry, and waits
 /// for any other writer of the database to finish: the UI thread blocks.
 #[test]
-fn review8_registering_a_session_does_not_block_on_the_database() {
+fn registering_a_session_does_not_block_on_the_database() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("sessions.sqlite3");
     let _ = crate::storage::SessionStore::open(&db).unwrap();
@@ -226,8 +226,6 @@ fn review8_registering_a_session_does_not_block_on_the_database() {
          session database"
     );
 }
-
-// Tests added with the fixes for the eighth review.
 
 /// A project cannot be added inside a folder whose removal has begun, and
 /// the refusal says why.

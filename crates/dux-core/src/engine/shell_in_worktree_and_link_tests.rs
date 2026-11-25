@@ -1,4 +1,4 @@
-//! Review 11: reproductions.
+//! A shell entering a worktree while its removal waits, links judged at their own path, and a rename the plan accepts.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -106,7 +106,7 @@ fn spawn_shell(cwd: &Path, script: &str) -> (Shell, std::process::Child) {
 /// worktree during that wait is never seen, and git deletes the folder
 /// from under it.
 #[test]
-fn review11_a_shell_that_enters_the_worktree_while_the_removal_waits_for_an_overlap_keeps_it() {
+fn a_shell_that_enters_the_worktree_while_the_removal_waits_for_an_overlap_keeps_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -159,7 +159,7 @@ fn review11_a_shell_that_enters_the_worktree_while_the_removal_waits_for_an_over
 
 /// Control: the same shell standing in the worktree BEFORE the delete keeps it.
 #[test]
-fn review11_control_a_shell_already_in_the_worktree_keeps_it() {
+fn control_a_shell_already_in_the_worktree_keeps_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -192,7 +192,7 @@ fn review11_control_a_shell_already_in_the_worktree_keeps_it() {
 /// nothing: a removal of the worktree then neither waits for it nor follows
 /// its new name.
 #[test]
-fn review11_a_rename_the_plan_accepts_always_holds_its_worktree() {
+fn a_rename_the_plan_accepts_always_holds_its_worktree() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -252,8 +252,6 @@ fn review11_a_rename_the_plan_accepts_always_holds_its_worktree() {
         "rename {unheld:?} was accepted for dispatch without a hold on its worktree"
     );
 }
-
-// Tests added with the fixes for the eleventh review.
 
 /// A link is judged at its own path: one that IS an agent's recorded folder
 /// is refused, one that merely points at an agent's folder is not (deleting

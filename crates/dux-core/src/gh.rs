@@ -3122,7 +3122,7 @@ mod host_policy_tests {
     }
 
     #[test]
-    fn the_legacy_policy_is_the_rule_dux_shipped_before() {
+    fn the_legacy_policy_is_the_name_rule() {
         let policy = GithubHostPolicy::LegacyNameRule;
         assert!(policy.allows("github.com"));
         assert!(policy.allows("github.company.example"));

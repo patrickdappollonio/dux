@@ -4000,7 +4000,7 @@ mod tree_drop_dir {
 }
 
 #[cfg(test)]
-mod review15_lsof {
+mod working_directory_read_tests {
     use super::*;
 
     /// The macOS reader, fed what `lsof` prints when dux runs without a
@@ -4009,7 +4009,7 @@ mod review15_lsof {
     /// standing in `/Users/José/...` is reported at a path that does not
     /// exist and is judged to stand nowhere near the folder.
     #[test]
-    fn review15_a_working_directory_with_a_non_ascii_name_is_read_back_exactly() {
+    fn a_working_directory_with_a_non_ascii_name_is_read_back_exactly() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("José");
         std::fs::create_dir_all(&dir).unwrap();

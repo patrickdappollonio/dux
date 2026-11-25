@@ -1214,7 +1214,7 @@ mod tests {
     /// its keyed busy open and its status key registered as live: no final
     /// ever lands for it, so the "Deleting" spinner outlives the refusal.
     #[test]
-    fn review13_a_refused_folder_delete_claim_retires_its_busy() {
+    fn a_refused_folder_delete_claim_retires_its_busy() {
         let (mut app, worktree) = repo_app();
         let target = worktree.join("node_modules");
         let _other = app

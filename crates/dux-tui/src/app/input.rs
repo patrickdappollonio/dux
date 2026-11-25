@@ -30771,7 +30771,7 @@ cyan = "#00ffff"
     /// While a commit runs on its worker the box stays editable;
     /// a message typed for the NEXT commit is wiped when the first one lands.
     #[test]
-    fn review25_a_message_typed_while_a_commit_runs_survives_its_final() {
+    fn a_message_typed_while_a_commit_runs_survives_its_final() {
         let mut app = test_app(default_bindings());
         let worktree = std::path::Path::new(
             app.engine.sessions[0]

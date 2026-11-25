@@ -36,49 +36,49 @@ pub mod status_op;
 #[cfg(test)]
 mod classic_keys_tests;
 #[cfg(test)]
+mod clean_quit_removal_tests;
+#[cfg(test)]
+mod discard_deleted_tracked_file_tests;
+#[cfg(test)]
+mod dormant_worktree_removal_tests;
+#[cfg(test)]
 mod folder_removal_tests;
 #[cfg(test)]
-mod races_review2_tests;
+mod guarded_switch_link_tests;
 #[cfg(test)]
-mod races_review3_tests;
+mod leaderless_job_removal_tests;
 #[cfg(test)]
-mod races_review4_tests;
+mod link_hold_and_claim_tests;
 #[cfg(test)]
-mod races_review5_tests;
+mod link_recorded_folder_removal_tests;
 #[cfg(test)]
-mod races_review6_tests;
+mod nested_folder_removal_tests;
 #[cfg(test)]
-mod removal_review_tests;
+mod project_added_during_delete_tests;
 #[cfg(test)]
-mod review10_tests;
+mod pull_guard_tests;
 #[cfg(test)]
-mod review11_tests;
+mod recursing_switch_tests;
 #[cfg(test)]
-mod review12_tests;
+mod removal_coordination_tests;
 #[cfg(test)]
-mod review13_tests;
+mod removal_project_and_registry_tests;
 #[cfg(test)]
-mod review14_tests;
+mod restore_file_over_held_path_tests;
 #[cfg(test)]
-mod review15_tests;
+mod resumed_removal_session_tests;
 #[cfg(test)]
-mod review17_tests;
+mod shell_in_worktree_and_link_tests;
 #[cfg(test)]
-mod review19_tests;
+mod switch_link_to_other_project_tests;
 #[cfg(test)]
-mod review20_tests;
+mod switch_overwrite_tests;
 #[cfg(test)]
-mod review21_tests;
+mod switch_removal_tests;
 #[cfg(test)]
-mod review22_tests;
+mod switch_tracked_link_tests;
 #[cfg(test)]
-mod review23_tests;
-#[cfg(test)]
-mod review24_tests;
-#[cfg(test)]
-mod review8_tests;
-#[cfg(test)]
-mod review_nested_folder_tests;
+mod terminal_in_worktree_removal_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]

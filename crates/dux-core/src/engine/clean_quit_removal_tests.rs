@@ -1,4 +1,4 @@
-//! Fifth adversarial review of the worktree-removal races branch.
+//! Removal after a clean quit, the changes pane's folder delete, and the manager's recheck after admission.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -228,8 +228,6 @@ fn the_changes_pane_does_not_delete_a_running_standalone_agents_folder() {
         outcome.is_ok()
     );
 }
-
-// Tests added with the fixes for the fifth review.
 
 /// The registry is persisted through every change, not only when a removal is
 /// parked: after a clean quit and a restart, the worktree manager's removal of

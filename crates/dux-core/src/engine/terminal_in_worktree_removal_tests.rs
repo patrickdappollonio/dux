@@ -1,4 +1,4 @@
-//! Sixth adversarial review of the worktree-removal races branch.
+//! A project terminal standing in a worktree keeps it, and the messages that name what stands there.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -205,8 +205,6 @@ fn an_old_session_with_a_live_job_is_not_forgotten_by_the_per_agent_cap() {
         outcome.is_ok()
     );
 }
-
-// Tests added with the fixes for the sixth review.
 
 /// The refusal names the terminal standing in the worktree and says how to
 /// get it out of the way; nothing is ended to make way for the removal.

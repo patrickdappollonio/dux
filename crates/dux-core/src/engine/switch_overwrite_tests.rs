@@ -1,4 +1,4 @@
-//! Review 21: reproductions.
+//! A switch or pull never overwrites a file inside a standalone agent's folder or uncommitted work in a nested project.
 
 use std::path::Path;
 
@@ -48,7 +48,7 @@ fn fixture(tmp: &Path) -> std::path::PathBuf {
 /// asks about folders git would remove, never about files it would replace
 /// inside a folder something lives in.
 #[test]
-fn review21_switch_overwrites_a_file_inside_a_standalone_agents_folder() {
+fn switch_overwrites_a_file_inside_a_standalone_agents_folder() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let folder = repo.join("scratch");
@@ -82,7 +82,7 @@ fn review21_switch_overwrites_a_file_inside_a_standalone_agents_folder() {
 /// makes git overwrite that file, and the other project's uncommitted work is
 /// gone.
 #[test]
-fn review21_switch_overwrites_uncommitted_work_in_a_nested_project() {
+fn switch_overwrites_uncommitted_work_in_a_nested_project() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let other = repo.join("scratch");
@@ -116,7 +116,7 @@ fn review21_switch_overwrites_uncommitted_work_in_a_nested_project() {
 /// the local branch dux created for it: only a refusal by the move check
 /// removes it.
 #[test]
-fn review21_switch_git_refuses_leaves_the_branch_it_created() {
+fn switch_git_refuses_leaves_the_branch_it_created() {
     let (mut engine, tmp) = test_engine();
     let upstream = tmp.path().join("upstream");
     init(&upstream);

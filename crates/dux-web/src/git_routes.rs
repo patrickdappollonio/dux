@@ -2760,7 +2760,7 @@ mod tests {
     /// recursively: the nested repository is deleted with no claim, no
     /// occupancy question, no clearance and no repository confirmation.
     #[tokio::test]
-    async fn review14_a_tracked_file_discard_never_deletes_the_folder_that_took_its_place() {
+    async fn a_tracked_file_discard_never_deletes_the_folder_that_took_its_place() {
         let (tmp, app, _state) = router_with_session_and_state().await;
         let worktree = tmp.path().join("wt");
         std::fs::remove_file(worktree.join("f.txt")).unwrap();
@@ -3181,7 +3181,7 @@ mod tests {
     /// folder sits untracked inside the worktree loses its folder (dux "never
     /// creates, moves or removes a standalone agent's folder").
     #[tokio::test]
-    async fn review6_web_discard_does_not_delete_a_standalone_agents_folder() {
+    async fn web_discard_does_not_delete_a_standalone_agents_folder() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let root = tmp.path().to_path_buf();
         let wt = root.join("wt");

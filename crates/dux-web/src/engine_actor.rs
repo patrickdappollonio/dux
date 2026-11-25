@@ -11101,7 +11101,7 @@ mod tests {
     /// saves an unrelated change. The save carries the read's token, the file
     /// moved, so the save is refused as a conflict and nothing is written.
     #[tokio::test]
-    async fn review17_raw_editor_save_keeps_a_password_set_meanwhile() {
+    async fn raw_editor_save_keeps_a_password_set_meanwhile() {
         let (_tmp, paths) = temp_paths();
         std::fs::write(&paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
         let engine = bootstrap_engine(&paths).expect("bootstrap");

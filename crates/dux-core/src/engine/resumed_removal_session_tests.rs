@@ -1,5 +1,4 @@
-//! Fourth adversarial review of the worktree-removal races branch. Each test
-//! reproduces a defect against the branch's own stated rules.
+//! A removal finished at the next start never ends a standalone agent's job, and a session registered after the delete stays current in the pending row.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

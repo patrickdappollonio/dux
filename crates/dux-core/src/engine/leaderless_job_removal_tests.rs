@@ -1,5 +1,4 @@
-//! Third adversarial review of the worktree-removal races branch. Each test
-//! reproduces a defect against the branch's own stated rules.
+//! Worktree removal and leaderless jobs: what a deleted standalone agent or a closed terminal left running is ended first, and a refusal leaves nothing claimed.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

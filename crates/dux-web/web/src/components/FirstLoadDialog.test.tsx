@@ -203,7 +203,7 @@ describe("FirstLoadDialog", () => {
       }
     })
 
-    it("offers exactly the two approved buttons, with Add a project as the filled primary", () => {
+    it("offers exactly the two buttons, with Add a project as the filled primary", () => {
       seed({ screen: "welcome" })
       render(<FirstLoadDialog />)
 
@@ -289,7 +289,7 @@ describe("FirstLoadDialog", () => {
       }
     })
 
-    it("offers exactly the two approved buttons, with Open full notes as the primary", () => {
+    it("offers exactly the two buttons, with Open full notes as the primary", () => {
       seed({ screen: "whats_new", notes: NOTES })
       render(<FirstLoadDialog />)
 

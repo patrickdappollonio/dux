@@ -1,4 +1,4 @@
-//! Review 13: reproductions.
+//! Holds and claims taken through a link: a removal of the target sees them, and new work through the link is refused.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -54,7 +54,7 @@ fn free_worktree(engine: &mut Engine, root: &Path) -> PathBuf {
 /// invisible to the hold. The containment rule (any spelling of the occupant
 /// under any spelling of the folder) is not what the registry asks.
 #[test]
-fn review13_a_hold_through_a_link_is_seen_by_a_removal_of_its_target() {
+fn a_hold_through_a_link_is_seen_by_a_removal_of_its_target() {
     let tmp = tempfile::tempdir().unwrap();
     let worktree = tmp.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -77,7 +77,7 @@ fn review13_a_hold_through_a_link_is_seen_by_a_removal_of_its_target() {
 }
 
 #[test]
-fn review13_a_removal_of_a_folder_refuses_new_work_through_a_link_to_it() {
+fn a_removal_of_a_folder_refuses_new_work_through_a_link_to_it() {
     let tmp = tempfile::tempdir().unwrap();
     let worktree = tmp.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -103,7 +103,7 @@ fn review13_a_removal_of_a_folder_refuses_new_work_through_a_link_to_it() {
 /// worktree is not found, so the worktree is cleared for git while the create
 /// is still on its way into it.
 #[test]
-fn review13_the_last_look_sees_an_agent_being_created_at_a_link_to_the_folder() {
+fn the_last_look_sees_an_agent_being_created_at_a_link_to_the_folder() {
     let (engine, tmp) = test_engine();
     let worktree = tmp.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -135,7 +135,7 @@ fn review13_the_last_look_sees_an_agent_being_created_at_a_link_to_the_folder() 
 /// a push running in the worktree is not waited for, and git removes the
 /// folder under it.
 #[test]
-fn review13_a_manager_removal_requested_through_a_link_waits_for_work_in_the_worktree() {
+fn a_manager_removal_requested_through_a_link_waits_for_work_in_the_worktree() {
     let (mut engine, tmp) = test_engine();
     let worktree = free_worktree(&mut engine, tmp.path());
     let link = engine
@@ -165,8 +165,6 @@ fn review13_a_manager_removal_requested_through_a_link_waits_for_work_in_the_wor
         "the worktree was removed while a push held it (outcome {early:?})"
     );
 }
-
-// Tests added with the fixes for the thirteenth review.
 
 /// A background worker that never starts is answered for, so the busy the
 /// surface showed for it gets its final.

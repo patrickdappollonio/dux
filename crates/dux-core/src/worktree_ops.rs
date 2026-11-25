@@ -1472,7 +1472,7 @@ mod tests {
     /// `/p/x` with it, must not be granted while that removal runs: two
     /// removals of nested folders never run at the same time.
     #[test]
-    fn review9_a_destructive_claim_waits_for_or_refuses_a_removal_inside_it() {
+    fn a_destructive_claim_waits_for_or_refuses_a_removal_inside_it() {
         let ops = WorktreeOps::new();
         let dir = tempfile::tempdir().unwrap();
         let outer = dir.path().join("p");

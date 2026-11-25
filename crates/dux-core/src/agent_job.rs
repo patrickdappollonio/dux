@@ -7722,7 +7722,7 @@ mod tests {
     /// the startup command's session first, so the folder is deleted from under
     /// the job dux started there.
     #[test]
-    fn review6_a_failed_create_does_not_remove_its_worktree_from_under_its_startup_job() {
+    fn a_failed_create_does_not_remove_its_worktree_from_under_its_startup_job() {
         let (mut engine, engine_dir) = crate::engine::test_support::test_engine();
         let repo = init_test_repo();
         let pidfile = engine_dir.path().join("job.pid");

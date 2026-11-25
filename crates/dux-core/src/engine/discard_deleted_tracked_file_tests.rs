@@ -1,4 +1,4 @@
-//! Review 14: reproductions.
+//! Discarding a deleted tracked file keeps a standalone agent's folder or a project's repository standing in its place.
 
 use std::path::{Path, PathBuf};
 
@@ -53,7 +53,7 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
 /// so the standalone agent's folder (and everything else in `notes/`) is
 /// deleted with no claim, no occupancy question and no clearance.
 #[test]
-fn review14_discarding_a_deleted_tracked_file_keeps_a_standalone_agents_folder_in_its_place() {
+fn discarding_a_deleted_tracked_file_keeps_a_standalone_agents_folder_in_its_place() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -96,7 +96,7 @@ fn review14_discarding_a_deleted_tracked_file_keeps_a_standalone_agents_folder_i
 /// tracked file was: discarding the "deleted file" deletes the repository,
 /// history included.
 #[test]
-fn review14_discarding_a_deleted_tracked_file_keeps_a_projects_repository_in_its_place() {
+fn discarding_a_deleted_tracked_file_keeps_a_projects_repository_in_its_place() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);

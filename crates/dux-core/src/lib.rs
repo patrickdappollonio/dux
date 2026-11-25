@@ -81,11 +81,11 @@ pub mod pty;
 pub mod pty_owners;
 pub mod qr;
 pub mod quiet_tail;
+#[cfg(all(test, target_os = "linux"))]
+mod reaped_leader_group_tests;
 pub mod release_notes;
 pub mod reload_signal;
 pub mod resource_stats;
-#[cfg(all(test, target_os = "linux"))]
-mod review27_tests;
 pub mod route_checks;
 pub mod row_state;
 pub mod scroll_hint;
