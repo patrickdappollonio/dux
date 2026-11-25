@@ -29652,6 +29652,28 @@ cyan = "#00ffff"
         }
     }
 
+    /// The key opens the new-folder name step with its field focused, so a name
+    /// typed straight after the key lands whole.
+    #[test]
+    fn a_name_typed_straight_after_the_standalone_key_lands_whole() {
+        let mut app = test_app(default_bindings());
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = false;
+        app.focus = FocusPane::Left;
+
+        for ch in "stui-chosen".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .expect("the key must be handled");
+        }
+
+        match &app.prompt {
+            PromptState::NameStandaloneAgent { input, .. } => assert_eq!(input.text, "tui-chosen"),
+            other => panic!("expected the standalone name step, got {other:?}"),
+        }
+    }
+
     /// The filter row is a live query over the pane, and the browser covers the
     /// pane it filters: leaving it engaged means coming back to a pruned list
     /// nobody asked for, carrying a query the user has by then forgotten
