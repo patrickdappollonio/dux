@@ -870,15 +870,19 @@ async fn session_folder_files(State(state): State<AppState>, Path(id): Path<Stri
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    let Some(folder) = state.engine.standalone_folder(id).await else {
-        return unknown_session();
-    };
-    let Some((path, created_by_dux)) = folder else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "This agent runs in a worktree, not in a standalone agent's folder.",
-        )
-            .into_response();
+    let (path, created_by_dux) = match state.engine.standalone_folder(id).await {
+        crate::engine_actor::StandaloneFolderAnswer::UnknownSession => return unknown_session(),
+        crate::engine_actor::StandaloneFolderAnswer::InWorktree => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "This agent runs in a worktree, not in a standalone agent's folder.",
+            )
+                .into_response();
+        }
+        crate::engine_actor::StandaloneFolderAnswer::Folder {
+            path,
+            created_by_dux,
+        } => (path, created_by_dux),
     };
     if !created_by_dux {
         return axum::Json(FolderFilesResponse {
@@ -1016,19 +1020,19 @@ struct DeleteQuery {
     /// Also remove the agent's worktree from disk (mirrors the WS command's
     /// `delete_worktree`). Defaults to false (keep the worktree) so a missing
     /// query parameter never deletes user data.
-    #[serde(default)]
-    delete_worktree: bool,
+    #[serde(default, rename = "delete_worktree")]
+    worktree: bool,
     /// The delete dialog's "also delete the branch" answer. Absent means nobody
     /// was asked, which keeps the provenance default: dux deletes only the
     /// branches it created. A caller that never learned about this parameter
     /// therefore behaves exactly as it did before it existed.
-    #[serde(default)]
-    delete_branch: Option<bool>,
+    #[serde(default, rename = "delete_branch")]
+    branch: Option<bool>,
     /// Also delete a standalone agent's folder. Only a folder dux created can
     /// be; asking for any other refuses the whole delete. Absent means nobody
     /// was asked: a folder dux created goes and a folder the user chose stays.
-    #[serde(default)]
-    delete_folder: Option<bool>,
+    #[serde(default, rename = "delete_folder")]
+    folder: Option<bool>,
 }
 
 /// The most a delete's body may hold: the branch answers, a few branch names
@@ -1081,10 +1085,9 @@ async fn delete_session(
     };
     // Refused here, before anything is dispatched, so a malformed pin is a
     // 400 and never a delete without one.
-    if let Err(reason) = dux_core::branch_history::BranchAnswersWire::to_request(
-        body.branches.as_ref(),
-        q.delete_branch,
-    ) {
+    if let Err(reason) =
+        dux_core::branch_history::BranchAnswersWire::to_request(body.branches.as_ref(), q.branch)
+    {
         return (
             StatusCode::BAD_REQUEST,
             format!("The agent was not deleted: {reason}."),
@@ -1096,10 +1099,10 @@ async fn delete_session(
     }
     let command = WireCommand::DeleteSession {
         session_id: id.clone(),
-        delete_worktree: q.delete_worktree,
-        delete_branch: q.delete_branch,
+        delete_worktree: q.worktree,
+        delete_branch: q.branch,
         branches: body.branches,
-        delete_folder: q.delete_folder,
+        delete_folder: q.folder,
     };
     let result = match dispatch_guarded(
         &state,

@@ -330,9 +330,8 @@ pub(crate) enum EngineRequest {
     /// handler). `None` for a standalone agent, which has no branch.
     RenamePushedProbe(String, oneshot::Sender<Option<(String, String)>>),
     /// A standalone agent's folder and whether dux created it (instant lookup;
-    /// the file count runs off-thread in the handler). The outer `None` is an
-    /// unknown session, the inner `None` an agent in a worktree.
-    StandaloneFolder(String, oneshot::Sender<Option<Option<(String, bool)>>>),
+    /// the file count runs off-thread in the handler).
+    StandaloneFolder(String, oneshot::Sender<StandaloneFolderAnswer>),
     /// What the name step needs to answer whether a create in a new folder
     /// would refuse a name (instant; the filesystem is asked off-thread in
     /// the handler).
@@ -785,6 +784,22 @@ fn server_restart_warning_copy(
 /// and a dropped resize is recovered by the grid handshake, which re-reads the
 /// authoritative geometry on the next attach or bounce.
 const REQ_CHANNEL_CAPACITY: usize = 1024;
+
+/// What the engine knows of an agent's folder, for the folder-files lookup.
+#[derive(Debug)]
+pub enum StandaloneFolderAnswer {
+    /// No agent has that id.
+    UnknownSession,
+    /// The agent runs in a worktree.
+    InWorktree,
+    /// The agent runs in a folder.
+    Folder {
+        /// The folder's path.
+        path: String,
+        /// Whether dux created the folder.
+        created_by_dux: bool,
+    },
+}
 
 /// The `[server]` limits a running listener can adopt from a config reload. These
 /// are plain scalars the routes and socket handlers read per request, so the actor
@@ -2059,7 +2074,7 @@ impl EngineHandle {
     }
 
     /// See [`EngineRequest::StandaloneFolder`].
-    pub async fn standalone_folder(&self, session_id: String) -> Option<Option<(String, bool)>> {
+    pub async fn standalone_folder(&self, session_id: String) -> StandaloneFolderAnswer {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -2067,9 +2082,9 @@ impl EngineHandle {
             .await
             .is_err()
         {
-            return None;
+            return StandaloneFolderAnswer::UnknownSession;
         }
-        rx.await.unwrap_or(None)
+        rx.await.unwrap_or(StandaloneFolderAnswer::UnknownSession)
     }
 
     /// See [`EngineRequest::NewFolderLookup`]. `None` when the engine is
@@ -5357,10 +5372,15 @@ fn handle_request(
                 .sessions
                 .iter()
                 .find(|session| session.id == session_id)
-                .map(|session| {
+                .map_or(StandaloneFolderAnswer::UnknownSession, |session| {
                     session
                         .folder_path()
-                        .map(|path| (path.to_string(), session.workspace.folder_created_by_dux()))
+                        .map_or(StandaloneFolderAnswer::InWorktree, |path| {
+                            StandaloneFolderAnswer::Folder {
+                                path: path.to_string(),
+                                created_by_dux: session.workspace.folder_created_by_dux(),
+                            }
+                        })
                 });
             answer(reply, folder);
         }

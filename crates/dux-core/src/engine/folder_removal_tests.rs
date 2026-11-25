@@ -229,7 +229,7 @@ fn a_deletion_that_stops_says_where_and_is_not_tried_again() {
         "{text}"
     );
     assert!(locked.join("inner.txt").exists());
-    assert!(pending_rows(&engine).is_empty());
+    assert_eq!(pending_rows(&engine), Vec::<String>::new());
     wait_for_marker_to_go(&folder);
 }
 
@@ -610,7 +610,7 @@ fn a_record_that_cannot_be_deleted_keeps_the_folder() {
     let _ = engine.reap_terminating_ptys();
 
     assert!(engine.pending_folder_removals.is_empty());
-    assert!(pending_rows(&engine).is_empty());
+    assert_eq!(pending_rows(&engine), Vec::<String>::new());
     assert!(engine.sessions.iter().any(|s| s.id == "otter"));
     std::thread::sleep(Duration::from_millis(200));
     assert!(folder.is_dir(), "the folder stays with its agent");
@@ -658,7 +658,7 @@ fn a_removal_left_waiting_at_a_quit_is_finished_at_the_next_start() {
         "{text}"
     );
     assert!(!folder.exists());
-    assert!(pending_rows(&next).is_empty());
+    assert_eq!(pending_rows(&next), Vec::<String>::new());
 }
 
 /// A folder recorded with no mark is kept, with the reason.

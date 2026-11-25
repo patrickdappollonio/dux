@@ -1109,17 +1109,19 @@ impl CreatePlanContext<'_> {
             })
     }
 
+    fn refuse_standalone_plan(&mut self) -> Option<ManagedCreatePlan> {
+        logger::error("standalone create reached managed provisioning");
+        self.send_failure(
+            "Could not create the standalone agent: dux took the wrong internal path. Nothing was created and no folder was touched. Please report this with the contents of dux.log."
+                .to_string(),
+        );
+        None
+    }
+
     fn plan(&mut self, request: CreateAgentRequest) -> Option<ManagedCreatePlan> {
         match request {
             CreateAgentRequest::Standalone { .. }
-            | CreateAgentRequest::StandaloneInNewFolder { .. } => {
-                logger::error("standalone create reached managed provisioning");
-                self.send_failure(
-                    "Could not create the standalone agent: dux took the wrong internal path. Nothing was created and no folder was touched. Please report this with the contents of dux.log."
-                        .to_string(),
-                );
-                None
-            }
+            | CreateAgentRequest::StandaloneInNewFolder { .. } => self.refuse_standalone_plan(),
             CreateAgentRequest::NewProject {
                 project,
                 custom_name,

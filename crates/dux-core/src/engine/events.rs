@@ -2786,7 +2786,7 @@ impl Engine {
         session_id: &str,
     ) -> anyhow::Result<Option<FinishDeleteSessionOutcome>> {
         if !self.sessions.iter().any(|s| s.id == session_id) {
-            self.settle_held_folder_removal(session_id, false);
+            self.settle_held_folder_removal(session_id, super::folder_removal::RecordFate::Kept);
             return Ok(None);
         }
         // Persist the deletion FIRST so a DB failure leaves in-memory state
@@ -2801,11 +2801,11 @@ impl Engine {
             .session_store
             .delete_session_with_folder_removal(session_id, folder.as_ref())
         {
-            self.settle_held_folder_removal(session_id, false);
+            self.settle_held_folder_removal(session_id, super::folder_removal::RecordFate::Kept);
             return Err(err);
         }
         let outcome = self.finish_delete_session_memory(session_id);
-        self.settle_held_folder_removal(session_id, true);
+        self.settle_held_folder_removal(session_id, super::folder_removal::RecordFate::Gone);
         if let Some((path, mark)) = kept_folder {
             self.let_go_of_created_folder(path, mark);
         }
@@ -3321,40 +3321,9 @@ impl Engine {
                 ),
             };
         }
-        // Only a folder dux created may go with the agent. The record decides,
-        // never the request, so a request naming any other folder is refused
-        // whole rather than downgraded to a delete that keeps it.
-        // A request that asks nobody leaves it to who made the folder.
-        let folder_removal = match (folder_on_delete, session.workspace.folder_removal_right()) {
-            (
-                FolderOnDelete::Keep,
-                crate::model::FolderRemovalRight::CreatedByDux { .. }
-                | crate::model::FolderRemovalRight::ChosenByUser { .. }
-                | crate::model::FolderRemovalRight::NotAFolder,
-            )
-            | (
-                FolderOnDelete::Unasked,
-                crate::model::FolderRemovalRight::ChosenByUser { .. }
-                | crate::model::FolderRemovalRight::NotAFolder,
-            ) => None,
-            (
-                FolderOnDelete::Remove | FolderOnDelete::Unasked,
-                crate::model::FolderRemovalRight::CreatedByDux { path, identity },
-            ) => Some(super::folder_removal::CreatedFolderRemoval {
-                session_id: session.id.clone(),
-                path: std::path::PathBuf::from(path),
-                identity,
-                label: session.display_label(),
-            }),
-            (
-                FolderOnDelete::Remove,
-                right @ (crate::model::FolderRemovalRight::ChosenByUser { .. }
-                | crate::model::FolderRemovalRight::NotAFolder),
-            ) => {
-                return BeginDeleteSessionOutcome::Refused {
-                    message: folder_delete_refusal(&session.display_label(), &right),
-                };
-            }
+        let folder_removal = match Self::folder_removal_for_delete(&session, folder_on_delete) {
+            Ok(removal) => removal,
+            Err(message) => return BeginDeleteSessionOutcome::Refused { message },
         };
         let folder_on_delete = if folder_removal.is_some() {
             FolderOnDelete::Remove
@@ -3403,32 +3372,11 @@ impl Engine {
             self.closing_sessions.insert(session.id.clone());
         }
 
-        // The typed managed payload keeps standalone folders out of the deferred
-        // removal pipeline.
-        let worktree_removal = match (
-            should_remove_worktree,
-            session.workspace.as_managed(),
-            project.as_ref(),
-        ) {
-            (true, Some(managed), Some(project)) => Some(super::DeferredWorktreeRemoval {
-                session_id: session.id.clone(),
-                project_path: project.path.clone(),
-                managed: managed.clone(),
-                // Decided at REQUEST time, not at dispatch time. The removal
-                // runs seconds later, once the agent's PTYs reap, and the
-                // dialog that asked the question is long gone by then.
-                branches: self.branch_plan_for(&session.id, managed, branches),
-                busy_message: crate::status_text![
-                    "Removing worktree for agent ",
-                    q(session.display_label()),
-                    "\u{2026}"
-                ],
-                // Filled in by `begin_session_tab_shutdown`, which is where the
-                // agent's processes are gathered and asked to go.
-                processes: super::RemovalProcesses::none(),
-            }),
-            _ => None,
-        };
+        let worktree_removal = self.deferred_worktree_removal(
+            &session,
+            project.as_ref().filter(|_| should_remove_worktree),
+            branches,
+        );
         let busy_message = worktree_removal.as_ref().map(|r| r.busy_message.clone());
         // Announced NOW, at the start of the delete: from this moment nothing
         // new may start in the folder (a pull, an editor save, an agent
@@ -3489,6 +3437,76 @@ impl Engine {
                     None,
                 ),
             }
+        }
+    }
+
+    /// The removal of the folder dux created for `session`, when this delete
+    /// takes it; the refusal when the request names a folder dux may not
+    /// delete. The record decides, never the request, so such a request is
+    /// refused whole rather than downgraded to a delete that keeps it, and a
+    /// request that asks nobody leaves it to who made the folder.
+    fn folder_removal_for_delete(
+        session: &crate::model::AgentSession,
+        folder_on_delete: FolderOnDelete,
+    ) -> Result<Option<super::folder_removal::CreatedFolderRemoval>, StatusText> {
+        match (folder_on_delete, session.workspace.folder_removal_right()) {
+            (
+                FolderOnDelete::Keep,
+                crate::model::FolderRemovalRight::CreatedByDux { .. }
+                | crate::model::FolderRemovalRight::ChosenByUser { .. }
+                | crate::model::FolderRemovalRight::NotAFolder,
+            )
+            | (
+                FolderOnDelete::Unasked,
+                crate::model::FolderRemovalRight::ChosenByUser { .. }
+                | crate::model::FolderRemovalRight::NotAFolder,
+            ) => Ok(None),
+            (
+                FolderOnDelete::Remove | FolderOnDelete::Unasked,
+                crate::model::FolderRemovalRight::CreatedByDux { path, identity },
+            ) => Ok(Some(super::folder_removal::CreatedFolderRemoval {
+                session_id: session.id.clone(),
+                path: std::path::PathBuf::from(path),
+                identity,
+                label: session.display_label(),
+            })),
+            (
+                FolderOnDelete::Remove,
+                right @ (crate::model::FolderRemovalRight::ChosenByUser { .. }
+                | crate::model::FolderRemovalRight::NotAFolder),
+            ) => Err(folder_delete_refusal(&session.display_label(), &right)),
+        }
+    }
+
+    /// The deferred worktree removal of `session`, when it has a managed
+    /// working copy and `project`, the project to remove it from, is given.
+    /// The typed managed payload keeps standalone folders out of the deferred
+    /// removal pipeline.
+    fn deferred_worktree_removal(
+        &self,
+        session: &crate::model::AgentSession,
+        project: Option<&crate::model::Project>,
+        branches: &crate::branch_history::BranchDeleteRequest,
+    ) -> Option<super::DeferredWorktreeRemoval> {
+        match (session.workspace.as_managed(), project) {
+            (Some(managed), Some(project)) => Some(super::DeferredWorktreeRemoval {
+                session_id: session.id.clone(),
+                project_path: project.path.clone(),
+                managed: managed.clone(),
+                // Decided at REQUEST time, not at dispatch time. The removal
+                // runs seconds later, once the agent's PTYs reap, and the
+                // dialog that asked the question is long gone by then.
+                branches: self.branch_plan_for(&session.id, managed, branches),
+                busy_message: crate::status_text![
+                    "Removing worktree for agent ",
+                    q(session.display_label()),
+                    "\u{2026}"
+                ],
+                // Filled in by `begin_session_tab_shutdown`, which is where the
+                // agent's processes are gathered and asked to go.
+                processes: super::RemovalProcesses::none(),
+            }),
+            _ => None,
         }
     }
 

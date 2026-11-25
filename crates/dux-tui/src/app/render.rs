@@ -12041,23 +12041,15 @@ impl App {
             OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
     }
 
-    /// The standalone-agent name field. A new folder's is followed by the folder
-    /// it names and a button on to the browser; a picked folder's says its default.
-    fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame<'_>) {
-        let PromptState::NameStandaloneAgent {
-            folder,
-            input,
-            focus,
-        } = &self.prompt
-        else {
-            return;
-        };
-        let new_folder = *folder == crate::app::StandaloneFolder::New;
-        // The modal is 64 wide; its border takes one column each side.
-        let inner_width = 62;
-        let (above, below) = match folder {
+    /// The lines above and below the standalone-agent name field.
+    fn standalone_name_lines(
+        &self,
+        folder: &crate::app::StandaloneFolder,
+        typed: &str,
+        inner_width: u16,
+    ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+        match folder {
             crate::app::StandaloneFolder::New => {
-                let typed = input.text.trim();
                 let root = self.engine.standalone_agents_root();
                 let folder_label = if typed.is_empty() {
                     format!("{}/\u{2026}", dux_core::home_path::shorten_home(&root))
@@ -12111,7 +12103,24 @@ impl App {
                     Vec::new(),
                 )
             }
+        }
+    }
+
+    /// The standalone-agent name field. A new folder's is followed by the folder
+    /// it names and a button on to the browser; a picked folder's says its default.
+    fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame<'_>) {
+        let PromptState::NameStandaloneAgent {
+            folder,
+            input,
+            focus,
+        } = &self.prompt
+        else {
+            return;
         };
+        let new_folder = *folder == crate::app::StandaloneFolder::New;
+        // The modal is 64 wide; its border takes one column each side.
+        let inner_width = 62;
+        let (above, below) = self.standalone_name_lines(folder, input.text.trim(), inner_width);
         let field_focused = *focus == crate::app::NameStandaloneAgentFocus::Input;
         let above_height = u16::try_from(above.len()).unwrap_or(u16::MAX);
         let below_height = u16::try_from(below.len()).unwrap_or(u16::MAX);

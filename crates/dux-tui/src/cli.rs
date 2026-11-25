@@ -1098,7 +1098,19 @@ pub(crate) fn restore_docs_preview(
 // Agent data reset
 // ---------------------------------------------------------------------------
 
-fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
+/// What the reset reads from the session database before deleting anything.
+struct ResetRecords {
+    occupied_folders: Vec<PathBuf>,
+    recorded_folders: Vec<PathBuf>,
+    sessions: Vec<dux_core::model::AgentSession>,
+    recorded: Vec<dux_core::process_sessions::StoredSession>,
+    kept_with_leftovers: Vec<(PathBuf, dux_core::leftover_folders::LeftoverFolderRecord)>,
+    histories: BranchHistories,
+    project_records: Vec<(String, String)>,
+    pending_folders: Vec<dux_core::storage::PendingFolderRemoval>,
+}
+
+fn load_reset_records(paths: &DuxPaths) -> Result<ResetRecords> {
     // Folders a standalone agent occupies: the sweep of the whole worktrees
     // root below is otherwise indiscriminate, and nothing stops a user pointing
     // a standalone agent at a directory inside dux's managed area, which dux
@@ -1107,7 +1119,6 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     // The same folders as recorded (never resolved), for the link rule: a
     // link in the root is kept when one of these is at or through it.
     let mut recorded_folders: Vec<PathBuf> = Vec::new();
-    let seen_welcome = last_seen_welcome(paths);
     let mut sessions: Vec<dux_core::model::AgentSession> = Vec::new();
     // What dux recorded starting, this boot only: a session from another boot
     // is void.
@@ -1186,6 +1197,30 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
             .filter(|entry| entry.session.is_this_boot())
             .collect();
     }
+    Ok(ResetRecords {
+        occupied_folders,
+        recorded_folders,
+        sessions,
+        recorded,
+        kept_with_leftovers,
+        histories,
+        project_records,
+        pending_folders,
+    })
+}
+
+fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
+    let seen_welcome = last_seen_welcome(paths);
+    let ResetRecords {
+        occupied_folders,
+        recorded_folders,
+        sessions,
+        recorded,
+        kept_with_leftovers,
+        histories,
+        project_records,
+        pending_folders,
+    } = load_reset_records(paths)?;
 
     // The folders dux created for standalone agents go with the reset, as the
     // worktrees it created do; a folder the user chose stays.

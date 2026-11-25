@@ -410,23 +410,6 @@ pub fn protected_branches_prose(branches: &[&str]) -> Prose {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn no_offered_branch_leaves_nothing_to_say() {
-        let none = Ok(crate::git::UnpushedCommits {
-            count: 0,
-            has_remote_refs: true,
-        });
-        assert!(matches!(
-            branches_checked_prose(None, &none, &[], &none, &none),
-            Ok(None)
-        ));
-    }
-}
-
 /// The folder box's label for an agent whose folder dux created, naming the
 /// folder a tick deletes.
 pub fn folder_box_label_prose(folder_label: &str) -> Prose {
@@ -452,5 +435,22 @@ pub fn folder_files_prose(files: &crate::agent_folders::FolderFiles) -> Option<P
             "dux could not count the files in the folder. Everything in it will be deleted \
              with it.",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_offered_branch_leaves_nothing_to_say() {
+        let none = Ok(crate::git::UnpushedCommits {
+            count: 0,
+            has_remote_refs: true,
+        });
+        assert!(matches!(
+            branches_checked_prose(None, &none, &[], &none, &none),
+            Ok(None)
+        ));
     }
 }

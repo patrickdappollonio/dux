@@ -151,8 +151,8 @@ impl Engine {
     /// The deletion of `session_id`'s record has ended: when the record is
     /// gone the held removal waits only for the agent's processes; when it is
     /// not, the removal is let go and the folder stays with its agent.
-    pub(crate) fn settle_held_folder_removal(&mut self, session_id: &str, record_gone: bool) {
-        if !record_gone {
+    pub(crate) fn settle_held_folder_removal(&mut self, session_id: &str, record: RecordFate) {
+        if record == RecordFate::Kept {
             self.pending_folder_removals
                 .retain(|group| group.record_gone || group.removal.session_id != session_id);
             return;
@@ -314,6 +314,15 @@ impl Engine {
             }
         }
     }
+}
+
+/// What became of an agent's record when its deletion ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordFate {
+    /// The record is gone.
+    Gone,
+    /// The record stays.
+    Kept,
 }
 
 /// Whether a removal is finished at a start, after an earlier run of dux

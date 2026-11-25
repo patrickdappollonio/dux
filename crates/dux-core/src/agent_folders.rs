@@ -375,6 +375,15 @@ pub struct FolderKept {
     pub reason: StatusText,
 }
 
+/// Whether a deletion removed anything before it stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeletionProgress {
+    /// Nothing was deleted.
+    Untouched,
+    /// Something was deleted.
+    Partial,
+}
+
 impl FolderKept {
     /// Kept whole, for `reason`.
     pub fn untouched(reason: impl Into<StatusText>) -> Self {
@@ -389,9 +398,10 @@ impl FolderKept {
     fn stopped(
         folder: &Path,
         stop: &Stopped,
-        deleted_some: bool,
+        progress: DeletionProgress,
         unrestored: &[(PathBuf, rustix::io::Errno)],
     ) -> Self {
+        let deleted_some = progress == DeletionProgress::Partial;
         let why = match stop.why {
             StopWhy::Mounted => {
                 "another filesystem is mounted there, and dux never deletes inside one".to_string()
@@ -498,7 +508,11 @@ fn remove_created_folder_with(
         FolderKept::stopped(
             path,
             &stop,
-            walk.deleted_some.get(),
+            if walk.deleted_some.get() {
+                DeletionProgress::Partial
+            } else {
+                DeletionProgress::Untouched
+            },
             &walk.unrestored.borrow(),
         )
     };
@@ -568,7 +582,7 @@ enum Mount {
     Id(u64),
     /// Only whether a filesystem is mounted on the directory itself.
     #[cfg(target_os = "linux")]
-    MountPoint(bool),
+    OnMountPoint(bool),
     /// Nothing, so whether a filesystem is mounted on it cannot be told.
     #[cfg(target_os = "linux")]
     Unknown,
@@ -588,7 +602,7 @@ impl Filesystem {
             #[cfg(target_os = "linux")]
             (Mount::Id(id), Mount::Id(outer_id)) => Some(id == outer_id),
             #[cfg(target_os = "linux")]
-            (Mount::MountPoint(mounted), _) => Some(!mounted),
+            (Mount::OnMountPoint(mounted), _) => Some(!mounted),
             #[cfg(target_os = "linux")]
             _ => None,
             #[cfg(not(target_os = "linux"))]
@@ -647,7 +661,7 @@ fn mount_by_mountinfo(dir: &OwnedFd, mountinfo: Option<&str>) -> Mount {
     if !bytes.starts_with(b"/") || bytes.ends_with(b" (deleted)") {
         return Mount::Unknown;
     }
-    is_mount_point(mountinfo, bytes).map_or(Mount::Unknown, Mount::MountPoint)
+    is_mount_point(mountinfo, bytes).map_or(Mount::Unknown, Mount::OnMountPoint)
 }
 
 /// Whether `path` is a mount point in the `mountinfo` text; `None` when a
@@ -1037,9 +1051,8 @@ pub enum FolderFiles {
 pub fn count_folder_files(path: &Path) -> FolderFiles {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return FolderFiles::Unreadable,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return FolderFiles::Missing,
-        Err(_) => return FolderFiles::Unreadable,
+        Ok(_) | Err(_) => return FolderFiles::Unreadable,
     }
     let mut count = 0_u64;
     for entry in walkdir::WalkDir::new(path)
@@ -1149,7 +1162,7 @@ mod tests {
             Ok(Filesystem {
                 device: filesystem_of(dir)?.device,
                 mount: if mounted.iter().any(|m| m == at) {
-                    Mount::MountPoint(true)
+                    Mount::OnMountPoint(true)
                 } else {
                     mount
                 },
@@ -1167,7 +1180,7 @@ mod tests {
         let kept = remove_created_folder_with(
             &created.path,
             created.identity,
-            &answering(Mount::MountPoint(false), &["deep/mnt"]),
+            &answering(Mount::OnMountPoint(false), &["deep/mnt"]),
         )
         .unwrap_err();
         let text = kept.reason.message();
@@ -1184,7 +1197,7 @@ mod tests {
             remove_created_folder_with(
                 &created.path,
                 created.identity,
-                &answering(Mount::MountPoint(false), &[]),
+                &answering(Mount::OnMountPoint(false), &[]),
             ),
             Ok(RemovedFolder::Removed)
         );
@@ -1228,7 +1241,7 @@ mod tests {
                 mount: if at == Path::new("inside") {
                     Mount::Unknown
                 } else {
-                    Mount::MountPoint(false)
+                    Mount::OnMountPoint(false)
                 },
             })
         };
@@ -1277,11 +1290,11 @@ mod tests {
         std::fs::create_dir(&inside).unwrap();
         assert_eq!(
             mount_by_mountinfo(&open(&inside), Some(&mountinfo)),
-            Mount::MountPoint(false)
+            Mount::OnMountPoint(false)
         );
         assert_eq!(
             mount_by_mountinfo(&open(Path::new("/proc")), Some(&mountinfo)),
-            Mount::MountPoint(true)
+            Mount::OnMountPoint(true)
         );
         assert_eq!(mount_by_mountinfo(&open(&inside), None), Mount::Unknown);
     }
@@ -1748,8 +1761,8 @@ mod tests {
             inode: now.inode,
             ..created.identity
         };
-        let refused = refusal(&created.path, reused);
-        assert!(refused.contains(MARKER_FILE_NAME), "{refused}");
+        let message = refusal(&created.path, reused);
+        assert!(message.contains(MARKER_FILE_NAME), "{message}");
         assert!(created.path.join("someone-elses.txt").exists());
     }
 
@@ -1853,7 +1866,7 @@ mod tests {
                 at: PathBuf::from("a/b"),
                 why: StopWhy::Mounted,
             },
-            false,
+            DeletionProgress::Untouched,
             &[(PathBuf::from("a"), rustix::io::Errno::PERM)],
         )
         .reason;

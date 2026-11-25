@@ -663,6 +663,29 @@ impl SessionStore {
         Ok(())
     }
 
+    /// The folder dux created for a standalone agent, deleted with it and not yet removed.
+    fn migrate_pending_folder_removals_table(&self) -> Result<()> {
+        // A folder dux created for a standalone agent that was deleted with
+        // it, written in the same transaction that deletes the agent's record
+        // and cleared once the folder removal has ended either way, so a quit
+        // or a crash in between leaves something the next start finishes.
+        // Additive: existing databases start with zero rows.
+        self.conn.execute_batch(
+            r"
+            create table if not exists pending_folder_removals (
+                session_id text primary key,
+                label text not null,
+                folder_path text not null,
+                folder_device integer not null,
+                folder_inode integer not null,
+                folder_mark text,
+                created_at text not null
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
     /// The housekeeping tables: the changes revision, tabs, app state, pending removals and the process registry.
     fn migrate_housekeeping_tables(&self) -> Result<()> {
         // Per-session monotonic changed-files revision counter (server mode).
@@ -736,24 +759,7 @@ impl SessionStore {
             );
             ",
         )?;
-        // A folder dux created for a standalone agent that was deleted with
-        // it, written in the same transaction that deletes the agent's record
-        // and cleared once the folder removal has ended either way, so a quit
-        // or a crash in between leaves something the next start finishes.
-        // Additive: existing databases start with zero rows.
-        self.conn.execute_batch(
-            r"
-            create table if not exists pending_folder_removals (
-                session_id text primary key,
-                label text not null,
-                folder_path text not null,
-                folder_device integer not null,
-                folder_inode integer not null,
-                folder_mark text,
-                created_at text not null
-            );
-            ",
-        )?;
+        self.migrate_pending_folder_removals_table()?;
         // What was running in those sessions when the delete began, by
         // identity: the only evidence a later start may act on for a session
         // whose leader is gone.
@@ -2235,13 +2241,9 @@ impl SessionStore {
             let device: i64 = row.get(3)?;
             let inode: i64 = row.get(4)?;
             let mark: Option<String> = row.get(5)?;
-            #[expect(
-                clippy::cast_sign_loss,
-                reason = "the identity was stored bit for bit from the same unsigned values"
-            )]
             let identity = crate::model::DirectoryIdentity {
-                device: device as u64,
-                inode: inode as u64,
+                device: device.cast_unsigned(),
+                inode: inode.cast_unsigned(),
                 mark: mark.as_deref().and_then(crate::model::FolderMark::from_hex),
             };
             Ok(PendingFolderRemoval {
@@ -3320,25 +3322,12 @@ impl SessionStore {
         let initial_branch = managed.map_or_default(|m| m.initial_branch.as_str());
         let worktree_path = managed.map_or_default(|m| m.worktree_path.as_str());
         let branch_provenance = managed.map_or("unknown", |m| m.branch_provenance.as_str());
-        let (folder_origin, folder_identity) = match &session.workspace {
-            crate::model::AgentWorkspace::Managed(_) => ("chosen", None),
-            crate::model::AgentWorkspace::Folder(folder) => match folder.origin {
-                crate::model::FolderOrigin::Chosen => ("chosen", None),
-                crate::model::FolderOrigin::CreatedByDux(identity) => ("created", Some(identity)),
-            },
-        };
-        // SQLite integers are signed; the identity is stored bit for bit.
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "a device or inode number is stored bit for bit and read back the same way"
-        )]
-        let (folder_device, folder_inode) = (
-            folder_identity.map(|identity| identity.device as i64),
-            folder_identity.map(|identity| identity.inode as i64),
-        );
-        let folder_mark = folder_identity
-            .and_then(|identity| identity.mark)
-            .map(crate::model::FolderMark::to_hex);
+        let FolderColumns {
+            origin: folder_origin,
+            device: folder_device,
+            inode: folder_inode,
+            mark: folder_mark,
+        } = FolderColumns::of(&session.workspace);
         // UPDATE first: existing sessions are re-upserted constantly (status
         // changes, provider starts), and that hot path must not pay the
         // min(sort_order) placement query below. Three columns are therefore
@@ -4096,6 +4085,35 @@ fn test_tab(id: &str, session_id: &str, sort_order: i64) -> crate::model::AgentT
     }
 }
 
+/// The columns a folder's origin and identity are stored in.
+struct FolderColumns {
+    origin: &'static str,
+    device: Option<i64>,
+    inode: Option<i64>,
+    mark: Option<String>,
+}
+
+impl FolderColumns {
+    fn of(workspace: &crate::model::AgentWorkspace) -> Self {
+        let (origin, identity) = match workspace {
+            crate::model::AgentWorkspace::Managed(_) => ("chosen", None),
+            crate::model::AgentWorkspace::Folder(folder) => match folder.origin {
+                crate::model::FolderOrigin::Chosen => ("chosen", None),
+                crate::model::FolderOrigin::CreatedByDux(identity) => ("created", Some(identity)),
+            },
+        };
+        // SQLite integers are signed; the identity is stored bit for bit.
+        Self {
+            origin,
+            device: identity.map(|identity| identity.device.cast_signed()),
+            inode: identity.map(|identity| identity.inode.cast_signed()),
+            mark: identity
+                .and_then(|identity| identity.mark)
+                .map(crate::model::FolderMark::to_hex),
+        }
+    }
+}
+
 /// Write a pending folder removal inside the transaction that deletes its
 /// agent's record. Replaces an earlier row for the same agent.
 fn insert_pending_folder_removal(
@@ -4103,11 +4121,10 @@ fn insert_pending_folder_removal(
     folder: &PendingFolderRemoval,
 ) -> Result<()> {
     // SQLite integers are signed; the identity is stored bit for bit.
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "a device or inode number is stored bit for bit and read back the same way"
-    )]
-    let (device, inode) = (folder.identity.device as i64, folder.identity.inode as i64);
+    let (device, inode) = (
+        folder.identity.device.cast_signed(),
+        folder.identity.inode.cast_signed(),
+    );
     tx.execute(
         "insert or replace into pending_folder_removals \
          (session_id, label, folder_path, folder_device, folder_inode, folder_mark, created_at) \
@@ -4137,14 +4154,10 @@ fn folder_origin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::mo
     let mark: Option<String> = row.get(23)?;
     let mark = mark.as_deref().and_then(crate::model::FolderMark::from_hex);
     Ok(match (origin.as_deref(), device, inode) {
-        #[expect(
-            clippy::cast_sign_loss,
-            reason = "the identity was stored bit for bit from the same unsigned values"
-        )]
         (Some("created"), Some(device), Some(inode)) => {
             crate::model::FolderOrigin::CreatedByDux(crate::model::DirectoryIdentity {
-                device: device as u64,
-                inode: inode as u64,
+                device: device.cast_unsigned(),
+                inode: inode.cast_unsigned(),
                 mark,
             })
         }

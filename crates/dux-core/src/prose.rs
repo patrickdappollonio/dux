@@ -398,6 +398,32 @@ mod tests {
         "delete_folder_files",
     ];
 
+    fn other_branches_warning_case(args: &Value) -> Prose {
+        let others: Vec<(String, crate::branch_history::BranchOrigin)> = args["others"]
+            .as_array()
+            .expect("others")
+            .iter()
+            .map(|other| {
+                (
+                    other["name"].as_str().expect("name").to_string(),
+                    fixture_origin(&other["origin"]),
+                )
+            })
+            .collect();
+        let others: Vec<(&str, crate::branch_history::BranchOrigin)> = others
+            .iter()
+            .map(|(name, origin)| (name.as_str(), *origin))
+            .collect();
+        crate::delete_agent_prose::other_branches_warning_prose(
+            &others,
+            if args["ticked"].as_bool().expect("ticked") {
+                crate::delete_agent_prose::BoxState::Ticked
+            } else {
+                crate::delete_agent_prose::BoxState::Unticked
+            },
+        )
+    }
+
     fn build_delete_agent_box(sentence: &str, args: &Value) -> Prose {
         let s = |key: &str| args[key].as_str().expect(key).to_string();
         match sentence {
@@ -421,31 +447,7 @@ mod tests {
                 let lost = fixture_unpushed(&args["lost"]).expect("a count or a failure");
                 crate::delete_agent_prose::branch_loss_prose(&branches, &lost).unwrap_or_default()
             }
-            "delete_other_branches_warning" => {
-                let others: Vec<(String, crate::branch_history::BranchOrigin)> = args["others"]
-                    .as_array()
-                    .expect("others")
-                    .iter()
-                    .map(|other| {
-                        (
-                            other["name"].as_str().expect("name").to_string(),
-                            fixture_origin(&other["origin"]),
-                        )
-                    })
-                    .collect();
-                let others: Vec<(&str, crate::branch_history::BranchOrigin)> = others
-                    .iter()
-                    .map(|(name, origin)| (name.as_str(), *origin))
-                    .collect();
-                crate::delete_agent_prose::other_branches_warning_prose(
-                    &others,
-                    if args["ticked"].as_bool().expect("ticked") {
-                        crate::delete_agent_prose::BoxState::Ticked
-                    } else {
-                        crate::delete_agent_prose::BoxState::Unticked
-                    },
-                )
-            }
+            "delete_other_branches_warning" => other_branches_warning_case(args),
             "delete_branches_checking" => crate::delete_agent_prose::branches_checking_prose(),
             "delete_worktree_files_checking" => {
                 crate::delete_agent_prose::worktree_files_checking_prose(&s("agent"))

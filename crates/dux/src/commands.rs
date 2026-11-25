@@ -403,6 +403,10 @@ pub(crate) struct GuardedChangeFlags {
 /// request says where the agent comes from. A pull request may also come with
 /// a project, which then names where it goes.
 #[derive(Args, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches, each its own flag"
+)]
 #[command(group(
     clap::ArgGroup::new("source")
         .args(["project", "fork", "standalone", "new_folder", "from_pr"])
@@ -460,7 +464,7 @@ pub(crate) struct AddAgentArgs {
     pub standalone: Option<String>,
     /// Create a standalone agent in a new folder dux creates for it, named
     /// after --name, in the standalone agents folder ([defaults]
-    /// standalone_agents_directory). A name whose folder is already there is
+    /// `standalone_agents_directory`). A name whose folder is already there is
     /// refused, except a folder dux created for a start that was interrupted:
     /// while it holds only its marker file and nothing uses it, it is used
     /// again. Needs --name.
