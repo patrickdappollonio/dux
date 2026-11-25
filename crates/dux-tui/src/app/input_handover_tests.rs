@@ -1165,6 +1165,38 @@ mod dialogs_and_take_over {
         assert_every_cut_matches(MAXIMIZED, &pieces.concat(), &want);
     }
 
+    /// The macro bar key with nothing to show ends the maximized pane's batch
+    /// and hands the rest of its read on; bytes the pane reads after that
+    /// read, here because the typing is longer than one read, reach the
+    /// program after the rest that was handed on.
+    #[test]
+    fn keys_in_the_read_after_one_the_macro_bar_key_ended_reach_the_program_after_it() {
+        let macro_bar = default_key(Action::OpenMacroBar);
+        let long: Vec<u8> = (0..2 * 4096)
+            .map(|i| b'a' + u8::try_from(i % 26).expect("a letter"))
+            .collect();
+        let pieces: &[&[u8]] = &[b"ab", &macro_bar, &long];
+        let typed = [&b"ab"[..], &long].concat();
+        for (how, outcome) in [
+            ("typed one at a time", paced(MAXIMIZED, pieces)),
+            ("in one write", burst(MAXIMIZED, &pieces.concat())),
+        ] {
+            let received = outcome.received.as_bytes();
+            let first_difference = received
+                .iter()
+                .zip(&typed)
+                .position(|(got, sent)| got != sent);
+            assert!(
+                received == typed,
+                "{how}: the program received {} of {} bytes, the first out of place at {:?}",
+                received.len(),
+                typed.len(),
+                first_difference
+            );
+            assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent, "{how}");
+        }
+    }
+
     /// With the take-over card up in fullscreen, typing reaches nothing until
     /// the take-over key; what follows it in the same read reaches the program
     /// once the claim has landed, as it does typed a moment later.
