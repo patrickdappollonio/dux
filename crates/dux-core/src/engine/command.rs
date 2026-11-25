@@ -4406,8 +4406,8 @@ mod tests {
         );
     }
 
-    /// Kills the old blanket dirty gate: a dirty tracked file no longer blocks
-    /// the refresh, and git fast-forwards when nothing conflicts.
+    /// A dirty tracked file does not block the refresh: git fast-forwards when
+    /// nothing conflicts.
     #[test]
     fn project_refresh_proceeds_with_dirty_checkout() {
         let repo = refresh_test_repo();

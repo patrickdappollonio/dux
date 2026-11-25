@@ -1,5 +1,5 @@
-//! A reaped child's group is judged against members whose record
-//! may still be in flight.
+//! A reaped child's group is judged against members whose record may still
+//! be in flight.
 use crate::process_sessions::{AgentProcessRegistry, process_start};
 use crate::pty::PtyClient;
 use std::time::{Duration, Instant};
@@ -78,8 +78,10 @@ fn control_with_the_record_landed_the_drop_kills_the_group() {
     );
 }
 
+/// A drop right after the reap, before the leader-exit record has landed,
+/// still signals the reaped child's group.
 #[test]
-fn a_drop_right_after_the_reap_leaves_the_groups_job_running() {
+fn a_drop_right_after_the_reap_kills_the_groups_job() {
     let (job, survived) = run(RecordWait::DropAtOnce);
     assert!(
         !survived,

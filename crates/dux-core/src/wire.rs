@@ -1264,9 +1264,10 @@ pub struct WireStatus {
     /// [`crate::engine::StatusUpdate`], which both surfaces read.
     ///
     /// Reserve it for an INFO whose outcome the user is already looking straight
-    /// at, and say at the site which always-confirm case the message fails: a pane that
-    /// relaunches and streams, a whole list reordering, a whole screen
-    /// recolouring, a full-screen view opening or closing. A destructive act, a
+    /// at, and say at the site which unmistakable change makes the message
+    /// redundant: a pane that relaunches and streams, a whole list reordering,
+    /// a whole screen recolouring, a full-screen view opening or closing. A
+    /// destructive act, a
     /// change landing on a small indicator, an action that did nothing because
     /// the state already held, and an action whose effect can look like a no-op
     /// are always confirmed. Only an INFO is ever withheld: a warning, an error

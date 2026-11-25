@@ -1002,14 +1002,14 @@ mod tests {
 
     #[test]
     fn stripping_markup_is_linear_not_quadratic() {
-        // A run of unmatched `[` is the adversarial shape: the old code rescanned
-        // to the end of the string for every one of them. Measured at 64,000
-        // characters in an UNOPTIMIZED test build (which is how this test runs):
-        // 27.7s before the forward cursor, 2.8ms after; 1,000,000 characters now
-        // take 45ms. In release it is 0.45ms and 7ms. The 300ms bound is ~100x
-        // the measured linear time (generous enough not to flake on slow CI)
-        // and ~90x under the old quadratic time, which blew past it by four
-        // orders of magnitude.
+        // A run of unmatched `[` is the adversarial shape: a stripper that
+        // rescans to the end of the string for every one of them is quadratic.
+        // Measured at 64,000 characters in an UNOPTIMIZED test build (which is
+        // how this test runs): 27.7s for a rescanning stripper, 2.8ms with the
+        // forward cursor; 1,000,000 characters take 45ms. In release it is
+        // 0.45ms and 7ms. The 300ms bound is ~100x the measured linear time
+        // (generous enough not to flake on slow CI) and ~90x under the
+        // quadratic time, which blows past it by four orders of magnitude.
         let input = "[".repeat(64_000);
         let start = std::time::Instant::now();
         let out = strip_inline_markup(&input);

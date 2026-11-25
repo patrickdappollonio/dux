@@ -1,4 +1,6 @@
-//! Worktree removal and leaderless jobs: what a deleted standalone agent or a closed terminal left running is ended first, and a refusal leaves nothing claimed.
+//! Worktree removal and leaderless jobs: a job a closed terminal left running
+//! is ended before its worktree goes, a standalone agent's jobs are never
+//! ended, and a refusal ends and claims nothing.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -107,11 +109,10 @@ fn register_leaderless(engine: &Engine, owner: &str, session: ProcessSession, fo
 }
 
 /// The worktree manager's removal (the web route sends any path it is given)
-/// ends every process dux registered in the requested folder BEFORE it decides
-/// whether the folder is a managed worktree at all. A request naming the
-/// project's own checkout, where project terminals start, is answered "not a
-/// managed worktree" and nothing is removed, but a job a closed project
-/// terminal left running there (a dev server) has already been killed.
+/// decides whether the folder is a managed worktree BEFORE it ends anything
+/// registered there. A request naming the project's own checkout, where
+/// project terminals start, is answered "not a managed worktree", and a job a
+/// closed project terminal left running there (a dev server) keeps running.
 #[test]
 fn the_manager_kills_nothing_for_a_folder_it_then_refuses_as_not_managed() {
     let (mut engine, tmp) = test_engine();
@@ -151,8 +152,8 @@ fn the_manager_kills_nothing_for_a_folder_it_then_refuses_as_not_managed() {
 /// folder inside another agent's worktree and left a job running there; the
 /// user deleted the standalone agent (its record only, which never touches its
 /// folder or what runs in it). Deleting the managed agent with its worktree
-/// then ends that job: the standalone agent's sessions went to the "retired"
-/// list, which every later removal of an enclosing folder purges.
+/// then leaves that job running and keeps the worktree around it, although
+/// the standalone agent whose sessions they are has been deleted.
 #[test]
 fn removing_a_worktree_never_ends_what_a_deleted_standalone_agent_left_running() {
     let (mut engine, tmp) = test_engine();
@@ -224,12 +225,10 @@ fn removing_a_worktree_never_ends_what_a_deleted_standalone_agent_left_running()
 /// A removal finished at the next start (after a crash or a forced quit) must
 /// end what dux started in the worktree, as the same removal would have in the
 /// run that accepted it. The agent's closed terminal left a job running in the
-/// worktree. The delete records the request with a snapshot of the agent's
-/// processes, but that snapshot is taken only from sessions whose leader is
-/// alive: the job, whose leader is gone, is known to that run solely through
-/// the in-memory survivors, which are never written down. The next start sees
-/// a leaderless session with no recorded members, ends nothing, and git
-/// removes the worktree out from under the still-running job.
+/// worktree. The job's leader is gone, so the snapshot of the agent's
+/// processes the delete writes down must include the leaderless session's
+/// recorded survivors; otherwise the next start would see a session with no
+/// members, end nothing, and let git remove the worktree under the job.
 #[test]
 fn a_removal_finished_at_the_next_start_ends_a_closed_terminals_job_first() {
     let (mut first, tmp) = test_engine();

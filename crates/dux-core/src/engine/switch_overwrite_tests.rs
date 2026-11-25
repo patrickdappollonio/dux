@@ -1,4 +1,5 @@
-//! A switch or pull never overwrites a file inside a standalone agent's folder or uncommitted work in a nested project.
+//! A switch or pull never overwrites a file inside a standalone agent's folder
+//! or uncommitted work in a nested project.
 
 use std::path::Path;
 
@@ -43,12 +44,12 @@ fn fixture(tmp: &Path) -> std::path::PathBuf {
 }
 
 /// A standalone agent works in `repo/scratch` (ignored by the project). A
-/// branch switch whose commit tracks `scratch/notes.txt` makes git OVERWRITE
-/// the agent's own ignored `notes.txt` inside the folder: the move check only
-/// asks about folders git would remove, never about files it would replace
-/// inside a folder something lives in.
+/// branch switch whose commit tracks `scratch/notes.txt` would make git
+/// OVERWRITE the agent's own ignored `notes.txt`, so the move check asks about
+/// files git would replace inside a folder something lives in, not only about
+/// folders it would remove, and the file is kept.
 #[test]
-fn switch_overwrites_a_file_inside_a_standalone_agents_folder() {
+fn switch_never_overwrites_a_file_inside_a_standalone_agents_folder() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let folder = repo.join("scratch");
@@ -78,11 +79,10 @@ fn switch_overwrites_a_file_inside_a_standalone_agents_folder() {
 }
 
 /// Another project's repository lives at `repo/scratch` with uncommitted
-/// work in `notes.txt`. A switch whose commit tracks `scratch/notes.txt`
-/// makes git overwrite that file, and the other project's uncommitted work is
-/// gone.
+/// work in `notes.txt`. A switch whose commit tracks `scratch/notes.txt` keeps
+/// that uncommitted work rather than letting git overwrite the file.
 #[test]
-fn switch_overwrites_uncommitted_work_in_a_nested_project() {
+fn switch_never_overwrites_uncommitted_work_in_a_nested_project() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let other = repo.join("scratch");
@@ -112,11 +112,10 @@ fn switch_overwrites_uncommitted_work_in_a_nested_project() {
 }
 
 /// Switching a project to a branch only origin has, when git itself refuses
-/// the switch (a local change to a file the branch changes), leaves behind
-/// the local branch dux created for it: only a refusal by the move check
-/// removes it.
+/// the switch (a local change to a file the branch changes), removes the local
+/// branch dux created for it, just as a refusal by the move check does.
 #[test]
-fn switch_git_refuses_leaves_the_branch_it_created() {
+fn switch_git_refuses_removes_the_branch_it_created() {
     let (mut engine, tmp) = test_engine();
     let upstream = tmp.path().join("upstream");
     init(&upstream);
@@ -315,7 +314,7 @@ fn a_pull_never_replaces_a_standalone_agents_file_with_a_folder() {
 }
 
 /// The checkout's own project (and agent) contain every path in it and do not
-/// count: an ignored file nothing else lives around is overwritten as before.
+/// count: an ignored file nothing else lives around is overwritten.
 #[test]
 fn a_pull_still_overwrites_an_ignored_file_only_the_checkout_itself_holds() {
     let (mut engine, tmp) = test_engine();

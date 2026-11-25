@@ -1,4 +1,5 @@
-//! Worktree removal never removes a folder a dormant agent's worktree lives in, and never ends an unrelated program that reused a session number.
+//! Worktree removal never removes a folder a dormant agent's worktree lives
+//! in, and never ends an unrelated program that reused a session number.
 
 use std::path::{Path, PathBuf};
 
@@ -56,12 +57,11 @@ fn agent_worktree(
 /// branches, so this is what an ordinary sequence produces: agent `a` is
 /// renamed to `b` (its folder keeps the name `a`), a new agent `a/c` is
 /// created (its worktree lands at `.../a/c`, inside the first), and the first
-/// agent is deleted keeping its worktree. Removing that leftover from the
-/// worktree manager then deletes the dormant agent's worktree with it, since
-/// `git worktree remove --force` deletes everything under the folder. Every
-/// other occupancy check in the branch asks "in or under"; the manager's
-/// "attached" check alone still asks "equal", and the PTY check only sees
-/// running agents.
+/// agent is deleted keeping its worktree. The worktree manager refuses to
+/// remove that leftover, because `git worktree remove --force` deletes
+/// everything under the folder: its attached check asks whether an agent's
+/// worktree is in or under the folder, not equal to it, and covers dormant
+/// agents as well as running ones.
 #[test]
 fn the_manager_never_removes_a_folder_a_dormant_agents_worktree_lives_in() {
     let (mut engine, tmp) = test_engine();
@@ -100,11 +100,10 @@ fn the_manager_never_removes_a_folder_a_dormant_agents_worktree_lives_in() {
 /// with its worktree kept. Its leader exited long ago and the number was
 /// reused by an unrelated program: a session leader that started a
 /// background job and exited, leaving the job in a leaderless session. A
-/// later removal of that folder (the worktree manager here) takes every
-/// leaderless session with a recorded number for the original one, whatever
-/// its members' start times say, so the unrelated program, started an hour
-/// after the recorded session, is killed. The resumed-removal path refuses
-/// that without identities; the this-run path has no such guard.
+/// later removal of that folder (the worktree manager here) must not take a
+/// leaderless session with a recorded number for the original one when its
+/// members started after the recorded session, so the unrelated program,
+/// started an hour later, survives.
 #[test]
 fn a_removal_this_run_does_not_kill_an_unrelated_program_that_reused_a_session_number() {
     let (mut engine, tmp) = test_engine();

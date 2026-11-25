@@ -2840,8 +2840,9 @@ mod tests {
     fn an_exited_but_unreaped_process_is_gone_rather_than_alive() {
         // A zombie: the process has exited and nobody has reaped it, so the pid
         // is still allocated (it is holding an exit status for its parent) but
-        // there is nothing behind it. /proc/<pid>/cwd and /proc/<pid>/ns/mnt both
-        // answer ENOENT while kill(pid, 0) SUCCEEDS.
+        // there is nothing behind it. On the Linux kernel this was measured on,
+        // /proc/<pid>/cwd and /proc/<pid>/ns/mnt both answer ENOENT while
+        // kill(pid, 0) SUCCEEDS.
         //
         // So signal 0 cannot tell "gone" from "alive but not ours" here, and a
         // finished process must not be classified CwdProbe::Failed, which refuses

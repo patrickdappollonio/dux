@@ -1,4 +1,5 @@
-//! Discarding a deleted tracked file keeps a standalone agent's folder or a project's repository standing in its place.
+//! Discarding a deleted tracked file keeps a standalone agent's folder or a
+//! project's repository standing in its place.
 
 use std::path::{Path, PathBuf};
 
@@ -48,10 +49,9 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
 /// The tracked file `notes` has been replaced in the working tree by a folder
 /// of the same name, and a standalone agent works in a folder inside it. git
 /// lists only ` D notes` (a tracked file deleted), so the changes pane offers
-/// "discard" as restoring one file from HEAD. That discard runs
-/// `git checkout -- notes`, which removes the folder in the way recursively,
-/// so the standalone agent's folder (and everything else in `notes/`) is
-/// deleted with no claim, no occupancy question and no clearance.
+/// the discard as restoring one file from HEAD; `git checkout -- notes` would
+/// remove the folder in the way recursively, so the discard must not delete
+/// the standalone agent's folder under it.
 #[test]
 fn discarding_a_deleted_tracked_file_keeps_a_standalone_agents_folder_in_its_place() {
     let (mut engine, tmp) = test_engine();
@@ -93,8 +93,8 @@ fn discarding_a_deleted_tracked_file_keeps_a_standalone_agents_folder_in_its_pla
 }
 
 /// The same, with a dux project's repository (a nested clone) where the
-/// tracked file was: discarding the "deleted file" deletes the repository,
-/// history included.
+/// tracked file was: discarding the deleted file keeps the repository and its
+/// history.
 #[test]
 fn discarding_a_deleted_tracked_file_keeps_a_projects_repository_in_its_place() {
     let (mut engine, tmp) = test_engine();

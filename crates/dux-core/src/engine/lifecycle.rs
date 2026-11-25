@@ -587,9 +587,8 @@ pub fn detached_agent_notice(pruned: &PrunedPty, remedy: &str) -> crate::status_
 ///
 /// Shares its head with [`detached_agent_notice`] rather than writing its own:
 /// the two surfaces must word this exit the same way, naming the agent and what
-/// survived it. A refused resume
-/// still wins, because what the provider said is the more useful sentence and
-/// the terminal is beside the point there.
+/// survived it. A refused resume still wins, because what the provider said is
+/// the more useful sentence and the terminal is beside the point there.
 pub fn agent_exit_with_companion_notice(
     pruned: &PrunedPty,
     remedy: &str,

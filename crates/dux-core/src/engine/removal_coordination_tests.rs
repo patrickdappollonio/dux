@@ -1,4 +1,5 @@
-//! Removal coordination: what the manager, the delete paths and new starts refuse while a worktree is being removed.
+//! Removal coordination: what the manager, the delete paths and new starts
+//! refuse while a worktree is being removed.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -60,10 +61,9 @@ fn registered_worktrees(repo: &Path) -> Vec<PathBuf> {
 
 /// An agent being created in a NEW worktree is "an agent being created on
 /// it": while its startup command provisions the folder, the worktree manager
-/// lists the folder and must refuse to remove it, judged from live state.
-/// At the tip only an agent adopting an EXISTING worktree registers in the
-/// registry, so the manager admits the removal and `git worktree remove
-/// --force` runs under the create.
+/// lists the folder and must refuse to remove it, judged from live state, so
+/// a create into a new worktree registers in the registry as well as one
+/// adopting an existing worktree.
 #[test]
 fn the_manager_refuses_a_worktree_a_new_agent_is_being_created_in() {
     let (mut engine, tmp) = test_engine();
@@ -225,11 +225,11 @@ fn the_manager_does_not_remove_a_worktree_a_stopping_agent_still_runs_in() {
 /// "inline" because the other is still its sibling, and the second then
 /// removes the worktree. That removal must wait for EVERY process still
 /// running in the folder, not only its own agent's: here the first agent's
-/// process is still in its grace period when `git worktree remove --force`
-/// runs. (The process ignores SIGHUP as well as SIGTERM, and the delete waits
-/// until its trap is installed: closing a PTY sends both signals, so a process
-/// that only ignored SIGTERM, or had not set its trap yet, would be gone at
-/// once and there would be nothing left to wait for.)
+/// process is still in its grace period, so `git worktree remove --force`
+/// must not run yet. (The process ignores SIGHUP as well as SIGTERM, and the
+/// delete waits until its trap is installed: closing a PTY sends both signals,
+/// so a process that only ignored SIGTERM, or had not set its trap yet, would
+/// be gone at once and there would be nothing left to wait for.)
 #[test]
 fn a_project_delete_waits_for_every_agent_process_in_a_shared_worktree() {
     let (mut engine, tmp) = test_engine();
@@ -309,8 +309,8 @@ fn a_project_delete_waits_for_every_agent_process_in_a_shared_worktree() {
 /// A deleted agent's worktree removal is waiting (here for a pull). Nothing
 /// new may start in the folder once its removal has begun; in particular dux
 /// never removes a folder a standalone agent runs in. A standalone agent
-/// created in that folder during the wait is neither refused nor seen by the
-/// removal, which then force-removes the folder out from under it.
+/// created in that folder during the wait is either refused or seen by the
+/// removal, which then keeps the folder.
 #[test]
 fn a_standalone_agent_created_in_a_folder_being_removed_does_not_lose_its_folder() {
     let (mut engine, tmp) = test_engine();

@@ -352,6 +352,7 @@ fn write_target(path: &Path) -> Result<PathBuf> {
 /// # Migration lock
 ///
 /// This function is intentionally `#[deprecated]` so that any new unrouted caller
+/// fails `cargo clippy --all-targets --all-features -- -D warnings`. This is a
 /// regression guard: all runtime config writes must go through `ConfigWriteQueue`.
 /// Legitimate sync-direct callers (boot, first-creation, `config regenerate`,
 /// recover, bootstrap project-sync) silence the lint with `#[expect(deprecated)]`

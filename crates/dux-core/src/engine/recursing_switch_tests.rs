@@ -1,4 +1,5 @@
-//! A switch never recurses into submodules under a global setting, and never deletes a standalone folder inside or at a submodule.
+//! A switch never recurses into submodules under a global setting, and never
+//! deletes a standalone folder inside or at a submodule.
 
 use std::path::Path;
 
@@ -64,12 +65,11 @@ fn fixture(tmp: &Path) -> std::path::PathBuf {
 }
 
 /// A standalone agent works in `repo/sub/scratch`, a folder the submodule
-/// ignores. Switching the project to `bumped` moves the submodule (git
-/// recurses because of `submodule.recurse`), and the submodule's new commit
-/// tracks a file at `scratch`, so git deletes the agent's folder. The move
-/// check never looks inside a submodule, so dux lets it happen.
+/// ignores. A recursing switch to `bumped` (git recurses because of
+/// `submodule.recurse`) would move the submodule to a commit that tracks a
+/// file at `scratch` and delete the agent's folder, so the switch keeps it.
 #[test]
-fn recursing_switch_deletes_a_standalone_folder_inside_a_submodule() {
+fn recursing_switch_keeps_a_standalone_folder_inside_a_submodule() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let folder = repo.join("sub").join("scratch");
@@ -102,11 +102,12 @@ fn recursing_switch_deletes_a_standalone_folder_inside_a_submodule() {
 }
 
 /// A standalone agent works in the submodule `repo/sub` itself (a repository
-/// of its own). Switching the project to `nosub`, where the submodule does
-/// not exist, makes git (recursing) delete the submodule's working tree, the
-/// agent's whole folder with it. The move check skips deleted entries.
+/// of its own). A recursing switch to `nosub`, where the submodule does not
+/// exist, would delete the submodule's working tree and the agent's whole
+/// folder with it, so the move check covers deleted entries and the folder
+/// stays.
 #[test]
-fn recursing_switch_deletes_a_standalone_folder_that_is_a_submodule() {
+fn recursing_switch_keeps_a_standalone_folder_that_is_a_submodule() {
     let (mut engine, tmp) = test_engine();
     let repo = fixture(tmp.path());
     let folder = repo.join("sub");
@@ -136,12 +137,10 @@ fn recursing_switch_deletes_a_standalone_folder_that_is_a_submodule() {
 
 /// Changing a project's base branch to one only origin has, when the guard
 /// refuses the switch (the branch tracks a file where a standalone agent's
-/// ignored folder stands), leaves behind the local branch dux created for it.
-/// `switch_to_base_branch` creates the tracking branch itself before calling
-/// `switch_branch`, which then sees an existing local branch and never removes
-/// it on refusal.
+/// ignored folder stands), removes the local branch dux created for it, even
+/// though `switch_branch` then sees an existing local branch.
 #[test]
-fn refused_base_branch_switch_leaves_the_branch_it_created() {
+fn refused_base_branch_switch_removes_the_branch_it_created() {
     let (mut engine, tmp) = test_engine();
     let upstream = tmp.path().join("upstream");
     init(&upstream);

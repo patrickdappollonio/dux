@@ -1,4 +1,5 @@
-//! A project added inside a worktree being removed, the manager's recheck under the claim, and the process registry's writer.
+//! A project added inside a worktree being removed, the manager's recheck
+//! under the claim, and the process registry's writer.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -66,7 +67,8 @@ fn pump_until_removed(engine: &mut Engine) {
 }
 
 /// A project added while an agent's worktree removal is waiting, whose
-/// repository is inside that worktree, is deleted by the removal.
+/// repository is inside that worktree, is either refused or kept by the
+/// removal: its repository is never deleted.
 #[test]
 fn a_project_added_inside_a_worktree_being_removed_is_not_deleted() {
     let (mut engine, tmp) = test_engine();
@@ -127,8 +129,8 @@ fn a_project_added_inside_a_worktree_being_removed_is_not_deleted() {
 /// The worktree manager admits a removal, and before its worker claims the
 /// folder a standalone agent is created on a subfolder of it (its launch then
 /// fails, so nothing of it runs). The re-check under the claim reads the agents
-/// again but only matches a worktree's EXACT path, so the standalone agent's
-/// folder, inside the worktree, is deleted with it.
+/// again and matches folders inside the worktree, not only its exact path, so
+/// the standalone agent's folder is kept.
 #[test]
 fn the_manager_recheck_under_the_claim_sees_a_standalone_agent_inside() {
     let (mut engine, tmp) = test_engine();
@@ -170,9 +172,8 @@ fn the_manager_recheck_under_the_claim_sees_a_standalone_agent_inside() {
 }
 
 /// Registering a PTY's session runs on the engine thread (a launch landing, a
-/// terminal opening). With the session database attached, every registration
-/// opens a new SQLite connection and rewrites the whole registry, and waits
-/// for any other writer of the database to finish: the UI thread blocks.
+/// terminal opening), so with the session database attached a registration
+/// must not wait for another writer of the database to finish.
 #[test]
 fn registering_a_session_does_not_block_on_the_database() {
     let tmp = tempfile::tempdir().unwrap();
@@ -438,12 +439,12 @@ fn the_writer_saves_every_change_and_flush_waits_for_it() {
     );
 }
 
-/// What made the test above fail once on CI, made deterministic: the prune
-/// `attach_store` starts on a thread of its own judges every session
-/// registered before it reads the process table, and drops the ones nothing
-/// runs in. Five made-up sessions registered before it runs are dropped, the
-/// forty-five after it are not, and `flush` then reports exactly what the
-/// registry holds: the writer was never behind.
+/// The race the test above avoids by joining the prune first, made
+/// deterministic: the prune `attach_store` starts on a thread of its own
+/// judges every session registered before it reads the process table, and
+/// drops the ones nothing runs in. Five made-up sessions registered before it
+/// runs are dropped, the forty-five after it are not, and `flush` then
+/// reports exactly what the registry holds.
 #[test]
 fn the_attach_time_prune_drops_made_up_sessions_registered_before_it_runs() {
     let tmp = tempfile::tempdir().unwrap();
@@ -461,7 +462,7 @@ fn the_attach_time_prune_drops_made_up_sessions_registered_before_it_runs() {
     for n in 0..5u32 {
         registry.register("agent", made_up(n), tmp.path());
     }
-    // The attach-time prune landing here, as it did on CI.
+    // The attach-time prune landing here, between registrations.
     registry.prune_gone();
     for n in 5..50u32 {
         registry.register("agent", made_up(n), tmp.path());

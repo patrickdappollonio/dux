@@ -7714,13 +7714,10 @@ mod tests {
         );
     }
 
-    /// Before a worktree is removed, every non-standalone process in or under
-    /// it is ended, and one occupancy function decides every
-    /// removal". A create whose startup command left a job running (a dev
-    /// server) and whose provider then turns out not to be installed rolls the
-    /// worktree back with `git worktree remove --force` directly: nothing ends
-    /// the startup command's session first, so the folder is deleted from under
-    /// the job dux started there.
+    /// A create whose startup command left a job running (a dev server) and
+    /// whose provider then cannot start rolls its worktree back through the
+    /// removal pipeline, which ends that job before the folder goes, so the
+    /// job is never left running in a deleted directory.
     #[test]
     fn a_failed_create_does_not_remove_its_worktree_from_under_its_startup_job() {
         let (mut engine, engine_dir) = crate::engine::test_support::test_engine();

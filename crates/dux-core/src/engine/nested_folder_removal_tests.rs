@@ -1,4 +1,6 @@
-//! A folder dux is using INSIDE a worktree is a folder the worktree's removal deletes: checks that compare folders for equality would never see something running in a subfolder, so containment decides and the removal does not delete the folder out from under it.
+//! A worktree's removal deletes every folder INSIDE it, so whether dux is using
+//! the worktree is decided by containment, never by folder equality, and a
+//! removal keeps a worktree something dux started runs inside.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -164,9 +166,8 @@ fn the_manager_refuses_a_worktree_a_standalone_agent_runs_inside() {
     );
 }
 
-/// Nothing new may start in a claimed folder. A standalone agent created in a
-/// subfolder of a worktree whose removal has begun is created inside a folder
-/// that is about to go, and the removal then deletes it.
+/// Nothing new may start in a claimed folder: a standalone agent is not
+/// created in a subfolder of a worktree whose removal has begun.
 #[test]
 fn a_standalone_agent_cannot_be_created_inside_a_worktree_being_removed() {
     let (mut engine, tmp) = test_engine();
@@ -232,10 +233,10 @@ fn a_standalone_agent_cannot_be_created_inside_a_worktree_being_removed() {
 /// A process session number recorded by an EARLIER run of dux is reused by an
 /// unrelated program whose session has no leader any more: the ordinary shape
 /// of a double-forked daemon (it calls `setsid`, forks, and the leader exits).
-/// The next start finishes the recorded removal and "ends every process in the
-/// sessions the agent ran in", and a leaderless session is taken for the
-/// original one whatever its members' start times say, so the unrelated
-/// program, started an hour after dux recorded that session, is killed.
+/// The next start finishes the recorded removal and ends the processes of the
+/// sessions the agent ran in, but a leaderless session whose members started
+/// after the recorded session is not the original one, so the unrelated
+/// program, started an hour later, survives.
 #[test]
 fn a_resumed_removal_does_not_kill_an_unrelated_program_that_reused_a_session_number() {
     let (mut engine, tmp) = test_engine();
@@ -330,10 +331,10 @@ fn a_resumed_removal_does_not_kill_an_unrelated_program_that_reused_a_session_nu
 /// The first agent of a project, with dux's worktrees folder reached through a
 /// symlink (a dotfiles-managed `~/.config`, say). The create takes its hold on
 /// the new worktree's path BEFORE the project's folder under the worktrees
-/// root exists, so the hold's key falls back to the path as spelled, symlink
-/// and all, while everything else (git's listing, the manager's request, the
-/// agent's recorded path) names the resolved folder. The manager then sees no
-/// create in the folder and removes the worktree under the running create.
+/// root exists, so it cannot be resolved then, while everything else (git's
+/// listing, the manager's request, the agent's recorded path) names the
+/// resolved folder. The manager still sees the create in the folder and
+/// refuses to remove the worktree under it.
 #[test]
 fn the_manager_refuses_a_first_worktree_being_created_through_a_symlinked_root() {
     let (mut engine, tmp) = test_engine();
@@ -422,11 +423,10 @@ fn the_manager_refuses_a_first_worktree_being_created_through_a_symlinked_root()
 
 /// A removal recorded in an EARLIER BOOT (the machine lost power in
 /// the middle of a delete, which is exactly when a removal is resumed) is void
-/// as far as processes go: every pid has been handed out afresh. Its snapshot
-/// of process identities (pid plus boot-relative start time) carries no boot,
-/// so a process of this boot that has the same pid and start tick is ended.
-/// The identity below is built from a live process to stand for such a
-/// coincidence.
+/// as far as processes go: every pid has been handed out afresh. A process of
+/// this boot with the same pid and start tick as a recorded identity is not
+/// ended, because the identity carries its boot. The identity below is built
+/// from a live process to stand for such a coincidence.
 #[test]
 fn a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
     let (mut engine, tmp) = test_engine();
@@ -493,11 +493,10 @@ fn a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
     );
 }
 
-/// Reaping PTYs runs on the engine thread (the terminal UI's own
-/// loop). Dropping a reaped client whose terminal a disowned background job
-/// still holds open waits up to 250 ms for its reader thread, once per PTY, so
-/// an agent delete (or terminal closes) over several such PTYs freezes the
-/// engine thread for a quarter second per PTY.
+/// Reaping PTYs runs on the engine thread (the terminal UI's own loop), and a
+/// reaped client whose terminal a disowned background job still holds open
+/// has a reader thread that does not end; reaping several such PTYs must not
+/// wait on those threads, which would freeze the engine thread per PTY.
 #[test]
 fn reaping_ptys_held_open_by_jobs_does_not_stall_the_engine_thread() {
     const N: usize = 8;

@@ -2,10 +2,10 @@
 //! starts.
 //!
 //! A poller that dies and comes back, and one that could not be spawned at all,
-//! must not be left as log lines: a list that stopped updating with nothing
-//! on screen to say why. Both are facts about the process rather
-//! than about a surface, so they travel the engine's worker lane and both
-//! surfaces say them in the same words.
+//! is said on screen, not only in the log: otherwise the user sees a list that
+//! stopped updating and nothing to say why. Both are facts about the process
+//! rather than about a surface, so they travel the engine's worker lane and
+//! both surfaces say them in the same words.
 //!
 //! The two pollers that answer the same question (the terminal UI's own
 //! changed-files sweep and the web's changes service) share a key, so a process

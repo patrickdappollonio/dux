@@ -1379,9 +1379,9 @@ mod tests {
         );
     }
 
-    /// An agent deleted with its worktree KEPT while its startup
-    /// command runs: nothing ends the command, it runs to completion (here it
-    /// succeeds), and the result still tells the user dux stopped it.
+    /// An agent deleted with its worktree KEPT while its startup command runs:
+    /// the result says dux stopped the command only when it did, and never
+    /// when the command ran to completion.
     #[test]
     fn a_keep_worktree_delete_does_not_claim_it_stopped_the_command() {
         let tmp = tempdir().expect("tempdir");
@@ -1402,9 +1402,9 @@ mod tests {
         let _ = registry.forget_agent("session-1");
         let result = handle.join().expect("run thread");
         let err = result.status.expect_err("the run reports the deletion");
-        // Forgetting the agent ends its startup command, so
-        // the run is stopped; what matters is that the sentence says what
-        // actually happened either way.
+        // Forgetting the agent ends its startup command, so the run is
+        // stopped; what matters is that the sentence says what actually
+        // happened either way.
         if done.exists() {
             assert!(
                 !err.contains("dux stopped the command"),
@@ -1625,11 +1625,11 @@ mod tests {
         );
     }
 
-    /// A job the startup command left running keeps writing into the capture
-    /// file dux made for the command's output, which was unlinked at once:
-    /// after the run has returned and its log is written, nothing ever reads
-    /// it, no file names it, and it grows on disk in dux's config folder for
-    /// as long as the job runs.
+    /// A job the startup command left running does not keep writing into an
+    /// unlinked capture file for the command's output: after the run has
+    /// returned and its log is written, nothing would read it and no file
+    /// would name it, yet it would grow on disk in dux's config folder for as
+    /// long as the job runs.
     #[test]
     fn a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
         let tmp = tempdir().expect("tempdir");
@@ -1828,10 +1828,10 @@ mod left_running_job_tests {
     }
 
     /// The docs say a job the startup command leaves running in the
-    /// background keeps running after the command exits. It does, only for
-    /// as long as dux does: its output is a pipe whose only reader is a dux
-    /// thread, so when dux quits the job's next write gets SIGPIPE and the
-    /// job (a dev server, say) is killed.
+    /// background keeps running after the command exits, and it outlives dux
+    /// too: its output must not be a pipe whose only reader is a dux thread,
+    /// or the job's next write after dux quits would get SIGPIPE and kill it
+    /// (a dev server, say).
     #[test]
     fn a_left_running_job_survives_dux_quitting() {
         let tmp = tempfile::tempdir().unwrap();

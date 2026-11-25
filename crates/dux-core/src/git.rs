@@ -8615,10 +8615,10 @@ fn split_scp_like(url: &str) -> Option<(&str, &str)> {
     // 'remote-nonexistent-host.invalid' is not a git command" and "remote helper
     // 'nonexistent-host.invalid' aborted session", never touching ssh, while the
     // single-colon `nonexistent-host.invalid:o/r` reaches ssh as
-    // single-colon `nonexistent-host.invalid:o/r` reaches ssh as
-    // `nonexistent-host.invalid git-upload-pack 'o/r'`. So the first of those is
-    // not an scp-like remote: reading it as one would answer host `github.com`
-    // and repository `:o/r`, a host git never contacts.
+    // `nonexistent-host.invalid git-upload-pack 'o/r'`. So the double-colon
+    // form is not an scp-like remote: reading `github.com::o/r` as one would
+    // answer host `github.com` and repository `:o/r`, a host git never
+    // contacts.
     //
     // The `user@` spelling is refused here too, for a measurably different
     // reason worth writing down: git requires a helper name to be made of
@@ -15073,8 +15073,6 @@ mod tests {
             // is enough), where git appended only the `\n`. Stripping the `\r`
             // too would delete a byte of the remote, so exactly one `\n` comes
             // off and the surviving control character is refused like any other.
-            // exactly one `\n` comes off and the surviving control character is
-            // refused like any other.
             "ssh://github.com/octocat/Hello-World.git\r\n",
         ] {
             assert_eq!(
@@ -15084,8 +15082,8 @@ mod tests {
             );
         }
         // Bytes that are not UTF-8 are not lossily substituted into a name: a
-        // replacement character is neither a control nor whitespace, so it used
-        // to survive into a `--repo` argument.
+        // replacement character is neither a control nor whitespace, so it would
+        // survive into a `--repo` argument.
         assert_eq!(
             github_remote_from_git_output(b"ssh://github.com/octocat/Hello\xffWorld\n"),
             None,
@@ -15114,7 +15112,6 @@ mod tests {
         }
     }
 
-    /// A decoded slash is refused wherever it appears, and the boundaries are
     /// A decoded slash is refused wherever it appears, boundaries included: the
     /// syntactic slashes come off BEFORE decoding, exactly one at each end, and
     /// each remaining raw segment is decoded on its own, so a decoded slash
@@ -15940,8 +15937,9 @@ mod tests {
 
     /// A trailing slash is not part of the repository name, and it has to come
     /// off before the `.git` suffix or the suffix no longer matches. Exactly ONE
-    /// comes off, though: `Hello-World//` is refused, because the second slash leaves an empty component and an
-    /// empty component is not a repository. That is the same rule that stops a
+    /// comes off, though: `Hello-World//` is refused, because the second slash
+    /// leaves an empty component and an empty component is not a repository.
+    /// That is the same rule that stops a
     /// decoded `%2F` at the boundary from impersonating the syntactic slash; see
     /// `parse_github_remote_refuses_decoded_separators_at_the_path_boundaries`.
     #[test]
@@ -16055,8 +16053,7 @@ mod tests {
             None
         );
         // `git+ssh://` is a valid git scheme that invokes SSH, so it is
-        // accepted; see
-        // `parse_github_remote_accepts_the_ssh_scheme_aliases`.
+        // accepted; see `parse_github_remote_accepts_the_ssh_scheme_aliases`.
         assert_eq!(
             parse_github_remote("git+ssh://github.com/octocat/Hello-World"),
             Some(GitHubRemote {

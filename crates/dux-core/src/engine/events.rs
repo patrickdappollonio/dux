@@ -228,7 +228,7 @@ impl StatusUpdate {
 
     /// Withhold this message from the named surfaces (builder form). The
     /// surfaces decide separately, so the caller states both halves at once and
-    /// says which always-confirm case the quieted half fails.
+    /// says at the site why the quieted half needs no confirmation.
     #[must_use]
     pub fn quiet_on(mut self, quiet_on: QuietSurfaces) -> Self {
         self.quiet_on = quiet_on;

@@ -8546,11 +8546,11 @@ mod tests {
 
     /// A probe whose THREAD never started must give the in-flight key back.
     ///
-    /// `spawn_loop_worker` does not clear keys on a spawn failure, and only the
-    /// `FolderRepoStatusReady` handler clears this one, so a single failed spawn
-    /// would pin the key for the rest of the run: the folder would answer
-    /// `Unprobed` forever, its changes panel stay quiet, its mutations be
-    /// refused, and nothing short of a restart heal it.
+    /// `spawn_loop_worker` does not clear keys on a spawn failure, and the
+    /// `FolderRepoStatusReady` handler never runs for a thread that never
+    /// started, so a key not given back would stay pinned for the rest of the
+    /// run: the folder would answer `Unprobed` forever, its changes panel stay
+    /// quiet, its mutations be refused, and nothing short of a restart heal it.
     #[test]
     fn a_folder_repo_probe_that_cannot_spawn_re_arms_the_next_ask() {
         let (mut engine, tmp) = test_engine();
@@ -14471,9 +14471,9 @@ mod tab_ops_tests {
     #[test]
     fn close_tab_detaches_the_agent_when_it_was_the_last_live_tab() {
         // The last-tab-detach branch of `close_tab` sets the resulting session
-        // status. Seed a real live PTY for the extra tab
-        // (and none for the session-slot tab) so the session starts Active, then
-        // assert closing that tab flips it to Detached.
+        // status. Seed a real live PTY for the extra tab (and none for the
+        // session-slot tab) so the session starts Active, then assert closing
+        // that tab flips it to Detached.
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         let mut session = sample_session("s1", "p1", "feat");

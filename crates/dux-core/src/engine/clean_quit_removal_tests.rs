@@ -1,4 +1,5 @@
-//! Removal after a clean quit, the changes pane's folder delete, and the manager's recheck after admission.
+//! Removal after a clean quit, the changes pane's folder delete, and the
+//! manager's recheck after admission.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -100,13 +101,11 @@ fn launch_tab(engine: &mut Engine, session_id: &str, worktree: &Path, script: &s
     engine.providers.insert(TabId::new(tab.as_str()), client);
 }
 
-/// "dux must never remove a folder that something it started is still using."
-/// An agent's shell started a background server (a job-controlled job, so the
-/// PTY's group signals at quit do not reach it) in its worktree, and dux was
-/// quit cleanly. The server keeps running. At the next start the user deletes
-/// the agent with its worktree: nothing dux knows of the earlier run's
-/// sessions survived the restart, so nothing ends the server and git removes
-/// the worktree out from under it.
+/// dux never removes a folder that something it started is still using, even
+/// across a restart. An agent's shell starts a background server in its
+/// worktree (a job-controlled job, so the PTY's group signals at quit do not
+/// reach it) and dux quits cleanly; deleting the agent with its worktree at
+/// the next start either ends that server first or leaves the worktree.
 #[test]
 fn a_job_an_agent_left_running_before_a_clean_quit_is_not_removed_from_under() {
     let (mut first, tmp) = test_engine();
@@ -163,14 +162,10 @@ fn a_job_an_agent_left_running_before_a_clean_quit_is_not_removed_from_under() {
     );
 }
 
-/// "dux never creates, moves or removes a standalone agent's folder", and
-/// never removes a folder something it started is still using. A standalone
-/// agent lives, running, in an untracked folder inside a managed agent's
-/// worktree. The changes pane lists that folder as untracked, and its "delete
-/// the folder" (`Command::DiscardFile` with a folder confirmation) removes the
-/// standalone agent's files out from under its running process: the only thing
-/// it asks of the path registry is a hold on the worktree, and nothing asks
-/// what occupies the folder it deletes.
+/// The changes pane's folder delete (`Command::DiscardFile` with a folder
+/// confirmation) does not remove an untracked folder inside a worktree when a
+/// standalone agent is running in it: the delete asks what occupies the folder
+/// itself, not only for a hold on the worktree.
 #[test]
 fn the_changes_pane_does_not_delete_a_running_standalone_agents_folder() {
     let (mut engine, tmp) = test_engine();

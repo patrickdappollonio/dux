@@ -1149,11 +1149,9 @@ fn a_job_left_by_a_shell_that_exited_is_ended_through_what_was_recorded_at_its_e
 
 /// A startup command that backgrounds a job WITHOUT redirecting its
 /// output (`npm run dev &`) exits at once, but the job keeps the command's
-/// stdout/stderr pipes open, so `wait_with_output` never reaps the command:
-/// the session's leader stays a zombie. `members` treats a zombie leader as
-/// gone and nothing was recorded for it (the survivors are recorded only after
-/// `wait_with_output` returns), so the job is invisible: the removal neither
-/// ends it nor counts it, and deletes the worktree from under it.
+/// stdout/stderr pipes open, so `wait_with_output` never reaps the command
+/// and the session's leader stays a zombie. The removal still sees the job
+/// and ends it before the worktree goes.
 #[test]
 fn a_startup_job_holding_the_commands_output_is_ended_before_removal() {
     let mut fx = fixture();

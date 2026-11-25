@@ -2732,15 +2732,15 @@ mod host_policy_tests {
     /// A record dux cannot read IN FULL is not evidence of anything, so the
     /// answer containing it is not an answer.
     ///
-    /// The assertion must not default an unreadable record into an empty host
-    /// set: a missing or null `active` DOES parse, into an empty host set, and
-    /// an empty host set is a DECISIVE "gh serves nothing" that replaces the last
-    /// known good policy and turns every GitHub feature off. A wrongly typed one
-    /// fails to parse and is transient. The test asserts which of the two it is.
+    /// A missing, null or wrongly typed `active` makes the whole answer
+    /// unreadable (`None`), never an empty host set: an empty host set is a
+    /// DECISIVE "gh serves nothing" that replaces the last known good policy
+    /// and turns every GitHub feature off. The test asserts `None` directly
+    /// rather than defaulting it, so it can tell the two apart.
     ///
-    /// A missing or null `host` is worse: the record says nothing about which
-    /// host it describes, and the map KEY must not be taken as qualified on the
-    /// strength of it.
+    /// A missing or null `host` matters most: the record says nothing about
+    /// which host it describes, and the map KEY must not be taken as qualified
+    /// on the strength of it.
     #[test]
     fn a_record_dux_cannot_read_in_full_is_not_an_answer() {
         for malformed in [
@@ -3137,9 +3137,9 @@ mod host_policy_tests {
 
     #[test]
     fn one_working_host_alongside_one_broken_host_reports_github_available() {
-        // The behaviour change. Plain `gh auth status` exits non-zero when ANY
-        // known host has a problem, so one stale token would disable every
-        // GitHub feature on every host. The stand-in reproduces exactly that:
+        // Plain `gh auth status` exits non-zero when ANY known host has a
+        // problem, so judging by its exit status alone would let one stale token
+        // disable every GitHub feature on every host. The stand-in reproduces that:
         // it answers the machine-readable call and exits non-zero on the plain
         // one, as a real `gh` in this state does.
         let dir = tempfile::tempdir().expect("tempdir");

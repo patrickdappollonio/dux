@@ -1,4 +1,6 @@
-//! A pull never deletes a standalone agent's folder or another project's repository, and a base-branch switch checks the commit git actually checks out.
+//! A pull or a branch switch never deletes a standalone agent's folder or
+//! another project's repository, and checks the commit git actually checks
+//! out.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -52,9 +54,9 @@ fn wait_pull(engine: &mut Engine) {
 /// A standalone agent lives in `scratch/`, a folder the managed agent's
 /// worktree ignores (the occupancy rule treats this layout as the worktree's
 /// occupant). Upstream adds a tracked FILE called `scratch` to the agent's
-/// branch. The session Pull runs `git pull --ff-only`, which deletes the
-/// ignored folder to make room, the standalone agent's repository and
-/// history with it: no occupancy question is asked before the pull.
+/// branch. `git pull --ff-only` would delete the ignored folder to make room,
+/// the standalone agent's repository and history with it, so the session Pull
+/// asks the occupancy question first and keeps the folder.
 #[test]
 fn a_session_pull_never_deletes_a_standalone_agents_folder() {
     let (mut engine, tmp) = test_engine();
@@ -126,7 +128,7 @@ fn a_session_pull_never_deletes_a_standalone_agents_folder() {
 }
 
 /// The same for a project's repository: project p2 lives in `vendor/lib`, a
-/// folder project p1's checkout ignores. Pull project on p1 deletes p2's
+/// folder project p1's checkout ignores. Pull project on p1 keeps p2's
 /// repository when the incoming commit tracks a file at `vendor`.
 #[test]
 fn a_project_pull_never_deletes_another_projects_repository() {
@@ -290,8 +292,8 @@ fn a_pull_that_only_writes_inside_an_occupied_folder_goes_ahead() {
     assert!(other.join(".git").exists());
 }
 
-/// A folder dux knows nothing about is git's to remove, as before (the docs
-/// say so): only what dux must never remove is protected.
+/// A folder dux knows nothing about is git's to remove, as the docs say: only
+/// what dux must never remove is protected.
 #[test]
 fn a_pull_still_replaces_an_ignored_folder_nothing_lives_in() {
     let (mut engine, tmp) = test_engine();
@@ -434,8 +436,9 @@ fn control_a_file_over_a_linked_standalone_folder_is_refused() {
     );
 }
 
-/// An incoming SUBMODULE (gitlink) at the link's path: git replaces the link
-/// with an empty folder, and the check skips gitlinks entirely.
+/// An incoming SUBMODULE (gitlink) at the link's path: git would replace the
+/// link with an empty folder, so the check covers gitlinks too and the link
+/// stays.
 #[test]
 fn a_submodule_over_a_linked_standalone_folder_is_refused() {
     let (mut engine, tmp) = test_engine();
@@ -461,7 +464,8 @@ fn a_submodule_over_a_linked_standalone_folder_is_refused() {
 }
 
 /// `git switch <branch>` with no local branch follows `checkout.defaultRemote`
-/// when several remotes have the branch; the guard always checks origin's.
+/// when several remotes have the branch, so the guard checks that remote's
+/// commit rather than origin's.
 #[test]
 fn a_switch_checks_the_commit_git_actually_checks_out() {
     let (engine, tmp) = test_engine();

@@ -1,4 +1,5 @@
-//! Restoring a file keeps the file, or the standalone agent's folder, that now holds its path.
+//! Restoring a file keeps the file, or the standalone agent's folder, that now
+//! holds its path.
 
 use std::path::{Path, PathBuf};
 
@@ -47,9 +48,9 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
 
 /// HEAD tracks `dir/a.txt`. The agent replaced the folder `dir` with a plain,
 /// untracked FILE called `dir`. git lists ` D dir/a.txt` (a tracked file
-/// deleted) and `?? dir`. Restoring `dir/a.txt` runs `git checkout --
-/// dir/a.txt`, which unlinks the untracked file `dir` to make room for the
-/// folder: a file the user never confirmed deleting is gone.
+/// deleted) and `?? dir`. `git checkout -- dir/a.txt` would unlink the
+/// untracked file `dir` to make room for the folder, a file the user never
+/// confirmed deleting, so restoring `dir/a.txt` keeps that file.
 #[test]
 fn restoring_a_file_under_a_path_now_held_by_a_file_keeps_that_file() {
     let (mut engine, tmp) = test_engine();
@@ -90,10 +91,9 @@ fn restoring_a_file_under_a_path_now_held_by_a_file_keeps_that_file() {
 
 /// The tracked file `notes` was replaced by a symbolic link to a folder
 /// elsewhere, and a standalone agent was started AT the link (its folder is
-/// recorded as `<worktree>/notes`). An untracked link like that is cleared
-/// before it is deleted, because "an agent's folder can be the link itself";
-/// restoring the tracked file removes the very same link with no clearance,
-/// and the standalone agent's folder path is now a plain file.
+/// recorded as `<worktree>/notes`). An agent's folder can be the link itself,
+/// so restoring the tracked file asks the same occupancy question an untracked
+/// link's delete does, and keeps the link.
 #[test]
 fn restoring_a_tracked_file_over_a_link_that_is_a_standalone_agents_folder_keeps_it() {
     let (mut engine, tmp) = test_engine();
@@ -135,8 +135,8 @@ fn restoring_a_tracked_file_over_a_link_that_is_a_standalone_agents_folder_keeps
 
 /// The same with the link one level up: HEAD tracks `dir/a.txt`, `dir` is now
 /// a link to a folder elsewhere, and a standalone agent was started at
-/// `<worktree>/dir`. Restoring `dir/a.txt` makes git replace the link with a
-/// real directory.
+/// `<worktree>/dir`. Restoring `dir/a.txt` would make git replace the link
+/// with a real directory, so the link is kept.
 #[test]
 fn restoring_a_file_beneath_a_link_that_is_a_standalone_agents_folder_keeps_it() {
     let (mut engine, tmp) = test_engine();

@@ -1,4 +1,5 @@
-//! A project added between the discard check and the delete is not deleted, and an agent delete does not fail on a refused editor claim.
+//! A project added between the discard check and the delete is not deleted,
+//! and an agent delete does not fail on a refused editor claim.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -71,12 +72,12 @@ fn pump_until_removed(engine: &mut Engine) -> Result<(), String> {
     panic!("the removal never reported");
 }
 
-/// The changes pane's "delete" of an untracked nested repository (web route
-/// and TUI worker alike) builds its check on the engine, then runs the delete
-/// off it; unlike the editor's delete it takes no claim on the folder. A
-/// project added at that repository in between is not seen: `clear` re-reads
-/// only the processes, and the occupant sentence was decided before the
-/// project existed. The project's repository is deleted whole.
+/// The changes pane's delete of an untracked nested repository (web route and
+/// TUI worker alike) builds its check on the engine, then runs the delete off
+/// it. Between the two, a project added at that repository is kept out by the
+/// claim on the folder, and a project row that reached the database another
+/// way is seen by `clear`, which asks the whole occupancy rule again, so the
+/// repository is not deleted.
 #[test]
 fn a_project_added_between_the_discard_check_and_the_delete_is_not_deleted() {
     let (mut engine, tmp) = test_engine();
@@ -149,9 +150,8 @@ fn a_project_added_between_the_discard_check_and_the_delete_is_not_deleted() {
 
 /// An agent delete announced while an editor's destructive claim on the very
 /// same folder is held (the editor's delete of it is about to be REFUSED,
-/// because the agent lives there) joins that claim, and takes the refused
-/// claim's outcome as its own: the agent is gone and its worktree is kept,
-/// with an error, though nothing was in the worktree's way.
+/// because the agent lives there) does not take the refused claim's outcome
+/// as its own: once the claim is dropped, the worktree is removed.
 #[test]
 fn an_agent_delete_does_not_fail_because_a_refused_editor_claim_was_held() {
     let (mut engine, tmp) = test_engine();

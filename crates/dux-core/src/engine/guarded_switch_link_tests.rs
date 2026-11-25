@@ -1,4 +1,5 @@
-//! A guarded switch keeps a linked standalone folder, and ignore-all hides nothing from a guarded pull.
+//! A guarded switch or pull keeps a linked standalone folder, even when
+//! `.gitmodules` says `ignore = all` for its path.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -179,11 +180,11 @@ fn control_a_guarded_switch_keeps_a_linked_standalone_folder() {
 }
 
 /// With `ignore = all` for that path in the checkout's `.gitmodules`,
-/// `git diff-tree` leaves the gitlink out, the move check asks about nothing,
-/// and `git switch` replaces the standalone agent's folder link with an
-/// empty directory.
+/// `git diff-tree` leaves the gitlink out, so the move check must find it
+/// another way: the switch still keeps the standalone agent's folder link
+/// rather than letting `git switch` replace it with an empty directory.
 #[test]
-fn ignore_all_hides_a_submodule_over_a_linked_standalone_folder() {
+fn ignore_all_hides_nothing_from_a_guarded_switch_over_a_linked_standalone_folder() {
     let (result, kind) = switch_over_link(SubmoduleIgnore::All);
     assert!(
         kind.is_symlink(),

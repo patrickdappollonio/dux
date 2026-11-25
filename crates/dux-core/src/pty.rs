@@ -972,12 +972,11 @@ pub struct PtyClient {
     writer: PtyWriter,
     terminal: Arc<Mutex<TerminalState>>,
     child: Box<dyn Child + Send + Sync>,
-    /// The directory this PTY's child was spawned in, kept verbatim. It used to
-    /// be handed to the spawn call and forgotten, but this is the type that owns
-    /// the child's process id and the foreground-group probe, so it is the one
-    /// place a "where is this terminal actually working" question can be
-    /// answered from without spreading half the policy across the terminal
-    /// record and the web routes.
+    /// The directory this PTY's child was spawned in, kept verbatim. This is
+    /// the type that owns the child's process id and the foreground-group
+    /// probe, so it is the one place a "where is this terminal actually
+    /// working" question can be answered from without spreading half the
+    /// policy across the terminal record and the web routes.
     ///
     /// This is the SPAWN directory and nothing more: a shell's directory changes
     /// the moment someone types `cd`, so this is a fallback, not the live
@@ -5935,9 +5934,9 @@ mod tests {
                 .find(|c| c.row == row && c.col == col)
                 .map(|c| c.symbol.as_str())
         };
-        // Columns must line up after the round-trip; the raw tab
-        // and the fill spaces must not both be emitted, double-advancing the cursor
-        // (b would drift to col 14, c to col 22).
+        // Columns must line up after the round-trip: emitting the raw tab AND
+        // the fill spaces would double-advance the cursor (b would drift to
+        // col 14, c to col 22).
         assert_eq!(at(0, 0), Some("a"));
         assert_eq!(at(0, 8), Some("b"));
         assert_eq!(at(0, 16), Some("c"));
@@ -6346,15 +6345,15 @@ mod tests {
         // A companion terminal runs an interactive shell, which enables job
         // control and places each foreground command in its OWN process group.
         // `terminate()` must signal that foreground group, not only the shell's,
-        // or a running app never receives SIGTERM on close/shutdown (it would wait
-        // out the 30s without ever being asked to exit).
+        // or a running app never receives SIGTERM on close/shutdown and the
+        // close waits out the 30s without it ever being asked to exit.
         //
         // Proof: run a foreground `sleep` (which lands in its own group),
         // `terminate()`, and watch the terminal foreground return to the shell.
         // That return happens ONLY if sleep's own group was signaled: an
         // interactive shell ignores SIGTERM, so signaling just the shell's group
-        // would leave sleep running with the foreground
-        // pinned to it, and the assertion below would time out.
+        // would leave sleep running with the foreground pinned to it, and the
+        // assertion below would time out.
         let args = vec![
             "--norc".to_string(),
             "--noprofile".to_string(),
@@ -6654,11 +6653,10 @@ mod tests {
         );
     }
 
-    /// A client dropped while its child still runs. The drop's
-    /// `child.kill()` (portable-pty's) already REAPS the child through its
-    /// own `try_wait`, so the WNOWAIT wait after it finds nothing and the
-    /// leader-exit hook only runs after the reap, the order the drop's own
-    /// comment ("Recorded before the reap") promises never happens.
+    /// A client dropped while its child still runs runs the leader-exit hook
+    /// before the leader is reaped. portable-pty's `child.kill()` REAPS the
+    /// child through its own `try_wait`, so the hook must run before that
+    /// kill, while a WNOWAIT wait can still find the child.
     #[test]
     fn a_dropped_clients_hook_runs_before_its_leader_is_reaped() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6864,16 +6862,14 @@ mod tests {
         drop(client);
     }
 
-    /// Before dux reaps a child that exited, it records what that
-    /// child left running". `try_wait` fires the leader-exit hook and then
-    /// reaps at once, but the hook only STARTS the record on a thread of its
-    /// own. Only a worktree removal waits for that thread; every other look
-    /// (a pull or switch's move check, an editor or changes-pane delete,
-    /// which all ask `cwd_occupant`) runs straight after the reap, finds the
-    /// leader gone (so the session number proves nothing) and nothing
-    /// recorded yet, and misses a job the shell left working in the folder.
+    /// Before dux reaps a child that exited, it records what that child left
+    /// running. `try_wait` fires the leader-exit hook and then reaps, and the
+    /// hook's record runs on a thread of its own, so a look that runs straight
+    /// after the reap (a pull or switch's move check, an editor or
+    /// changes-pane delete, which all ask `cwd_occupant`) finds the leader gone
+    /// and must still see the job the shell left working in the folder.
     #[test]
-    fn a_look_right_after_the_reap_misses_the_job_the_leader_left() {
+    fn a_look_right_after_the_reap_sees_the_job_the_leader_left() {
         let mut misses = 0;
         let attempts = 10;
         for _ in 0..attempts {

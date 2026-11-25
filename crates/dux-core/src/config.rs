@@ -1474,10 +1474,10 @@ pub struct ProviderCommandConfig {
 /// The receiving end is an agent CLI, not a shell, and the CLIs do not agree on
 /// how they read a pasted path: each takes the whole pasted string and normalizes
 /// it its own way before deciding whether it names a file. The right form is
-/// therefore a property of the CLI, which is why this is a per-provider setting a
-/// user can extend rather than a rule baked in here. Every row below was
-/// produced by running the CLI's own normalizer over the exact bytes dux sends, so
-/// a new row belongs here only once someone has run the new CLI the same way.
+/// therefore a property of the CLI, which is why this is a per-provider setting
+/// rather than a rule baked in here. Every row below was produced by running the
+/// CLI's own normalizer over the exact bytes dux sends, so a new row is added, by
+/// pull request, only once someone has run the new CLI the same way.
 ///
 /// | CLI                 | What it does to a pasted path                                           | Form it needs   |
 /// |---------------------|-------------------------------------------------------------------------|-----------------|
@@ -7550,15 +7550,14 @@ mod tests {
     }
 
     /// The worktrees directory holds the user's own checkouts, which they open
-    /// in their own editor. dux does not tighten it; it sits inside the
-    /// now-`0700` root, which is where the protection belongs.
+    /// in their own editor. dux does not tighten it; it sits inside the `0700`
+    /// root, which is where the protection belongs.
     ///
-    /// The GROUP AND OTHER bits are what this test is actually about. It used
-    /// to assert `mode & 0o700 == 0o700`, which is equally true of `0755` and
-    /// `0700`, so tightening the worktrees directory left it passing and the
-    /// owner-only rule it exists to defend was unprotected. The directory is pre-created
-    /// at a known `0755` so the assertion does not depend on the test runner's
-    /// umask.
+    /// The GROUP AND OTHER bits are what this test is about: an owner-bits
+    /// check (`mode & 0o700 == 0o700`) is equally true of `0755` and `0700`,
+    /// so it would pass with the directory tightened. The directory is
+    /// pre-created at a known `0755` so the assertion does not depend on the
+    /// test runner's umask.
     #[test]
     fn ensure_dirs_leaves_the_worktrees_directory_untightened() {
         use std::os::unix::fs::PermissionsExt;

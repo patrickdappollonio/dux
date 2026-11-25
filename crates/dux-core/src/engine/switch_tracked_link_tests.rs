@@ -1,4 +1,5 @@
-//! A switch never deletes or replaces a standalone agent's folder that is a tracked link, and a removal retries git without looking again.
+//! A switch never deletes or replaces a standalone agent's folder that is a
+//! tracked link, and a removal never runs git again without a last look.
 
 use std::path::Path;
 
@@ -90,31 +91,29 @@ fn standalone_at_link_survives_switch(link: LinkOnFeat) {
 }
 
 /// A standalone agent's folder is the link `repo/work` the project tracks.
-/// Switching the project to a branch that deletes the link makes git unlink
-/// the agent's folder: the move check only asks about deleted paths through
-/// the folders they leave empty, and a link at the top level has none.
+/// A switch to a branch that deletes the link keeps it: the move check asks
+/// about a deleted path itself, not only through the folders it leaves empty,
+/// which a link at the top level does not have.
 #[test]
-fn switch_deletes_a_standalone_agents_folder_that_is_a_tracked_link() {
+fn switch_never_deletes_a_standalone_agents_folder_that_is_a_tracked_link() {
     standalone_at_link_survives_switch(LinkOnFeat::Deleted);
 }
 
-/// The same link, replaced by a tracked file: git unlinks the agent's folder
-/// and writes a file there, because the check leaves every path HEAD tracks
-/// to git.
+/// The same link, replaced by a tracked file: the switch keeps the link
+/// rather than letting git write a file there, although HEAD tracks the path.
 #[test]
-fn switch_replaces_a_standalone_agents_folder_that_is_a_tracked_link() {
+fn switch_never_replaces_a_standalone_agents_folder_that_is_a_tracked_link() {
     standalone_at_link_survives_switch(LinkOnFeat::ReplacedByFile);
 }
 
-/// The removal's order ends "last look, git", but the git step runs git TWICE
-/// when the first `git worktree remove --force` fails while the worktree is
-/// still registered: it sleeps a second and runs it again, with no look in
-/// between. A shell dux started that walks into the worktree during that
-/// second (here: a process standing in it, started after the look) has the
-/// folder removed from under it. The first failure is made with a lock that
-/// is lifted during the pause, standing in for any transient refusal.
+/// The removal's order ends "last look, git", so the git step runs git once:
+/// when `git worktree remove --force` fails while the worktree is still
+/// registered, it does not run git again without a look in between. A process
+/// that walks into the worktree after the look (here started during the
+/// pause) keeps the folder. The failure is made with a lock that is lifted
+/// during the pause, standing in for any transient refusal.
 #[test]
-fn removal_retries_git_after_the_last_look_without_looking_again() {
+fn removal_never_retries_git_after_the_last_look_without_looking_again() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();

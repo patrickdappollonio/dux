@@ -3032,12 +3032,11 @@ mod tests {
         assert!(registry.recordings_settled_within(Duration::ZERO).is_ok());
     }
 
-    /// A factory reset never kills a process whose
-    /// folder it can't read; it keeps that folder instead. It ends exactly
-    /// `session_processes_where(..).inside`, judged one process at a time,
-    /// and a process whose OWN folder cannot be read lands in `inside` (not
-    /// `unknown`) whenever its shell stands in the folder: so the reset
-    /// signals a process whose working directory it never read.
+    /// A factory reset never kills a process whose folder it can't read; it
+    /// keeps that folder instead. It ends exactly
+    /// `session_processes_where(..).inside`, judged one process at a time, so
+    /// a process whose OWN folder cannot be read is never put in `inside`, even
+    /// when its shell stands in the folder.
     #[test]
     fn a_process_whose_folder_cannot_be_read_is_never_counted_inside() {
         let folder = crate::worktree_ops::path_key(std::path::Path::new("/work/wt"));
@@ -3529,12 +3528,12 @@ mod tests {
         );
     }
 
-    /// A removal must keep the worktree when the registry's record
-    /// could not be saved before git runs (`record_not_saved`, whose sentence
-    /// names "the session database may be busy"). A busy database makes the
-    /// writer's write FAIL after SQLite's busy timeout, and the writer then
-    /// counts the change as done, so `flush` answers "saved" and git runs
-    /// with nothing written.
+    /// A removal must keep the worktree when the registry's record could not
+    /// be saved before git runs (`record_not_saved`, whose sentence names "the
+    /// session database may be busy"). A busy database makes the writer's
+    /// write FAIL after SQLite's busy timeout, and the writer must not count
+    /// that change as done: `flush` answers "saved" only when the record
+    /// reached the database.
     #[test]
     fn flush_does_not_report_saved_when_the_database_was_busy() {
         let tmp = tempfile::tempdir().unwrap();
