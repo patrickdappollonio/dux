@@ -222,7 +222,19 @@ pub(super) fn read_raw_chunk(
     fd: impl std::os::fd::AsFd,
     buf: &mut [u8],
 ) -> rustix::io::Result<usize> {
+    #[cfg(test)]
+    if let Some(err) = READ_FAILS_WITH.get() {
+        return Err(err);
+    }
     crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(&fd, &mut *buf))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The error every read on this thread fails with instead of reading, for
+    /// a test that needs a read to fail the same way on every system.
+    pub(super) static READ_FAILS_WITH: std::cell::Cell<Option<rustix::io::Errno>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Whether a read failing with `err` says the terminal is gone for good: the
