@@ -471,23 +471,32 @@ fn run_diff(paths: &DuxPaths, form: DiffForm, out: &mut dyn std::io::Write) -> R
     // The text it was read from, so a name the summary may not print is
     // placed by its line.
     current.source_text = dux_core::config::SourceText::of(&current_raw);
+    // An unset path default and the path a first start writes for it are the
+    // same setting.
+    config::resolve_path_defaults(&mut current, paths);
+    let baseline = config::first_config(paths);
 
     if form == DiffForm::Raw {
-        run_diff_raw(&current_raw, &current, out)
+        run_diff_raw(&current, &baseline, out)
     } else {
-        run_diff_summary(&current, out)
+        run_diff_summary(&current, &baseline, out)
     }
 }
 
-fn run_diff_raw(_current_raw: &str, current: &Config, out: &mut dyn std::io::Write) -> Result<()> {
-    write!(out, "{}", raw_diff_text(current))?;
+fn run_diff_raw(current: &Config, baseline: &Config, out: &mut dyn std::io::Write) -> Result<()> {
+    write!(out, "{}", raw_diff_text_against(current, baseline))?;
     Ok(())
 }
 
 /// What `dux config diff --raw` prints for `current`.
 pub(crate) fn raw_diff_text(current: &Config) -> String {
+    raw_diff_text_against(current, &Config::default())
+}
+
+fn raw_diff_text_against(current: &Config, baseline: &Config) -> String {
     let bindings = RuntimeBindings::from_keys_config(&current.keys);
-    let default_rendered = config::render_default_config();
+    let default_rendered =
+        config::render_config_with(baseline, &RuntimeBindings::from_keys_config(&baseline.keys));
     // Re-render current config to normalize it before diffing.
     let current_rendered = render_config_for_diff(current, &bindings);
     if current_rendered == default_rendered {
@@ -496,8 +505,12 @@ pub(crate) fn raw_diff_text(current: &Config) -> String {
     unified_diff("default", "current", &default_rendered, &current_rendered)
 }
 
-fn run_diff_summary(current: &Config, out: &mut dyn std::io::Write) -> Result<()> {
-    let changes = collect_config_changes(current);
+fn run_diff_summary(
+    current: &Config,
+    baseline: &Config,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
+    let changes = collect_config_changes_against(current, baseline);
     if changes.is_empty() {
         writeln!(out, "config matches defaults, so there are no differences")?;
     } else {
@@ -525,8 +538,13 @@ fn run_diff_summary(current: &Config, out: &mut dyn std::io::Write) -> Result<()
 /// value clamping and no shipped provider injected into a config that does not
 /// name it.
 pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
+    collect_config_changes_against(current, &Config::default())
+}
+
+/// [`collect_config_changes`] against `baseline` in place of the defaults.
+fn collect_config_changes_against(current: &Config, baseline: &Config) -> Vec<String> {
     let (Ok(default_json), Ok(current_json)) = (
-        serde_json::to_value(Config::default()),
+        serde_json::to_value(baseline),
         serde_json::to_value(current),
     ) else {
         return Vec::new();
@@ -1967,6 +1985,37 @@ mod tests {
 
         let own = finish_config(Err(anyhow!("unknown flag: --nope"))).unwrap_err();
         assert_eq!(own.to_string(), "unknown flag: --nope");
+    }
+
+    /// The agents folder a first start writes, and an unset one, are both the
+    /// default.
+    #[test]
+    fn config_diff_reports_no_agents_folder_for_a_fresh_install_or_an_unset_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+            worktrees_root: tmp.path().join("worktrees"),
+        };
+        crate::config::ensure_config(&paths).expect("first start");
+        let unset = fs::read_to_string(&paths.config_path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("standalone_agents_directory"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for text in [fs::read_to_string(&paths.config_path).unwrap(), unset] {
+            fs::write(&paths.config_path, &text).unwrap();
+            for form in [DiffForm::Summary, DiffForm::Raw] {
+                let mut out = Vec::new();
+                run_diff(&paths, form, &mut out).expect("diff");
+                let said = String::from_utf8(out).unwrap();
+                assert!(!said.contains("standalone_agents_directory"), "{said}");
+            }
+        }
     }
 
     /// A config.toml that is a link to a file that is gone is not "no config
@@ -3770,7 +3819,8 @@ mod tests {
     fn diff_summary_reports_no_differences_for_defaults() {
         // Just verify it runs without error on defaults.
         let defaults = Config::default();
-        run_diff_summary(&defaults, &mut std::io::sink()).expect("a sink takes every line");
+        run_diff_summary(&defaults, &defaults, &mut std::io::sink())
+            .expect("a sink takes every line");
     }
 
     #[test]

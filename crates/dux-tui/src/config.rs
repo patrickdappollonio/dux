@@ -2105,17 +2105,28 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
     out
 }
 
-/// The config a first start writes: the defaults, with every default that
-/// depends on where dux keeps its files written out as the path it resolves to.
-fn render_first_config(paths: &DuxPaths) -> String {
+/// Write out every unset default that depends on where dux keeps its files
+/// as the path it resolves to, as a first start writes it.
+pub(crate) fn resolve_path_defaults(config: &mut Config, paths: &DuxPaths) {
+    if config.defaults.standalone_agents_directory.is_none() {
+        config.defaults.standalone_agents_directory = Some(
+            dux_core::config::default_standalone_agents_root(paths)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+}
+
+/// The config a first start writes: the defaults, with the paths resolved.
+pub(crate) fn first_config(paths: &DuxPaths) -> Config {
     let mut config = Config::default();
-    config.defaults.standalone_agents_directory = Some(
-        dux_core::config::default_standalone_agents_root(paths)
-            .to_string_lossy()
-            .into_owned(),
-    );
+    resolve_path_defaults(&mut config, paths);
+    config
+}
+
+fn render_first_config(paths: &DuxPaths) -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
-    render_config(&config, &bindings)
+    render_config(&first_config(paths), &bindings)
 }
 
 pub(crate) fn render_default_config() -> String {
