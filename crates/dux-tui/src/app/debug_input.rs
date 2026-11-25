@@ -369,6 +369,8 @@ impl App {
         let held = self.debug_raw_input.take_partial_sequence();
         if in_paste {
             self.cut_paste_off(&held);
+        } else {
+            self.cut_key_start_off(&held);
         }
         self.debug_raw_input = DebugRawInput::default();
     }

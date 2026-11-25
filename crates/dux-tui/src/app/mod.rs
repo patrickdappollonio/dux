@@ -875,12 +875,8 @@ pub(crate) struct App {
     /// The input debugger's own raw reader, apart from the forwarding path's.
     pub(crate) debug_raw_input: debug_input::DebugRawInput,
     pub(crate) raw_input_buf: Vec<u8>,
-    /// Separate buffer for scanning `ToggleFullscreen` during the loading phase.
-    /// Kept independent of `raw_input_buf` so that suppressed keystrokes
-    /// cannot leak into the first post-loading `process_raw_input_bytes` call.
-    pub(crate) loading_input_buf: Vec<u8>,
     /// The pty the forwarding reader's state (`raw_input_parser`,
-    /// `raw_input_buf`, `raw_paste`, `loading_input_buf`) was read for, or
+    /// `raw_input_buf`, `raw_paste`) was read for, or
     /// none when that reader did not take the last poll's input.
     pub(crate) forwarding_reader_pty: Option<String>,
     /// The reader that took the last poll's input.
@@ -888,6 +884,8 @@ pub(crate) struct App {
     /// The rest of a paste whose reader ended before the paste did, dropped
     /// from the terminal's reads as it arrives.
     pub(crate) paste_remainder: Option<CutPaste>,
+    /// Where the windowed interface's keys went when the last poll ended.
+    pub(crate) keys_went_to: Option<KeyDestination>,
     /// Host terminal-window focus, tracked via DEC mode 1004 focus reports.
     /// Gates the per-tick "viewed" stamp so an unfocused window stops
     /// suppressing the focused agent's attention flag. Fails open until the
@@ -4529,6 +4527,17 @@ pub(crate) struct PendingMacroDelete {
     pub(crate) focus: ConfirmFocus,
 }
 
+/// Where the windowed interface's keys go: the dialog or bar that takes them,
+/// else the pane with focus and the program it may type into.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KeyDestination {
+    prompt: std::mem::Discriminant<PromptState>,
+    macro_bar: bool,
+    focus: FocusPane,
+    target: InputTarget,
+    program: Option<String>,
+}
+
 /// Which reader takes the run loop's input on one iteration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RunInputReader {
@@ -5915,10 +5924,10 @@ impl App {
             terminal_reading: TerminalReading::Reading,
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
-            loading_input_buf: Vec::new(),
             forwarding_reader_pty: None,
             last_input_reader: RunInputReader::Structured,
             paste_remainder: None,
+            keys_went_to: None,
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
@@ -6475,7 +6484,7 @@ impl App {
     pub(crate) fn poll_run_input_from(&mut self, terminal: BorrowedFd<'_>) -> bool {
         let reader = self.run_input_reader();
         self.end_what_other_readers_hold(reader);
-        match reader {
+        let should_exit = match reader {
             RunInputReader::Debugger => match self.poll_debug_raw_input(terminal) {
                 Ok(should_exit) => should_exit,
                 Err(err) => {
@@ -6488,6 +6497,18 @@ impl App {
             },
             RunInputReader::Forwarding => self.poll_raw_run_input(terminal),
             RunInputReader::Structured => self.poll_structured_run_input(terminal),
+        };
+        self.keys_went_to = Some(self.key_destination());
+        should_exit
+    }
+
+    fn key_destination(&self) -> KeyDestination {
+        KeyDestination {
+            prompt: std::mem::discriminant(&self.prompt),
+            macro_bar: self.macro_bar.is_some(),
+            focus: self.focus,
+            target: self.input_target,
+            program: self.selected_terminal_surface_id(),
         }
     }
 
@@ -6497,7 +6518,8 @@ impl App {
     /// it read moved input away from has handed the rest of its read on and
     /// holds nothing here, so this ends only what something other than a key
     /// cut off: a dialog a worker opens or one that closes by itself, a
-    /// program exiting, another program selected.
+    /// program exiting, another program selected. The windowed interface's
+    /// held input also ends when its keys moved since the last poll.
     ///
     /// The rest of a paste cut off at an earlier hand-over stops being dropped
     /// at this one, so typing after input has moved on again is never taken
@@ -6509,6 +6531,16 @@ impl App {
             None
         };
         if reader == self.last_input_reader && forwarding_to == self.forwarding_reader_pty {
+            // Between polls no key is read, so a move of the windowed
+            // interface's keys there is one no key made.
+            if reader == RunInputReader::Structured
+                && self
+                    .keys_went_to
+                    .as_ref()
+                    .is_some_and(|went| *went != self.key_destination())
+            {
+                self.end_windowed_reader_held();
+            }
             return;
         }
         if self
@@ -6522,10 +6554,7 @@ impl App {
             self.end_debug_raw_input_cut_off();
         }
         if reader != RunInputReader::Structured {
-            let begun = self.terminal_input.end_begun_sequence();
-            if let Some(held) = begun.strip_prefix(crate::raw_input::BRACKET_PASTE_START) {
-                self.cut_paste_off(held);
-            }
+            self.end_windowed_reader_held();
         }
         if forwarding_to != self.forwarding_reader_pty {
             self.end_forwarding_raw_input();
@@ -6537,6 +6566,16 @@ impl App {
         }
     }
 
+    /// Drop the start of a key or a paste the windowed interface holds,
+    /// as [`Self::cut_held_input_off`] does.
+    fn end_windowed_reader_held(&mut self) {
+        let begun = self.terminal_input.end_begun_sequence();
+        match begun.strip_prefix(crate::raw_input::BRACKET_PASTE_START) {
+            Some(pasted) => self.cut_paste_off(pasted),
+            None => self.cut_key_start_off(&begun),
+        }
+    }
+
     /// Drop the rest of a paste a reader stopped reading, `held` being the
     /// paste's bytes it held unfinished, from what the terminal sends next.
     pub(crate) fn cut_paste_off(&mut self, held: &[u8]) {
@@ -6544,6 +6583,20 @@ impl App {
             rest: crate::raw_input::PasteRemainder::after(held, Instant::now()),
             hand_over_seen: false,
         });
+    }
+
+    /// The same for `begun`, the start of a key a reader stopped reading, when
+    /// it begins the paste start marker and so may be a paste.
+    pub(crate) fn cut_key_start_off(&mut self, begun: &[u8]) {
+        if crate::raw_input::begins_paste_start(begun) {
+            self.paste_remainder = Some(CutPaste {
+                rest: crate::raw_input::PasteRemainder::after_start_of_marker(
+                    begun,
+                    Instant::now(),
+                ),
+                hand_over_seen: false,
+            });
+        }
     }
 
     /// Wait up to `timeout` for `terminal` to have bytes, and say whether it

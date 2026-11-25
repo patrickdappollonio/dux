@@ -26,12 +26,22 @@ pub(crate) fn last_paste_marker_opens(bytes: &[u8]) -> Option<bool> {
         })
 }
 
+/// Whether `bytes` is a proper, non-empty start of the paste start marker.
+pub(crate) fn begins_paste_start(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes.len() < BRACKET_PASTE_START.len()
+        && BRACKET_PASTE_START.starts_with(bytes)
+}
+
 /// The rest of a bracketed paste whose reader ended before the paste did,
 /// dropped from what the terminal sends so that no reader takes it as keys.
 /// It ends with the paste's end marker, or once the paste has gone
 /// [`UNFINISHED_PASTE_WAIT`] without a byte; what follows is read as usual.
 #[derive(Debug)]
 pub(crate) struct PasteRemainder {
+    /// How many bytes of the start marker have arrived, while the reader
+    /// ended part way through it; `None` once the paste has begun.
+    start_matched: Option<usize>,
     /// How many leading bytes of the end marker the bytes dropped so far end
     /// with.
     matched: usize,
@@ -44,12 +54,26 @@ impl PasteRemainder {
     /// paste's bytes it had not finished reading.
     pub(crate) fn after(held: &[u8], now: Instant) -> Self {
         let mut remainder = Self {
+            start_matched: None,
             matched: 0,
             last: now,
         };
         // Bytes a reader holds unfinished never hold a whole end marker.
         let _ = remainder.end_in(held);
         remainder
+    }
+
+    /// What follows a reader that ended at `now` holding `begun`, a proper
+    /// start of the paste start marker: a paste when the bytes after it
+    /// complete the marker, dropped with them. The first byte that does not
+    /// is read as usual, and the marker bytes before it are dropped.
+    pub(crate) fn after_start_of_marker(begun: &[u8], now: Instant) -> Self {
+        debug_assert!(begins_paste_start(begun));
+        Self {
+            start_matched: Some(begun.len()),
+            matched: 0,
+            last: now,
+        }
     }
 
     /// Where the paste ends in `bytes`, read at `now`: the index just past
@@ -65,6 +89,14 @@ impl PasteRemainder {
 
     fn end_in(&mut self, bytes: &[u8]) -> Option<usize> {
         for (index, &byte) in bytes.iter().enumerate() {
+            if let Some(started) = self.start_matched {
+                if byte != BRACKET_PASTE_START[started] {
+                    return Some(index);
+                }
+                self.start_matched =
+                    Some(started + 1).filter(|&next| next < BRACKET_PASTE_START.len());
+                continue;
+            }
             // The marker's one Escape is its first byte, so a byte that breaks
             // a partial match can only start a new one by being that Escape.
             self.matched = if byte == BRACKET_PASTE_END[self.matched] {
@@ -568,6 +600,7 @@ fn utf8_sequence(buf: &[u8]) -> Option<usize> {
 /// Returns `(complete, remainder)`: fully received sequences, and the trailing
 /// bytes that could start an incomplete one (a partial CSI or UTF-8 character).
 /// Boundaries only; the splitter does not interpret what a sequence means.
+#[cfg(test)]
 pub(crate) fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     let mut sequences: Vec<&[u8]> = Vec::new();
     let mut i = 0;
@@ -606,6 +639,20 @@ mod tests {
             remainder.end_in_read(b"\x1b[20\x1b\x1b[201~z", now),
             Some(11)
         );
+    }
+
+    #[test]
+    fn a_held_start_of_the_start_marker_is_a_paste_only_when_the_marker_completes() {
+        let now = Instant::now();
+        let mut paste = PasteRemainder::after_start_of_marker(b"\x1b[2", now);
+        assert_eq!(paste.end_in_read(b"0", now), None);
+        assert_eq!(paste.end_in_read(b"0~a\r\x1b[201~x", now), Some(10));
+        let mut key = PasteRemainder::after_start_of_marker(b"\x1b[2", now);
+        assert_eq!(key.end_in_read(b"0;5~x", now), Some(1));
+        assert!(begins_paste_start(b"\x1b"));
+        assert!(!begins_paste_start(b""));
+        assert!(!begins_paste_start(BRACKET_PASTE_START));
+        assert!(!begins_paste_start(b"\x1b[3"));
     }
 
     #[test]
