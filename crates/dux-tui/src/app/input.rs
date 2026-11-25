@@ -3477,11 +3477,11 @@ impl App {
         // the macro bar) can move before the child echoes anything.
         self.mark_frame_dirty();
 
-        if self.consume_loading_raw_input(first) {
+        let Some(start) = self.raw_input_after_loading(first) else {
             return Ok(false);
-        }
+        };
 
-        if self.process_raw_input_bytes(first) {
+        if self.process_raw_input_bytes(&first[start..]) {
             return Ok(true);
         }
 
@@ -3530,6 +3530,7 @@ impl App {
     /// was parsed past that key, so the parser's state is about the bytes the
     /// key hands on, which the next reader reads whole.
     fn clear_forwarding_raw_input(&mut self) {
+        self.raw_input_read_while_loading = false;
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.raw_paste = super::RawPaste {
@@ -3568,17 +3569,28 @@ impl App {
         false
     }
 
-    /// Suppress bytes until the provider has visible output, watching them
-    /// only for a focus report and a key or click that leaves fullscreen.
-    fn consume_loading_raw_input(&mut self, bytes: &[u8]) -> bool {
+    /// Where in `bytes`, one read, the program's input starts: `None` while
+    /// the program has printed nothing, the loading phase taking every byte
+    /// and watching them only for a focus report and a key or click that
+    /// leaves fullscreen. The first read once it has printed ends what the
+    /// reader holds from the loading phase, as a hand-over with no key does,
+    /// so nothing typed while the program loaded reaches it: the start of a
+    /// key is dropped, and the rest of a paste is dropped up to its end
+    /// marker.
+    fn raw_input_after_loading(&mut self, bytes: &[u8]) -> Option<usize> {
         if self
             .selected_terminal_surface_client()
             .is_some_and(|provider| !provider.has_output())
         {
+            self.raw_input_read_while_loading = true;
             self.scan_loading_phase(bytes);
-            return true;
+            return None;
         }
-        false
+        if !self.raw_input_read_while_loading {
+            return Some(0);
+        }
+        self.end_forwarding_raw_input();
+        Some(self.paste_remainder_in(bytes))
     }
 
     /// Drain immediately available chunks within one frame budget so a large
@@ -3612,10 +3624,10 @@ impl App {
             // A chunk that lands while the provider is still loading gets the
             // loading phase's treatment, as the first chunk did, rather than
             // being read and then dropped.
-            if self.consume_loading_raw_input(&buf[..n2]) {
+            let Some(start) = self.raw_input_after_loading(&buf[..n2]) else {
                 break;
-            }
-            let should_exit = self.process_raw_input_bytes(&buf[..n2]);
+            };
+            let should_exit = self.process_raw_input_bytes(&buf[start..n2]);
             if should_exit {
                 return Ok(true);
             }
@@ -3647,10 +3659,10 @@ impl App {
             0
         };
         // An empty read decides the held key on its own.
-        if self.consume_loading_raw_input(&buf[..n]) {
+        let Some(start) = self.raw_input_after_loading(&buf[..n]) else {
             return Ok(false);
-        }
-        Ok(self.process_raw_input_bytes(&buf[..n]))
+        };
+        Ok(self.process_raw_input_bytes(&buf[start..n]))
     }
 
     fn parse_raw_input_sequences(&mut self, bytes: &[u8]) -> Vec<crate::raw_input::ParsedSequence> {

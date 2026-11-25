@@ -1273,6 +1273,83 @@ mod maximize_and_back {
         assert_eq!(outcome.received, "");
         assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
     }
+
+    /// A program that prints nothing until `go` exists and then writes what
+    /// it receives to the rig's file, put behind the agent pane in place of
+    /// the one there; returns `go`.
+    fn a_program_that_loads_until_told(rig: &mut Rig) -> PathBuf {
+        let go = rig.received.with_file_name("go");
+        let script = format!(
+            "stty raw -echo; while [ ! -e '{}' ]; do sleep 0.01; done; \
+             printf ready; exec cat > '{}'",
+            go.display(),
+            rig.received.display()
+        );
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), script],
+            Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn a program");
+        let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+        rig.app.engine.providers.insert(tab, client);
+        go
+    }
+
+    /// The program `a_program_that_loads_until_told` put behind the pane
+    /// prints, ending the phase where it is still loading.
+    fn the_program_finishes_loading(rig: &Rig, go: &Path) {
+        std::fs::write(go, b"").expect("tell the program to print");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !rig
+            .app
+            .selected_terminal_surface_client()
+            .is_some_and(PtyClient::has_output)
+        {
+            assert!(Instant::now() < deadline, "the program never printed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Alt-[ typed while the program loads, held for the key that may follow,
+    /// is dropped when the program prints: the next key typed reaches the
+    /// program as itself.
+    #[test]
+    fn an_alt_bracket_typed_while_the_program_loads_never_joins_the_key_after_it() {
+        let mut rig = Rig::new(LOADING);
+        let go = a_program_that_loads_until_told(&mut rig);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        the_program_finishes_loading(&rig, &go);
+        rig.type_bytes(b"A");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "A");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
+
+    /// A lone Escape typed while the program loads and still held when the
+    /// program prints, before the wait that decides it has ended, never
+    /// reaches the program.
+    #[test]
+    fn an_escape_typed_while_the_program_loads_never_reaches_it_once_it_prints() {
+        let mut rig = Rig::new(LOADING);
+        let go = a_program_that_loads_until_told(&mut rig);
+        rig.type_bytes(b"\x1b");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b");
+        the_program_finishes_loading(&rig, &go);
+        rig.settle();
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
+    }
 }
 
 /// Keys around a key that opens a dialog or an overlay, or takes over the pane

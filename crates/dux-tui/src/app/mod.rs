@@ -895,6 +895,9 @@ pub(crate) struct App {
     /// `raw_input_buf`, `raw_paste`) was read for, or
     /// none when that reader did not take the last poll's input.
     pub(crate) forwarding_reader_pty: Option<String>,
+    /// Whether the forwarding reader read input while its program was still
+    /// loading, since it last ended.
+    pub(crate) raw_input_read_while_loading: bool,
     /// The reader that took the last poll's input.
     pub(crate) last_input_reader: RunInputReader,
     /// The rest of a paste whose reader ended before the paste did, dropped
@@ -5949,6 +5952,7 @@ impl App {
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             forwarding_reader_pty: None,
+            raw_input_read_while_loading: false,
             last_input_reader: RunInputReader::Structured,
             paste_remainder: None,
             keys_went_to: None,
@@ -6680,18 +6684,25 @@ impl App {
     /// moving what follows the paste to the front: returns how many bytes are
     /// left.
     fn drop_paste_remainder(&mut self, read: &mut [u8]) -> usize {
+        let end = self.paste_remainder_in(read);
+        read.copy_within(end.., 0);
+        read.len() - end
+    }
+
+    /// How many leading bytes of `read`, one read of the terminal, belong to
+    /// the rest of a paste a hand-over cut off.
+    pub(crate) fn paste_remainder_in(&mut self, read: &[u8]) -> usize {
         if read.is_empty() {
             return 0;
         }
         let Some(cut) = self.paste_remainder.as_mut() else {
-            return read.len();
-        };
-        let Some(end) = cut.rest.end_in_read(read, paste_clock()) else {
             return 0;
         };
+        let Some(end) = cut.rest.end_in_read(read, paste_clock()) else {
+            return read.len();
+        };
         self.paste_remainder = None;
-        read.copy_within(end.., 0);
-        read.len() - end
+        end
     }
 
     /// One read of `terminal` into `buf`, as much as it has ready. A read of

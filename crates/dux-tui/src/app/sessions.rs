@@ -6184,6 +6184,7 @@ mod tests {
             debug_raw_input: crate::app::debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             forwarding_reader_pty: None,
+            raw_input_read_while_loading: false,
             last_input_reader: crate::app::RunInputReader::Structured,
             paste_remainder: None,
             keys_went_to: None,
