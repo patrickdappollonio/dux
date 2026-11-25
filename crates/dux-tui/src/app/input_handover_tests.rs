@@ -6,8 +6,17 @@
 //! One that no key causes (a dialog a worker opens, a program exiting, another
 //! program selected) ends what the reader held unfinished: the start of a key
 //! is dropped, and a paste is closed for the program it was going to and its
-//! rest dropped up to its end marker, so it never acts as keys. A held start
-//! of the paste start marker three bytes or longer (`ESC [ 2` on) counts as a
+//! rest dropped up to its end marker, so it never acts as keys. The dropping
+//! also ends at the next hand-over with no key, and before the first read
+//! that comes `UNFINISHED_PASTE_WAIT` (one second) or more after the last
+//! read of `PASTE_SIZED_READ` (256) bytes or more, or after the cut when no
+//! read that size has come, or `CUT_PASTE_DROP_LIMIT` (five seconds) or more
+//! after the cut; that read is read as keys. Keys typed by hand come in reads
+//! far smaller than that, so they are dropped for at most one second after
+//! the cut or the last read that size. What the maximized pane holds from
+//! while its program was still loading ends the same way when the program
+//! first prints, so nothing typed while it loaded reaches it. A held start of
+//! the paste start marker three bytes or longer (`ESC [ 2` on) counts as a
 //! paste once the bytes after it complete the marker; a held Escape or Alt-[
 //! is a key typed by hand and is dropped alone. The end marker goes through
 //! the typing gate, so a program in a row another device drives stays in the
