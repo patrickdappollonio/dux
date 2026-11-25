@@ -1733,6 +1733,24 @@ describe("TerminalPane project-terminal owner resolution", () => {
     )
     expect(screen.getByText("Launching terminal…")).toBeTruthy()
   })
+
+  // The spine reports `has_output: false` again once the process behind a pty
+  // exits, so the pane's readiness is latched: a pty that has printed never
+  // goes back to the launch spinner over its own output.
+  it("never shows the launch spinner again once the terminal has printed", () => {
+    const pane = () => (
+      <TerminalPane
+        kind="terminal"
+        id="pt-1"
+        owner={{ kind: "project", projectId: "p1" }}
+      />
+    )
+    mockState = projectState(true)
+    const { rerender } = render(pane())
+    mockState = projectState(false)
+    rerender(pane())
+    expect(screen.queryByText("Launching terminal…")).toBeNull()
+  })
 })
 
 // The macro trigger no longer floats over the PTY at ANY width. On desktop it
