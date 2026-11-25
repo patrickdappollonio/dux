@@ -684,7 +684,7 @@ describe("DeleteSessionDialog", () => {
       )
       // The room for a two-line answer is held from the first frame too.
       const slot = checking.closest('[data-slot="branch-check-slot"]')!
-      expect(slot.className).toContain("min-h-[calc(2*var(--text-xs)*var(--text-xs--line-height)+12px)]")
+      expect(slot.className).toContain("min-h-[calc(2*var(--text-xs)*var(--text-xs--line-height)+13px)]")
       await act(async () => answer(offer({ name: "dux/s1", origin: "dux" })))
       expect(screen.getByRole("status")).toBe(checking)
       expect(checking.closest('[data-slot="branch-check-slot"]')).toBe(slot)

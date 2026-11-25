@@ -338,8 +338,11 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 // by whole lines and its padding stays even.
 // The room a two-line pill takes, held from the dialog's first frame so an
 // answer of one or two lines moves nothing around it: two of the pill's text
-// lines plus its `py-[5px]` and its 1px border, top and bottom.
-const PILL_SLOT = "min-h-[calc(2*var(--text-xs)*var(--text-xs--line-height)+12px)]"
+// lines plus its `py-[5px]` and its 1px border, top and bottom, plus the one
+// pixel a line holding a chip runs taller than the text's own line height (the
+// chip's monospace font at 0.85em measures 16.6px on a 16px line, so a two-line
+// answer with a chip on it is 44.6px, not 44).
+const PILL_SLOT = "min-h-[calc(2*var(--text-xs)*var(--text-xs--line-height)+13px)]"
 
 const QUIET_PILL = "border-border/60 bg-muted/40 text-muted-foreground"
 const WARNING_PILL = "border-dux-warning/30 bg-dux-warning/10"
