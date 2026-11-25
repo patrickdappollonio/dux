@@ -10,4 +10,4 @@
 - Admonitions box only what a skimmer must not miss: WARNING or CAUTION for security and loss, IMPORTANT for must-know behavior, TIP for a better way, NOTE for asides.
 - Docs and screenshots show the TUI's default glyphs (`theme::Glyphs::PLAIN`: `※`, `✷`, `↳`), never Nerd Font ones; a page that names an icon shows a screenshot of it in context nearby.
 - When the default glyph set changes, the docs text and every affected screenshot change with it.
-- A stale screenshot under `public/screens/` is regenerated with `tools/preview-env/screens/reshoot.sh`, with no argument for all or the screenshot's name for one.
+- A stale screenshot under `public/screens/` is regenerated with `tools/preview-env/screens/reshoot.sh`, with no argument for all or the screenshot's name for one; every image there has a committed journey of the same name, so a new image gets one.

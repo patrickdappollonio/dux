@@ -20,7 +20,7 @@ React, Vite and Tailwind, dark-only. Paths in `lib/`, `components/` and `hooks/`
 - Every menu item has a leading icon, and an item that opens a dialog or asks for confirmation ends in `…`.
 - Destructive menu items are neutral in color; the agent menu's Delete is the one red item.
 - A control that must work when a surface is gone lives in the menu of a surface that outlives it.
-- Each pane surface has one top menu (the flap's `⋯` on a phone, the pane header's `⋯` on a computer, the floating pill's in theater), and the input's controls live in its labelled Input group only.
+- Each pane surface has one top menu (the flap's `⋯` on a phone, the pane header's `⋯` on a computer, the floating pill's in theater), and the input's controls live in its labelled Input group; the one exception is the terminal-keys show/hide on a phone, which is a button in the pane's action cluster.
 - The sidebar row's menu and the floating pill's menu are the same body as the pane's top menu; an anchor changes where it opens, never what the pane put in it.
 - Every menu group has a heading, and a group with nothing in it renders no heading and no separator.
 - `lib/appMenu.ts` is pure data that both the desktop flyout and the phone's bottom sheet render.
@@ -44,7 +44,7 @@ React, Vite and Tailwind, dark-only. Paths in `lib/`, `components/` and `hooks/`
 - The message box and the terminal key row are independent and every combination of them is valid; the key row carries terminal keys only, never a control that changes a mode.
 - One input area serves an agent and its terminals and sends through the typing target's own connection; an input that completes later lands where it was aimed when it started.
 - Non-owners get no typing surfaces, and every write, macros included, goes through the ownership gate; a refusal never reports that something was sent.
-- In the terminal pane, selecting copies and right-click pastes with no context menu; clipboard chords are classified by physical key (`ev.code`), never `ev.key`.
+- In the terminal pane, selecting copies (while `ui.copy_on_select` is on, the default) and right-click pastes with no context menu; clipboard chords are classified by physical key (`ev.code`), never `ev.key`.
 - A touch gesture forwarded to a program is a replayed DOM event that xterm encodes; dux never encodes a mouse report itself.
 - A dropped, pasted or picked file is saved and its path pasted by the browser over its own gated connection; the upload route never writes to a terminal.
 

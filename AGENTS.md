@@ -1,6 +1,6 @@
 # dux
 
-This file and each `AGENTS.md` in an area directory hold what an agent must know before changing dux: rules stated as facts, at most 200 lines per file, with no history (that is in git), and no rule that a test already enforces.
+This file and each `AGENTS.md` in an area directory hold what an agent must know before changing dux: rules stated as facts, at most 200 lines per file, with no history (that is in git).
 When a change conflicts with a rule here, the rule wins.
 
 ## What dux is
@@ -57,7 +57,7 @@ When a change conflicts with a rule here, the rule wins.
 - A new action goes into the TUI's command palette (`dux_core::palette`), never a new global hotkey; the web's equivalent is the app menu (`lib/appMenu.ts`), which has no keyboard shortcut.
 - A pull request that adds a palette command states whether the web menu and the command line get it too.
 - Never conflate the TUI palette and the web app menu in docs or copy; scope a sentence that names a key to its surface; never suggest `ctrl-k` as a TUI rebind.
-- A click on an OSC 8 link in a terminal opens the link in dux and never reaches the program, even under mouse tracking; the hatch chord (Cmd on macOS, Ctrl elsewhere) forwards the click instead.
+- A click on an OSC 8 link in a terminal opens the link in dux and never reaches the program, even under mouse tracking; the hatch chord (on the web Cmd on macOS and Ctrl elsewhere, in the terminal UI Ctrl) forwards the click instead.
 - File editing is web-only; the TUI has no editor.
 - Welcome tips are playful and sassy: lead with a surprising feature, keep key references secondary.
 
@@ -80,7 +80,7 @@ When a change conflicts with a rule here, the rule wins.
 - A row is an agent with its tabs and terminals, or one project or standalone terminal; one device drives it at a time, and only a press of Take over moves it to another.
 - While a device drives a row, every other device and client is refused anything that changes that agent or writes in its folder.
 - `Engine::admit_row_change` in `crates/dux-core/src/engine/row_guard.rs` is the one question; a new request that changes a row gets a `RowChange` variant, turned into rows in `Engine::rows_changed`, never a check at its call site.
-- A change that would end a terminal another connection has open is refused, naming who, through the attachment registry in `dux-core`; `force_connected=true` skips only that refusal.
+- A change that would end a terminal another connection has open is refused, naming who, through the attachment registry in `dux-core`; `force_connected=true` goes ahead over it.
 
 ## Command line
 
