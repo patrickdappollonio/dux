@@ -488,7 +488,8 @@ fn run_diff_raw(current: &Config, baseline: &Config, out: &mut dyn std::io::Writ
     Ok(())
 }
 
-/// What `dux config diff --raw` prints for `current`.
+/// What `dux config diff --raw` prints for `current` against the defaults.
+#[cfg(test)]
 pub(crate) fn raw_diff_text(current: &Config) -> String {
     raw_diff_text_against(current, &Config::default())
 }
@@ -521,27 +522,28 @@ fn run_diff_summary(
     Ok(())
 }
 
-/// Every setting whose current value differs from the default, as display lines.
+/// Every setting whose current value differs from [`Config::default()`].
+#[cfg(test)]
+pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
+    collect_config_changes_against(current, &Config::default())
+}
+
+/// Every setting whose current value differs from `baseline`, as display lines.
 ///
-/// Derived, never hand-maintained: `current` and [`Config::default()`] are both
+/// Derived, never hand-maintained: `current` and `baseline` are both
 /// projected to `serde_json::Value` and walked structurally, so a config key
 /// added anywhere in the struct tree is reported without being registered here.
 ///
 /// `serde_json` and not `toml` on purpose. TOML has no null and its serializer
 /// omits a `None` struct field, which would make every default-`None` setting
-/// (`defaults.start_directory`, the optional provider fields) invisible to the
-/// comparison. JSON keeps them as an explicit null.
+/// (the optional provider fields) invisible to the comparison. JSON keeps them
+/// as an explicit null.
 ///
-/// What is compared is the parsed file against [`Config::default()`]: neither
-/// `load_config` nor `ProvidersConfig::ensure_defaults` runs, so the summary
-/// reports what the file says rather than what dux normalizes it into, with no
-/// value clamping and no shipped provider injected into a config that does not
-/// name it.
-pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
-    collect_config_changes_against(current, &Config::default())
-}
-
-/// [`collect_config_changes`] against `baseline` in place of the defaults.
+/// What is compared is the parsed file against the defaults a first start
+/// writes: neither `load_config` nor `ProvidersConfig::ensure_defaults` runs, so
+/// the summary reports what the file says rather than what dux normalizes it
+/// into, with no value clamping and no shipped provider injected into a config
+/// that does not name it.
 fn collect_config_changes_against(current: &Config, baseline: &Config) -> Vec<String> {
     let (Ok(default_json), Ok(current_json)) = (
         serde_json::to_value(baseline),
