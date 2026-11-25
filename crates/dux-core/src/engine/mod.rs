@@ -6445,6 +6445,38 @@ impl Engine {
         crate::config::standalone_agents_root(&self.config, &self.paths)
     }
 
+    /// The agent recorded at the folder a new standalone agent called `name`
+    /// would get in `root`. The one-agent-per-folder refusal a chosen folder
+    /// gets, which the folder's absence does not answer: an agent can be
+    /// recorded at a folder that is missing.
+    fn agent_recorded_at_new_folder(&self, root: &Path, name: &str) -> Option<&AgentSession> {
+        let resolved = crate::agent_folders::folder_path_for(
+            &crate::project_browser::canonical_or_original(root),
+            name,
+        );
+        crate::standalone_shortcuts::directory_occupant(
+            &resolved,
+            self.sessions.iter().map(AgentSession::directory),
+        )
+        .and_then(|index| self.sessions.get(index))
+    }
+
+    /// What the name step needs to answer whether a create in a new folder
+    /// would refuse `name`, off this thread.
+    pub fn new_folder_lookup(&self, name: &str) -> crate::agent_job::NewFolderLookup {
+        let root = self.standalone_agents_root();
+        let name = name.trim();
+        crate::agent_job::NewFolderLookup {
+            recorded_agent: (!name.is_empty())
+                .then(|| self.agent_recorded_at_new_folder(&root, name))
+                .flatten()
+                .map(AgentSession::display_label),
+            name: name.to_string(),
+            root,
+            worktrees: self.worktree_ops().clone(),
+        }
+    }
+
     /// Plan a standalone-agent create in a new folder dux creates for it,
     /// named after the agent, in [`Self::standalone_agents_root`].
     ///
@@ -6475,19 +6507,7 @@ impl Engine {
         let provider = self.standalone_provider(provider)?;
         let root = self.standalone_agents_root();
         let folder = crate::agent_folders::folder_path_for(&root, name);
-        // The same one-agent-per-folder refusal as a chosen folder, which the
-        // folder's absence does not answer: an agent can be recorded at a
-        // folder that is missing.
-        let resolved = crate::agent_folders::folder_path_for(
-            &crate::project_browser::canonical_or_original(&root),
-            name,
-        );
-        if let Some(existing) = crate::standalone_shortcuts::directory_occupant(
-            &resolved,
-            self.sessions.iter().map(AgentSession::directory),
-        )
-        .and_then(|index| self.sessions.get(index))
-        {
+        if let Some(existing) = self.agent_recorded_at_new_folder(&root, name) {
             anyhow::bail!(
                 "The standalone agent was not created at \"{}\". Agent \"{}\" already has that \
                  folder. Pick another name.",

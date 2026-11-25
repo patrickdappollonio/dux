@@ -913,15 +913,20 @@ struct NewFolderResponse {
     /// The folder the agent called `name` would run in, home-shortened, or
     /// `None` for an empty name.
     folder_label: Option<String>,
-    /// Whether something is already at that folder's path, which the create
-    /// would refuse. `false` for an empty name.
+    /// Whether the create would refuse the name for its folder: something it
+    /// would not take over is at the folder's path, or an agent is recorded
+    /// there. `false` for an empty name.
     taken: bool,
+    /// The agent recorded at the folder's path, by its label, when that is
+    /// why the name is taken.
+    taken_by_agent: Option<String>,
 }
 
 /// `GET /api/v1/standalone-agents/new-folder?name=`: the folder a standalone
-/// agent called `name` would get, and whether that name is taken. A read; the
-/// create itself refuses a taken name again, atomically. A name the
-/// agent-name rules refuse is refused here as the create refuses it.
+/// agent called `name` would get, and whether that name is taken, answered by
+/// the rules the create applies. A read; the create itself asks again,
+/// atomically. A name the agent-name rules refuse is refused here as the
+/// create refuses it.
 async fn standalone_new_folder(
     State(state): State<AppState>,
     Query(query): Query<NewFolderQuery>,
@@ -934,28 +939,34 @@ async fn standalone_new_folder(
         )
             .into_response();
     }
-    let Some(root) = state.engine.standalone_agents_root().await else {
+    let Some(lookup) = state.engine.new_folder_lookup(typed.to_string()).await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "dux is shutting down, so the folder could not be looked up.",
         )
             .into_response();
     };
-    let name = query.name.trim().to_string();
     let answer = tokio::task::spawn_blocking(move || {
-        let root_label = dux_core::home_path::shorten_home(&root);
-        if name.is_empty() {
+        let root_label = dux_core::home_path::shorten_home(&lookup.root);
+        if lookup.name.is_empty() {
             return NewFolderResponse {
                 root_label,
                 folder_label: None,
                 taken: false,
+                taken_by_agent: None,
             };
         }
-        let folder = dux_core::agent_folders::folder_path_for(&root, &name);
+        let folder = dux_core::agent_folders::folder_path_for(&lookup.root, &lookup.name);
+        let (taken, taken_by_agent) = match lookup.taken() {
+            dux_core::agent_job::NewFolderTaken::No => (false, None),
+            dux_core::agent_job::NewFolderTaken::FolderThere => (true, None),
+            dux_core::agent_job::NewFolderTaken::AgentRecorded(agent) => (true, Some(agent)),
+        };
         NewFolderResponse {
             root_label,
             folder_label: Some(dux_core::home_path::shorten_home(&folder)),
-            taken: std::fs::symlink_metadata(&folder).is_ok(),
+            taken,
+            taken_by_agent,
         }
     })
     .await;

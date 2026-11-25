@@ -333,9 +333,13 @@ pub(crate) enum EngineRequest {
     /// the file count runs off-thread in the handler). The outer `None` is an
     /// unknown session, the inner `None` an agent in a worktree.
     StandaloneFolder(String, oneshot::Sender<Option<Option<(String, bool)>>>),
-    /// The folder new standalone agents' folders are created in, from the
-    /// live config.
-    StandaloneAgentsRoot(oneshot::Sender<std::path::PathBuf>),
+    /// What the name step needs to answer whether a create in a new folder
+    /// would refuse a name (instant; the filesystem is asked off-thread in
+    /// the handler).
+    NewFolderLookup(
+        String,
+        oneshot::Sender<dux_core::agent_job::NewFolderLookup>,
+    ),
     /// What git dux may do for one agent in one round trip: the directory, whether
     /// the changes panel works, and whether the branch features exist there. Asking
     /// separately would let a caller act on half an answer. Asking also refreshes a
@@ -2068,12 +2072,15 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
-    /// See [`EngineRequest::StandaloneAgentsRoot`]. `None` when the engine
-    /// is gone.
-    pub async fn standalone_agents_root(&self) -> Option<std::path::PathBuf> {
+    /// See [`EngineRequest::NewFolderLookup`]. `None` when the engine is
+    /// gone.
+    pub async fn new_folder_lookup(
+        &self,
+        name: String,
+    ) -> Option<dux_core::agent_job::NewFolderLookup> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::StandaloneAgentsRoot(tx))
+            .send(EngineRequest::NewFolderLookup(name, tx))
             .await
             .ok()?;
         rx.await.ok()
@@ -2844,7 +2851,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::PullRequestBranches(..)
         | EngineRequest::RenamePushedProbe(..)
         | EngineRequest::StandaloneFolder(..)
-        | EngineRequest::StandaloneAgentsRoot(..)
+        | EngineRequest::NewFolderLookup(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::SessionMissingDirectoryReason(..)
         | EngineRequest::PtyKeyForPaneId(..)
@@ -4913,7 +4920,7 @@ fn request_row_change(req: &EngineRequest) -> Option<(RowChange, &RowAsker)> {
         | EngineRequest::SessionBranchDeleteInputs(..)
         | EngineRequest::RenamePushedProbe(..)
         | EngineRequest::StandaloneFolder(..)
-        | EngineRequest::StandaloneAgentsRoot(..)
+        | EngineRequest::NewFolderLookup(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::SessionMissingDirectoryReason(..)
         | EngineRequest::NoteChangedFilesOutcome(..)
@@ -5357,8 +5364,8 @@ fn handle_request(
                 });
             answer(reply, folder);
         }
-        EngineRequest::StandaloneAgentsRoot(reply) => {
-            answer(reply, engine.standalone_agents_root());
+        EngineRequest::NewFolderLookup(name, reply) => {
+            answer(reply, engine.new_folder_lookup(&name));
         }
         EngineRequest::PullRequestBranches(session_id, reply) => {
             answer(
@@ -10564,8 +10571,8 @@ mod tests {
                 false,
             ),
             (
-                "StandaloneAgentsRoot",
-                EngineRequest::StandaloneAgentsRoot(dead_reply()),
+                "NewFolderLookup",
+                EngineRequest::NewFolderLookup("otter".into(), dead_reply()),
                 false,
             ),
             (

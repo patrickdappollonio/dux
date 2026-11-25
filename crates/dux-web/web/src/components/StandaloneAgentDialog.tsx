@@ -17,6 +17,7 @@ import {
 } from "@/lib/agentName"
 import { standaloneAgentDefaultName } from "@/lib/agentWorkspace"
 import { browseApi } from "@/lib/browseApi"
+import { type Prose, prose, quotedChip, renderProse } from "@/lib/prose"
 import { sessionsApi } from "@/lib/sessionsApi"
 import type { ProjectShortcutView } from "@/lib/types"
 import {
@@ -27,11 +28,24 @@ import {
   useDux,
 } from "@/lib/store"
 
+/** Why the server's create would refuse a name for its folder: something is
+ * already there, or an agent is recorded there (`agent`). */
+interface FolderTaken {
+  agent: string | null
+}
+
+/** Why the name's folder is taken, as the create says it. */
+function folderTakenWords(taken: FolderTaken): Prose {
+  return taken.agent === null
+    ? prose`A folder with that name is already there.`
+    : prose`Agent ${quotedChip(taken.agent)} already has that folder.`
+}
+
 /** Why Create agent waits on the name step, or `null` when it may go. */
-function newFolderBlocker(name: string, taken: boolean): string | null {
+function newFolderBlocker(name: string, taken: FolderTaken | null): string | Prose | null {
   if (name === "") return "Give the agent a name first."
   if (!isValidAgentName(name)) return INVALID_AGENT_NAME
-  if (taken) return "A folder with that name is already there."
+  if (taken !== null) return folderTakenWords(taken)
   return null
 }
 
@@ -49,9 +63,13 @@ function useNewFolderStep(onUseExisting: () => void): StepParts {
   const [name, setName] = useState("")
   const [generating, setGenerating] = useState(true)
   const [rootLabel, setRootLabel] = useState<string | null>(null)
-  // The latest answer about whether a name's folder is already there, kept
-  // with the name it answers so a stale one never speaks for another.
-  const [takenAnswer, setTakenAnswer] = useState<{ name: string; taken: boolean } | null>(null)
+  // The latest answer about whether the create would refuse a name for its
+  // folder, kept with the name it answers so a stale one never speaks for
+  // another.
+  const [takenAnswer, setTakenAnswer] = useState<{
+    name: string
+    taken: FolderTaken | null
+  } | null>(null)
 
   useEffect(() => {
     let live = true
@@ -86,7 +104,10 @@ function useNewFolderStep(onUseExisting: () => void): StepParts {
         .then((reply) => {
           if (!live) return
           setRootLabel(reply.root_label)
-          setTakenAnswer({ name, taken: reply.taken })
+          setTakenAnswer({
+            name,
+            taken: reply.taken ? { agent: reply.taken_by_agent ?? null } : null,
+          })
         })
         .catch(() => {})
     }, 150)
@@ -96,13 +117,13 @@ function useNewFolderStep(onUseExisting: () => void): StepParts {
     }
   }, [name, valid])
 
-  const taken = takenAnswer !== null && takenAnswer.name === name && takenAnswer.taken
+  const taken = takenAnswer !== null && takenAnswer.name === name ? takenAnswer.taken : null
   const blocker = newFolderBlocker(name, taken)
   const error =
     name !== "" && !valid
       ? INVALID_AGENT_NAME
-      : taken
-        ? "A folder with that name is already there. Pick another name."
+      : taken !== null
+        ? renderProse(prose`${folderTakenWords(taken)} Pick another name.`)
         : null
 
   function handleCreate() {

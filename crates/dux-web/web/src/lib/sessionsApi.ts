@@ -254,11 +254,13 @@ export interface FolderFilesReply {
 }
 
 // Where a new standalone agent called `name` would run, home-shortened, and
-// whether that folder is already there.
+// whether the create would refuse the name for its folder: something is
+// already there, or an agent is recorded there (`taken_by_agent`).
 export interface NewAgentFolderReply {
   root_label: string
   folder_label: string | null
   taken: boolean
+  taken_by_agent?: string | null
 }
 
 // Both boxes' answers. Both are always sent: a box left out means nobody was

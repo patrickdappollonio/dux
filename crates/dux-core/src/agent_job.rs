@@ -3040,6 +3040,69 @@ fn run_create_standalone_agent_job(
     );
 }
 
+/// Whether nothing works in the folder at `path` and no operation holds it
+/// but the `own_holds` the asker took, which is what lets a create take over
+/// a folder an earlier create left.
+fn left_folder_unused(
+    worktrees: &crate::worktree_ops::WorktreeOps,
+    path: &Path,
+    own_holds: usize,
+) -> bool {
+    worktrees.holders(path).len() == own_holds
+        && crate::process_sessions::read_process_table_strict()
+            .and_then(|table| crate::process_sessions::occupants_of(&table, &[path.to_path_buf()]))
+            .is_ok_and(|found| found.is_empty())
+}
+
+/// What the name step of a standalone agent in a new folder needs to say
+/// whether the create would refuse the name for its folder.
+pub struct NewFolderLookup {
+    /// The folder new agents' folders are created in.
+    pub root: PathBuf,
+    /// The agent's name.
+    pub name: String,
+    /// The agent already recorded at the folder's path, by its label.
+    pub recorded_agent: Option<String>,
+    /// The paths operations hold.
+    pub worktrees: crate::worktree_ops::WorktreeOps,
+}
+
+impl std::fmt::Debug for NewFolderLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewFolderLookup")
+            .field("root", &self.root)
+            .field("name", &self.name)
+            .field("recorded_agent", &self.recorded_agent)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a create in a new folder would refuse the name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NewFolderTaken {
+    /// It would not.
+    No,
+    /// Something it would not take over is at the folder's path.
+    FolderThere,
+    /// This agent is recorded at the folder's path.
+    AgentRecorded(String),
+}
+
+impl NewFolderLookup {
+    /// The answer, by the rules the create applies. Touches the filesystem.
+    pub fn taken(&self) -> NewFolderTaken {
+        if let Some(agent) = &self.recorded_agent {
+            return NewFolderTaken::AgentRecorded(agent.clone());
+        }
+        let unused = |path: &Path| left_folder_unused(&self.worktrees, path, 0);
+        if crate::agent_folders::new_folder_is_taken(&self.root, &self.name, &unused) {
+            NewFolderTaken::FolderThere
+        } else {
+            NewFolderTaken::No
+        }
+    }
+}
+
 /// A standalone agent in a new folder: create `<root>/<name>`, refusing a name
 /// whose folder is already there, then run the provider in it.
 #[expect(
@@ -3073,14 +3136,7 @@ fn run_create_standalone_agent_in_new_folder_job(
             )
             .map_err(|refused| refused.sentence("create an agent there"))
     };
-    let unused = |path: &Path| {
-        worktrees.holders(path).len() == 1
-            && crate::process_sessions::read_process_table_strict()
-                .and_then(|table| {
-                    crate::process_sessions::occupants_of(&table, &[path.to_path_buf()])
-                })
-                .is_ok_and(|found| found.is_empty())
-    };
+    let unused = |path: &Path| left_folder_unused(worktrees, path, 1);
     let checks = crate::agent_folders::CreateChecks {
         hold: &hold,
         unused: &unused,

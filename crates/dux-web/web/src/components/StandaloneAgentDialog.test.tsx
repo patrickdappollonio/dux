@@ -37,11 +37,13 @@ vi.mock("@/lib/browseApi", () => ({
   browseApi: { agentName: () => agentName() },
 }))
 let takenNames: string[] = []
+let recordedAgents: Record<string, string> = {}
 const newAgentFolder = vi.fn((name: string) =>
   Promise.resolve({
     root_label: "~/.config/dux/agents",
     folder_label: name === "" ? null : `~/.config/dux/agents/${name}`,
-    taken: takenNames.includes(name),
+    taken: takenNames.includes(name) || name in recordedAgents,
+    taken_by_agent: recordedAgents[name] ?? null,
   }),
 )
 vi.mock("@/lib/sessionsApi", () => ({
@@ -93,6 +95,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   browseLands = true
   takenNames = []
+  recordedAgents = {}
 })
 
 // Open the dialog and go to its existing-folder step.
@@ -372,6 +375,20 @@ describe("StandaloneAgentDialog name step", () => {
     expect(
       screen.getByText("A folder with that name is already there. Pick another name."),
     ).toBeTruthy()
+    expect(createButton().disabled).toBe(true)
+  })
+
+  it("names the agent already recorded at the name's folder", async () => {
+    recordedAgents = { otter: "old-otter" }
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    fireEvent.change(nameField(), { target: { value: "otter" } })
+    await settle()
+    const agent = screen.getByText("old-otter")
+    expect(agent.parentElement!.textContent).toBe(
+      "Agent old-otter already has that folder. Pick another name.",
+    )
     expect(createButton().disabled).toBe(true)
   })
 

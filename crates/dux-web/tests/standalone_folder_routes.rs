@@ -173,6 +173,23 @@ async fn the_new_folder_route_names_the_folder_and_says_whether_it_is_taken() {
     );
 }
 
+/// The route answers as the create would: a folder an interrupted create left
+/// is free, and a folder an agent is recorded at names that agent.
+#[tokio::test]
+async fn the_new_folder_route_answers_as_the_create_would() {
+    let fx = boot().await;
+    let agents = fx.made.parent().expect("the agents folder");
+    dux_core::agent_folders::create_agent_folder(agents, "left").expect("left by a create");
+    let (_, body) = get_json(fx.addr, "/api/v1/standalone-agents/new-folder?name=left").await;
+    assert_eq!(body["taken"], false, "{body}");
+    assert!(body["taken_by_agent"].is_null(), "{body}");
+    let (_, body) = get_json(fx.addr, "/api/v1/standalone-agents/new-folder?name=made").await;
+    assert_eq!(body["taken"], true, "{body}");
+    assert_eq!(body["taken_by_agent"], "made", "{body}");
+    let (_, body) = get_json(fx.addr, "/api/v1/standalone-agents/new-folder?name=taken").await;
+    assert!(body["taken_by_agent"].is_null(), "{body}");
+}
+
 /// A name the agent-name rules refuse is refused here too, so `..` cannot
 /// make the route report on the agents folder's parent.
 #[tokio::test]

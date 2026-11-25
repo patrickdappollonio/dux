@@ -220,15 +220,39 @@ fn write_marker(dir: &OwnedFd, file_name: &str) -> std::io::Result<FolderMark> {
     Ok(mark)
 }
 
-/// Take over a folder of this user's holding only a marked marker file, left
-/// by a create that never recorded its agent; the fresh mark makes a removal
-/// still holding the old one keep it.
-fn take_over_left_folder(
+/// Whether a create of `agent_name` in `root` would go ahead with what is at
+/// its folder's path, asking `unused` as the create does. A folder that
+/// cannot be read is not reported as taken: the create says what is wrong.
+pub fn new_folder_is_taken(root: &Path, agent_name: &str, unused: &dyn Fn(&Path) -> bool) -> bool {
+    let name = folder_name_for(agent_name);
+    if name.is_empty() || name == "." || name == ".." {
+        return true;
+    }
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(root_fd) = rustix::fs::open(
+        &root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    match rustix::fs::statat(&root_fd, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => left_by_a_create(&root_fd, name.as_str(), &root.join(&name), unused).is_none(),
+        Err(_) => false,
+    }
+}
+
+/// The folder at `name`, opened, when it is one of this user's holding only a
+/// marked marker file, left by a create that never recorded its agent, and
+/// `unused` says nothing uses it.
+fn left_by_a_create(
     root_fd: &OwnedFd,
     name: &str,
     path: &Path,
     unused: &dyn Fn(&Path) -> bool,
-) -> Option<DirectoryIdentity> {
+) -> Option<(OwnedFd, rustix::fs::Stat)> {
     let dir = rustix::fs::openat(
         root_fd,
         name,
@@ -252,6 +276,18 @@ fn take_over_left_folder(
     if !unused(path) {
         return None;
     }
+    Some((dir, stat))
+}
+
+/// Take over a folder [`left_by_a_create`]; the fresh mark makes a removal
+/// still holding the old one keep it.
+fn take_over_left_folder(
+    root_fd: &OwnedFd,
+    name: &str,
+    path: &Path,
+    unused: &dyn Fn(&Path) -> bool,
+) -> Option<DirectoryIdentity> {
+    let (dir, stat) = left_by_a_create(root_fd, name, path, unused)?;
     let mark = write_marker(&dir, MARKER_SWAP_NAME).ok()?;
     if rustix::fs::renameat(&dir, MARKER_SWAP_NAME, &dir, MARKER_FILE_NAME).is_err() {
         let _ = rustix::fs::unlinkat(&dir, MARKER_SWAP_NAME, AtFlags::empty());
@@ -1130,6 +1166,32 @@ mod tests {
         }
         assert_eq!(marker_mark(&in_use.path), in_use.identity.mark);
         assert_eq!(marker_mark(&written.path), written.identity.mark);
+    }
+
+    #[test]
+    fn the_lookup_calls_taken_exactly_what_a_create_refuses() {
+        let tmp = root();
+        let left = create_agent_folder(tmp.path(), "left").unwrap();
+        let written = create_agent_folder(tmp.path(), "written").unwrap();
+        std::fs::write(written.path.join("note"), "x").unwrap();
+        for (name, unused, taken) in [
+            ("missing", true, false),
+            ("left", false, true),
+            ("written", true, true),
+            ("left", true, false),
+        ] {
+            assert_eq!(
+                new_folder_is_taken(tmp.path(), name, &move |_| unused),
+                taken,
+                "{name}"
+            );
+            let refused = matches!(
+                create_agent_folder_with(tmp.path(), name, &checks(&|_| Ok(()), &move |_| unused)),
+                Err(CreateAgentFolderError::AlreadyThere(_))
+            );
+            assert_eq!(refused, taken, "{name}");
+        }
+        assert!(left.path.is_dir());
     }
 
     #[test]
