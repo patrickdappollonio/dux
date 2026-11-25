@@ -323,6 +323,10 @@ describe("AddProjectDialog picker", () => {
     // so the one box a person fills in is the project name.
     expect(chosen.readOnly).toBe(true)
     expect(chosen.tabIndex).toBe(-1)
+    // The line has no label of its own, so the sentence above it says what it shows.
+    const sentence = screen.getByText("The project is added from this folder.")
+    expect((chosen.getAttribute("aria-describedby") ?? "").split(/\s+/)).toEqual([sentence.id])
+    expect(Boolean(sentence.compareDocumentPosition(chosen) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
     fireEvent.click(screen.getByRole("button", { name: /new folder/i }))
     expect(screen.getByRole("textbox", { name: "New folder name" })).toBeTruthy()
   })
