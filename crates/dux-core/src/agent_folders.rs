@@ -1016,16 +1016,42 @@ fn ignore_missing(result: rustix::io::Result<()>) -> rustix::io::Result<()> {
 
 /// The device and inode numbers in `stat`, with no mark.
 fn numbers_of(stat: &rustix::fs::Stat) -> DirectoryIdentity {
-    // `st_dev` and `st_ino` are unsigned on every Unix dux runs on; the
-    // conversion only widens.
-    #[expect(
-        clippy::useless_conversion,
-        reason = "st_dev is u32 on some targets and u64 on others"
-    )]
     DirectoryIdentity {
-        device: u64::from(stat.st_dev),
-        inode: u64::from(stat.st_ino),
+        device: stat.st_dev.number(),
+        inode: stat.st_ino.number(),
         mark: None,
+    }
+}
+
+/// A `stat` field as the `u64` that `std`'s `MetadataExt` gives for it. The
+/// field's type differs by target (`st_dev` is a signed 32-bit integer on
+/// macOS and `u64` on Linux), and a signed value is sign-extended, so its bit
+/// pattern is kept and one device always gives one number.
+trait StatNumber {
+    fn number(self) -> u64;
+}
+
+impl StatNumber for u64 {
+    fn number(self) -> u64 {
+        self
+    }
+}
+
+impl StatNumber for u32 {
+    fn number(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+impl StatNumber for i32 {
+    fn number(self) -> u64 {
+        i64::from(self).cast_unsigned()
+    }
+}
+
+impl StatNumber for i64 {
+    fn number(self) -> u64 {
+        self.cast_unsigned()
     }
 }
 
