@@ -901,6 +901,41 @@ mod waiting {
         escape_then_x(MAXIMIZED, &[b'a'; 4095]);
     }
 
+    /// The maximized pane waits out the Escape timeout before deciding a lone
+    /// Escape and reads once more; an event in that read that asks dux to
+    /// quit ends the poll with the answer to quit. The event comes from a
+    /// test byte, since no key typed into the pane quits dux; it is typed on
+    /// another thread a third of the way into the wait, and a case where it
+    /// lands after the wait's read is run again.
+    #[test]
+    fn a_quit_read_after_the_escape_wait_ends_the_poll() {
+        use crate::app::input::{ESC_AMBIGUITY_TIMEOUT, RAW_BYTE_ASKS_TO_QUIT};
+        use std::io::Write as _;
+
+        for _ in 0..20 {
+            let mut rig = Rig::new(MAXIMIZED);
+            rig.type_bytes(b"\x1b");
+            let mut keyboard = rig.keyboard.try_clone().expect("the keyboard");
+            let typist = std::thread::spawn(move || {
+                std::thread::sleep(ESC_AMBIGUITY_TIMEOUT / 3);
+                keyboard.write_all(b"q").expect("type q");
+            });
+            RAW_BYTE_ASKS_TO_QUIT.set(Some(b'q'));
+            let quit = rig.app.poll_run_input_from(rig.terminal.as_fd());
+            RAW_BYTE_ASKS_TO_QUIT.set(None);
+            typist.join().expect("the typist");
+            if !quit && rig.terminal_has_bytes() {
+                continue;
+            }
+            assert!(
+                quit,
+                "the read after the Escape wait asked to quit and the poll went on"
+            );
+            return;
+        }
+        panic!("the byte never landed inside the Escape wait");
+    }
+
     /// The status screen's turn reads what is ready and returns: the serve
     /// loop that calls it does the waiting.
     #[test]

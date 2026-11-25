@@ -235,6 +235,12 @@ thread_local! {
     /// a test that needs a read to fail the same way on every system.
     pub(super) static READ_FAILS_WITH: std::cell::Cell<Option<rustix::io::Errno>> =
         const { std::cell::Cell::new(None) };
+
+    /// A byte the maximized pane's reader, on this thread, handles as an
+    /// event that asks dux to quit, for a test of what happens to that answer:
+    /// no key typed into a maximized pane quits dux.
+    pub(super) static RAW_BYTE_ASKS_TO_QUIT: std::cell::Cell<Option<u8>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Whether a read failing with `err` says the terminal is gone for good: the
@@ -3437,8 +3443,7 @@ impl App {
         let held = self.terminal_input.take_bytes();
         let first: &[u8] = if held.is_empty() {
             if !self.wait_for_terminal(terminal, Duration::from_millis(poll_ms))? {
-                self.resolve_pending_bare_esc(terminal, &mut buf)?;
-                return Ok(false);
+                return self.resolve_pending_bare_esc(terminal, &mut buf);
             }
             let n = self.read_terminal(terminal, &mut buf)?;
             if n == 0 {
@@ -3464,8 +3469,7 @@ impl App {
             return Ok(true);
         }
 
-        self.resolve_pending_bare_esc(terminal, &mut buf)?;
-        Ok(false)
+        self.resolve_pending_bare_esc(terminal, &mut buf)
     }
 
     pub(super) fn reset_raw_input_state(&mut self) {
@@ -3556,6 +3560,8 @@ impl App {
         Ok(false)
     }
 
+    /// Decide a held lone Escape or Alt-] after the Escape timeout, with
+    /// whatever one more read brings. Returns whether the app should exit.
     fn resolve_pending_bare_esc(
         &mut self,
         terminal: std::os::fd::BorrowedFd<'_>,
@@ -4221,6 +4227,13 @@ impl App {
     /// `poll_and_forward_raw_input` reads the bytes and calls this; a test can
     /// call it directly, without real stdin I/O.
     pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> bool {
+        #[cfg(test)]
+        if RAW_BYTE_ASKS_TO_QUIT
+            .get()
+            .is_some_and(|quit| bytes.contains(&quit))
+        {
+            return true;
+        }
         let sequences = self.parse_raw_input_sequences(bytes);
         let tail = self.raw_input_parser.pending().to_vec();
         let mut plan = self.classify_raw_input_sequences(&sequences);
