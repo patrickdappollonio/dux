@@ -145,6 +145,12 @@ pub enum WireCommand {
         /// Absent means the caller predates them and `delete_branch` speaks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branches: Option<crate::branch_history::BranchAnswersWire>,
+        /// Whether a standalone agent's folder is deleted too. Only a folder
+        /// dux created can be: asking for any other refuses the whole delete.
+        /// Absent means nobody was asked, and who made the folder decides: a
+        /// folder dux created goes, a folder the user chose stays.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delete_folder: Option<bool>,
     },
     /// Replace the global `[env]` table with these variables.
     PersistGlobalEnv {
@@ -565,6 +571,18 @@ pub enum WireCommand {
         /// Which provider to launch. `None` uses the global default, the same
         /// source the config's own default uses. Retargetable afterward like
         /// any agent.
+        #[serde(default)]
+        provider: Option<String>,
+    },
+    /// Create a STANDALONE agent in a new folder dux creates for it, named
+    /// after the agent, in the standalone agents folder
+    /// (`[defaults] standalone_agents_directory`). A name whose folder is
+    /// already there is refused and nothing is created.
+    CreateStandaloneAgentInNewFolder {
+        /// The agent's name, which also names its folder. Required, and held
+        /// to the agent-name rules.
+        name: String,
+        /// Which provider to launch. `None` uses the global default.
         #[serde(default)]
         provider: Option<String>,
     },
@@ -1866,15 +1884,30 @@ pub fn delete_session_status_message(
         // is exactly as it was. Said explicitly rather than left implied,
         // because "Deleted agent X." on its own reads as though something on
         // disk went with it.
-        WorktreeRemoval::NothingToRemove { folder_label } => {
-            crate::status_text![
+        WorktreeRemoval::NothingToRemove {
+            folder_label,
+            folder,
+        } => match folder {
+            crate::engine::FolderFate::KeptChosen => crate::status_text![
                 opening,
                 ". Its folder ",
                 q(folder_label),
-                " was left untouched: dux never creates, moves or removes a standalone agent's \
-                 folder. Anything the agent wrote there is still there."
-            ]
-        }
+                " was left untouched: dux never moves or removes a folder you chose for a \
+                 standalone agent. Anything the agent wrote there is still there."
+            ],
+            crate::engine::FolderFate::KeptCreated => crate::status_text![
+                opening,
+                ". Its folder ",
+                q(folder_label),
+                ", which dux created for it, was kept with everything the agent wrote there."
+            ],
+            crate::engine::FolderFate::Deleting => crate::status_text![
+                opening,
+                ". Its folder ",
+                q(folder_label),
+                ", which dux created for it, is deleted once the agent has stopped."
+            ],
+        },
         // The worktree went and the branches stayed, because they were not dux's
         // to delete. The wording names every kept branch with its own reason and
         // how to remove one by hand: once the worktree is gone, no dux surface
@@ -5750,6 +5783,15 @@ impl Engine {
                     term_size: (80, 24),
                 }
             }
+            WireCommand::CreateStandaloneAgentInNewFolder { name, provider } => {
+                let (request, busy_message) =
+                    self.plan_standalone_agent_in_new_folder(&name, provider.as_deref())?;
+                Command::DispatchCreateAgentRequest {
+                    request: Box::new(request),
+                    busy_message,
+                    term_size: (80, 24),
+                }
+            }
             WireCommand::CreateAgent {
                 project_id,
                 name,
@@ -5907,11 +5949,13 @@ impl Engine {
                 delete_worktree,
                 delete_branch,
                 branches,
+                delete_folder,
             } => Command::BeginDeleteSession {
                 session_id,
                 delete_worktree,
                 delete_branch,
                 branches,
+                delete_folder,
             },
             // Rename, Reconnect, CheckoutProjectDefaultBranch and
             // ChangeAgentProvider are NOT reconstructible into a single
@@ -5934,6 +5978,7 @@ impl Engine {
             | WireCommand::RemoveProject { .. }
             | WireCommand::DeleteProject { .. }
             | WireCommand::CreateStandaloneAgent { .. }
+            | WireCommand::CreateStandaloneAgentInNewFolder { .. }
             | WireCommand::CreateAgent { .. }
             | WireCommand::ForkSession { .. }
             | WireCommand::CreateAgentFromWorktree { .. }
@@ -6118,6 +6163,50 @@ mod tests {
     use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
     use std::path::Path;
+
+    /// A standalone agent in a new folder needs a name, because the name is
+    /// what the folder is called, and the name follows the agent-name rules.
+    #[test]
+    fn a_standalone_agent_in_a_new_folder_needs_a_valid_name() {
+        let (mut engine, _tmp) = test_engine();
+        let refusal = |engine: &mut Engine, name: &str| {
+            engine
+                .apply_wire(WireCommand::CreateStandaloneAgentInNewFolder {
+                    name: name.to_string(),
+                    provider: None,
+                })
+                .err()
+                .map(|err| err.to_string())
+        };
+        let empty = refusal(&mut engine, "  ").expect("an empty name is refused");
+        assert!(empty.contains("needs a name"), "{empty}");
+        let invalid = refusal(&mut engine, "has space").expect("an invalid name is refused");
+        assert!(invalid.contains("Invalid agent name"), "{invalid}");
+        assert_eq!(refusal(&mut engine, "brave-otter"), None);
+    }
+
+    /// An agent recorded at the folder a new one would get keeps that name,
+    /// even while the folder itself is missing.
+    #[test]
+    fn a_new_folder_an_agent_is_recorded_at_is_refused_though_the_folder_is_missing() {
+        let (mut engine, _tmp) = test_engine();
+        let root = engine.standalone_agents_root();
+        let folder = root.join("otter");
+        engine.sessions.push(sample_standalone_session(
+            "otter-agent",
+            &folder.to_string_lossy(),
+        ));
+        let refused = engine
+            .apply_wire(WireCommand::CreateStandaloneAgentInNewFolder {
+                name: "otter".to_string(),
+                provider: None,
+            })
+            .expect_err("the name is taken")
+            .to_string();
+        assert!(refused.contains("Pick another name."), "{refused}");
+        assert!(refused.contains("otter-agent"), "{refused}");
+        assert!(!folder.exists(), "nothing is created");
+    }
 
     /// The folder is accepted whatever it contains: a plain directory with no
     /// repository anywhere near it is the ordinary case, and the add-project
@@ -7408,6 +7497,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 delete_worktree: true,
                 delete_branch: None,
+                delete_folder: None,
             },
             "an absent branch answer must mean nobody was asked, not \"keep it\": that is what \
              keeps a caller written before the checkbox existed behaving as it always did"
@@ -7428,6 +7518,7 @@ mod tests {
                     session_id: "s1".to_string(),
                     delete_worktree: true,
                     delete_branch: expected,
+                    delete_folder: None,
                 }
             );
         }
@@ -13583,6 +13674,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 delete_worktree: false,
                 delete_branch: None,
+                delete_folder: None,
             })
             .expect("apply_wire");
         let status = outcome.status.expect("status");
@@ -15829,10 +15921,9 @@ mod tests {
             .push(sample_project("p1", tmp.path().to_str().unwrap()));
         let listed = tmp.path().join("the-worktree");
         let mut standalone = sample_session("s9", "", "notes");
-        standalone.workspace =
-            crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-                folder_path: listed.to_string_lossy().into_owned(),
-            });
+        standalone.workspace = crate::model::AgentWorkspace::Folder(
+            crate::model::FolderWorkspace::chosen(listed.to_string_lossy().into_owned()),
+        );
         engine.sessions.push(standalone);
 
         let refused = engine

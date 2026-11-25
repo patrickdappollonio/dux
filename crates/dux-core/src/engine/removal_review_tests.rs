@@ -615,6 +615,7 @@ fn a_second_delete_of_an_agent_being_removed_is_refused_with_the_first_operation
         session_id: "s1".to_string(),
         delete_worktree: true,
         delete_branch: Some(true),
+        delete_folder: None,
     };
 
     let first = engine

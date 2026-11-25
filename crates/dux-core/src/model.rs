@@ -765,13 +765,130 @@ pub struct ManagedWorkspace {
     pub worktree_path: String,
 }
 
-/// Everything a standalone agent carries: a folder the user chose, and nothing
-/// else. No project, no branch, no provenance, because there are none.
+/// Everything a standalone agent carries: its folder and who made it. No
+/// project, no branch, no branch provenance, because there are none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderWorkspace {
-    /// The directory the user pointed the agent at. dux runs the provider here
-    /// and never creates, moves or removes it.
+    /// The directory the agent runs in. dux never moves it, whoever made it.
     pub folder_path: String,
+    /// Whether the user chose the folder or dux created it, which decides
+    /// whether deleting the agent may delete the folder. Set once at creation
+    /// and never changed (the storage layer writes it on INSERT only).
+    pub origin: FolderOrigin,
+}
+
+impl FolderWorkspace {
+    /// A folder the user already had.
+    pub fn chosen(folder_path: impl Into<String>) -> Self {
+        Self {
+            folder_path: folder_path.into(),
+            origin: FolderOrigin::Chosen,
+        }
+    }
+}
+
+/// Who made a standalone agent's folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderOrigin {
+    /// A folder the user already had. dux never creates, moves or removes it.
+    Chosen,
+    /// A folder dux created for this agent, with the identity the directory
+    /// had when dux created it. dux removes it only while the directory at
+    /// that path still holds this identity's mark.
+    CreatedByDux(DirectoryIdentity),
+}
+
+impl FolderOrigin {
+    /// The stored spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chosen => "chosen",
+            Self::CreatedByDux(_) => "created",
+        }
+    }
+}
+
+/// The directory dux created: its device and inode numbers when it was
+/// created, and the random mark in its marker file (see
+/// [`crate::agent_folders::MARKER_FILE_NAME`]). The mark alone decides whether
+/// a directory is the one dux created; the numbers change across a reboot or
+/// a restore from backup, and are only recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectoryIdentity {
+    /// The device the directory is on.
+    pub device: u64,
+    /// The directory's inode on that device.
+    pub inode: u64,
+    /// The mark in the folder's marker file. `None` for a record that has no
+    /// mark, whose folder dux never deletes.
+    pub mark: Option<FolderMark>,
+}
+
+impl DirectoryIdentity {
+    /// The device and inode numbers of the directory at `path`, read without
+    /// following a symbolic link at its last component, with no mark.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the path cannot be stat'd.
+    pub fn of(path: &std::path::Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mark: None,
+        })
+    }
+}
+
+/// A random 128-bit mark, written as 32 lowercase hex digits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FolderMark(pub [u8; 16]);
+
+impl FolderMark {
+    /// The mark as 32 lowercase hex digits.
+    pub fn to_hex(self) -> String {
+        use std::fmt::Write as _;
+        self.0
+            .iter()
+            .fold(String::with_capacity(32), |mut out, byte| {
+                let _ = write!(out, "{byte:02x}");
+                out
+            })
+    }
+
+    /// Read a mark written by [`Self::to_hex`]; `None` for anything else.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        if text.len() != 32 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut bytes = [0_u8; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
+        }
+        Some(Self(bytes))
+    }
+}
+
+/// What deleting an agent may do with its folder, decided by who made it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FolderRemovalRight<'a> {
+    /// The agent runs in a managed worktree, which the worktree removal owns.
+    NotAFolder,
+    /// The user chose the folder, so dux never removes it.
+    ChosenByUser {
+        /// The folder.
+        path: &'a str,
+    },
+    /// dux created the folder, so it may remove it while it is still the
+    /// directory dux created.
+    CreatedByDux {
+        /// The folder.
+        path: &'a str,
+        /// The identity it had when dux created it.
+        identity: DirectoryIdentity,
+    },
 }
 
 /// Where an agent lives, and therefore what dux is allowed to do there: a
@@ -798,8 +915,8 @@ pub enum AgentWorkspace {
     /// A working copy dux created for this agent, inside dux's managed area,
     /// on a branch dux minted, attached or adopted.
     Managed(ManagedWorkspace),
-    /// A folder the user already had. dux runs the provider in it and touches
-    /// nothing else, ever.
+    /// A standalone agent's folder: one the user already had, or one dux
+    /// created for it (see [`FolderOrigin`]).
     Folder(FolderWorkspace),
 }
 
@@ -910,15 +1027,38 @@ impl AgentWorkspace {
         }
     }
 
-    /// Whether deleting this agent may remove the directory it occupies.
-    ///
-    /// The absolute rule of the standalone agent: dux never creates, moves or
-    /// removes the user's folder. Deleting a standalone agent deletes only dux's
-    /// own record of it.
+    /// Whether deleting this agent may remove the directory it occupies as a
+    /// worktree removal. A standalone agent's folder never goes through the
+    /// worktree removal; [`Self::folder_removal_right`] answers for it.
     pub(crate) fn deletion_may_remove_directory(&self) -> bool {
         match self {
             Self::Managed(_) => true,
             Self::Folder(_) => false,
+        }
+    }
+
+    /// What deleting this agent may do with its standalone folder.
+    pub fn folder_removal_right(&self) -> FolderRemovalRight<'_> {
+        match self {
+            Self::Managed(_) => FolderRemovalRight::NotAFolder,
+            Self::Folder(folder) => match folder.origin {
+                FolderOrigin::Chosen => FolderRemovalRight::ChosenByUser {
+                    path: folder.folder_path.as_str(),
+                },
+                FolderOrigin::CreatedByDux(identity) => FolderRemovalRight::CreatedByDux {
+                    path: folder.folder_path.as_str(),
+                    identity,
+                },
+            },
+        }
+    }
+
+    /// Whether dux created this agent's folder. False for a managed worktree
+    /// and for a folder the user chose.
+    pub fn folder_created_by_dux(&self) -> bool {
+        match self.folder_removal_right() {
+            FolderRemovalRight::CreatedByDux { .. } => true,
+            FolderRemovalRight::NotAFolder | FolderRemovalRight::ChosenByUser { .. } => false,
         }
     }
 
@@ -2040,9 +2180,7 @@ mod tests {
             id: "sa1".to_string(),
             slot_tab_id: "sa1-slot".to_string(),
             provider: ProviderKind::new("claude"),
-            workspace: AgentWorkspace::Folder(FolderWorkspace {
-                folder_path: folder_path.to_string(),
-            }),
+            workspace: AgentWorkspace::Folder(FolderWorkspace::chosen(folder_path.to_string())),
             title: title.map(str::to_string),
             started_providers: Vec::new(),
             desired_running: false,
@@ -2172,9 +2310,7 @@ mod tests {
     }
 
     fn folder() -> AgentWorkspace {
-        AgentWorkspace::Folder(FolderWorkspace {
-            folder_path: "/home/someone/notes".to_string(),
-        })
+        AgentWorkspace::Folder(FolderWorkspace::chosen("/home/someone/notes".to_string()))
     }
 
     /// The whole point of the either/or: a standalone agent has no branch, and

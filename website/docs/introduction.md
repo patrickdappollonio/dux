@@ -49,9 +49,10 @@ dux has three nouns:
   checkout on disk and remembers your preferences for it.
 - **Agents** are sessions running inside a project. Each one gets its own git worktree
   on its own branch, so two agents on the same repo never step on each other. A
-  **standalone agent** is the exception you ask for by name: it runs in a folder you
-  already have, with no branch and no worktree of dux's, and dux never creates, moves
-  or removes that folder. See [Creating agents](/docs/creating-agents).
+  **standalone agent** is the exception you ask for by name: it runs in a plain folder,
+  one dux creates for it or one you already have, with no branch and no worktree of
+  dux's. dux never moves or removes a folder you chose. See
+  [Creating agents](/docs/creating-agents).
 - **Providers** are the CLIs that power agents. Claude, Codex, OpenCode, Copilot, and Grok
   ship configured out of the box, and you can wire up any other command yourself.
 

@@ -730,6 +730,12 @@ fn requests_for_the_agent_and_its_parts(terminals: &Terminals) -> Vec<Ask> {
             json!({ "auto_reopen": true }),
         ),
         ask("delete_session", Method::DELETE, AGENT.into(), none.clone()),
+        ask(
+            "delete_session",
+            Method::DELETE,
+            format!("{AGENT}?delete_folder=true"),
+            none.clone(),
+        ),
         post(
             "reconnect_session",
             format!("{AGENT}/reconnect"),

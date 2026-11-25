@@ -573,10 +573,13 @@ pub enum AgentWorkspaceView {
         /// of its own. `None` while the working copy is there.
         recreate: Option<RecreateView>,
     },
-    /// A folder the user already had, which dux only visits.
+    /// A standalone agent's folder: one the user chose, or one dux created.
     Folder {
         /// The folder as it exists on the SERVER's filesystem.
         folder_path: String,
+        /// Whether dux created the folder, which is what lets the delete
+        /// dialog offer to delete it with the agent.
+        created_by_dux: bool,
         /// The same folder shortened against the server's home directory, for
         /// display. Computed here because the browser may not be on the
         /// server's machine and so cannot shorten it correctly itself.
@@ -646,6 +649,7 @@ impl AgentWorkspaceView {
             }
             crate::model::AgentWorkspace::Folder(folder) => Self::Folder {
                 folder_path: folder.folder_path.clone(),
+                created_by_dux: workspace.folder_created_by_dux(),
                 folder_label: crate::home_path::shorten_home(std::path::Path::new(
                     &folder.folder_path,
                 )),
@@ -2109,6 +2113,7 @@ mod tests {
         let json = serde_json::to_value(view).expect("serialize");
         assert_eq!(json["workspace"]["kind"], "folder");
         assert_eq!(json["workspace"]["folder_path"], "/home/someone/notes");
+        assert_eq!(json["workspace"]["created_by_dux"], false);
         for absent in [
             "branch_name",
             "initial_branch",

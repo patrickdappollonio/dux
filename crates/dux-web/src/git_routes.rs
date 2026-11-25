@@ -1541,10 +1541,9 @@ mod tests {
 
     fn standalone_session(id: &str, folder: &str) -> dux_core::model::AgentSession {
         let mut session = sample_session(id, folder);
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.to_string()),
+        );
         session
     }
 

@@ -47,7 +47,7 @@ picked out.
 
 The `✷` star means the same thing wherever you see it: this one lives in your own folder,
 not in a working copy dux manages. A
-[standalone agent](/docs/creating-agents#running-an-agent-in-a-folder-you-already-have) wears
+[standalone agent](/docs/creating-agents#running-a-standalone-agent) wears
 it over its folder and a standalone terminal wears it over its directory. Anything owned
 keeps the `↳` arrow pointing at its owner.
 

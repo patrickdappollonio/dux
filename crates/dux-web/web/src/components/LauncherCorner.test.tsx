@@ -107,7 +107,7 @@ describe("LauncherCorner", () => {
   it.each([
     ["New agent from PR…", "Start an agent on a GitHub pull request's branch.", "openCreateAgentFromPr(null)"],
     ["New agent from existing worktree…", "Use a copy of a project already on disk, on its branch.", "openNewAgentPicker(from_worktree)"],
-    ["New standalone agent…", "Run an agent in any folder, no project or git needed.", "openStandaloneAgentPicker"],
+    ["New standalone agent…", "Pick a name. dux creates a folder for it.", "openStandaloneAgentPicker"],
     ["New terminal for an agent…", "Open a command line in an agent's copy of the code.", "openAgentTerminalPicker"],
     ["New standalone terminal", "Opens right away, in your home folder.", "createStandaloneTerminal"],
     ["Add project…", "Point dux at a git repository on this computer.", "openAddProject"],

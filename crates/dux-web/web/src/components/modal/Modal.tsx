@@ -298,12 +298,13 @@ function ModalParts(
   useLayoutEffect(() => {
     onFocusTarget(target)
   })
-  const last = useRef<{ open: boolean; step: string | undefined } | null>(null)
+  const height = frame?.height ?? "content"
+  const last = useRef<{ open: boolean; step: string | undefined; height: string } | null>(null)
   // The card's height as last painted, read when the step changes.
   const shownHeight = useRef(0)
   useLayoutEffect(() => {
     const was = last.current
-    last.current = { open, step }
+    last.current = { open, step, height }
     const popup = header.current?.closest('[data-slot="dialog-content"]')
     if (!open) {
       if (popup instanceof HTMLElement) popup.style.height = ""
@@ -314,11 +315,13 @@ function ModalParts(
     // took it; that case and a change of step are placed here.
     // A card keeps the height it had across a change of step, in both
     // directions, so the list or the button under the pointer does not jump; a
-    // step with more to show scrolls inside it. The card's max-height still
-    // caps it to the window, and a resize of the window lets go of the held
-    // height so the card is measured again for the step it shows.
-    if (stepChanged && !cover && popup instanceof HTMLElement && shownHeight.current > 0) {
-      popup.style.height = `${shownHeight.current}px`
+    // step with more to show scrolls inside it. A step that names a height other
+    // than the one before takes its own. The card's max-height still caps it to
+    // the window, and a resize of the window lets go of the held height so the
+    // card is measured again for the step it shows.
+    if (stepChanged && !cover && popup instanceof HTMLElement) {
+      if (height !== was.height) popup.style.height = ""
+      else if (shownHeight.current > 0) popup.style.height = `${shownHeight.current}px`
     }
     if (!stepChanged && !popup?.contains(document.activeElement)) return
     target()?.focus({ preventScroll: true })

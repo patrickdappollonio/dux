@@ -1902,6 +1902,69 @@
         },
         " (fatal: bad object); check them before deleting them."
       ]
+    },
+    {
+      "what": "the folder box of an agent whose folder dux created",
+      "sentence": "delete_folder_label",
+      "args": {
+        "folder": "/srv/dux/agents/talk-to-me"
+      },
+      "segments": [
+        "Also delete its folder ",
+        {
+          "name": "/srv/dux/agents/talk-to-me",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "one file goes with the folder dux created",
+      "sentence": "delete_folder_files",
+      "args": {
+        "files": {
+          "state": "counted",
+          "count": 1
+        }
+      },
+      "segments": [
+        "The folder holds 1 file. It will be deleted with the folder."
+      ]
+    },
+    {
+      "what": "several files go with the folder dux created",
+      "sentence": "delete_folder_files",
+      "args": {
+        "files": {
+          "state": "counted",
+          "count": 7
+        }
+      },
+      "segments": [
+        "The folder holds 7 files. They will be deleted with it."
+      ]
+    },
+    {
+      "what": "an empty folder dux created loses nothing",
+      "sentence": "delete_folder_files",
+      "args": {
+        "files": {
+          "state": "counted",
+          "count": 0
+        }
+      },
+      "segments": []
+    },
+    {
+      "what": "dux could not count the files in the folder it created",
+      "sentence": "delete_folder_files",
+      "args": {
+        "files": {
+          "state": "unreadable"
+        }
+      },
+      "segments": [
+        "dux could not count the files in the folder. Everything in it will be deleted with it."
+      ]
     }
   ]
 }

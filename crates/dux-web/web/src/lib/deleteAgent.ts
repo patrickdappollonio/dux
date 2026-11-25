@@ -1,7 +1,9 @@
 // What the delete-agent dialog says about the branches its two boxes offer,
 // built in step with dux-core's `delete_agent_prose` for the terminal UI.
 
+import { assertNever } from "./assertNever"
 import { chip, joinProse, type Prose } from "./prose"
+import type { FolderFilesReply } from "./sessionsApi"
 
 /**
  * The sentence saying the unpushed commits on `branches` could not be counted,
@@ -424,4 +426,33 @@ export function worktreeFilesNote(
     return { prose: worktreeFilesCheckingProse(agent), tone: "quiet" }
   const prose = worktreeFilesProse(agent, answer)
   return prose === null ? null : { prose, tone: "warning" }
+}
+
+/** The folder box's label for an agent whose folder dux created, naming the
+ * folder a tick deletes. Mirrors `folder_box_label_prose`. */
+export function folderBoxLabelProse(folderLabel: string): Prose {
+  return ["Also delete its folder ", chip(folderLabel)]
+}
+
+/** The warning under a ticked folder box: how many files go with the folder
+ * dux created, or that dux could not count them; `null` for an empty or
+ * missing folder, or while the count is on its way. Mirrors
+ * `folder_files_prose`. */
+export function folderFilesProse(files: FolderFilesReply["files"] | undefined): Prose | null {
+  if (files === null || files === undefined) return null
+  switch (files.state) {
+    case "counted":
+      if (files.count === 0) return null
+      return [
+        files.count === 1
+          ? "The folder holds 1 file. It will be deleted with the folder."
+          : `The folder holds ${files.count} files. They will be deleted with it.`,
+      ]
+    case "missing":
+      return null
+    case "unreadable":
+      return ["dux could not count the files in the folder. Everything in it will be deleted with it."]
+    default:
+      return assertNever(files)
+  }
 }

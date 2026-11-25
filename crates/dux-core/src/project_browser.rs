@@ -1209,9 +1209,9 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_focused_tab: None,
-            workspace: crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-                folder_path: link.to_string_lossy().to_string(),
-            }),
+            workspace: crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace::chosen(
+                link.to_string_lossy().to_string(),
+            )),
         }];
         let worktrees = vec![git::GitWorktree {
             path: occupied.clone(),

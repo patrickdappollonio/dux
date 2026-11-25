@@ -89,9 +89,9 @@ fn standalone_session(id: &str, folder: &str) -> dux_core::model::AgentSession {
         created_at: n,
         updated_at: n,
         last_focused_tab: None,
-        workspace: dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-            folder_path: folder.to_string(),
-        }),
+        workspace: dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.to_string()),
+        ),
     }
 }
 

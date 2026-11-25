@@ -329,6 +329,17 @@ pub(crate) enum EngineRequest {
     /// worktree and branch (instant lookup; the git read runs off-thread in the
     /// handler). `None` for a standalone agent, which has no branch.
     RenamePushedProbe(String, oneshot::Sender<Option<(String, String)>>),
+    /// A standalone agent's folder and whether dux created it (instant lookup;
+    /// the file count runs off-thread in the handler). The outer `None` is an
+    /// unknown session, the inner `None` an agent in a worktree.
+    StandaloneFolder(String, oneshot::Sender<Option<Option<(String, bool)>>>),
+    /// What the name step needs to answer whether a create in a new folder
+    /// would refuse a name (instant; the filesystem is asked off-thread in
+    /// the handler).
+    NewFolderLookup(
+        String,
+        oneshot::Sender<dux_core::agent_job::NewFolderLookup>,
+    ),
     /// What git dux may do for one agent in one round trip: the directory, whether
     /// the changes panel works, and whether the branch features exist there. Asking
     /// separately would let a caller act on half an answer. Asking also refreshes a
@@ -2047,6 +2058,34 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// See [`EngineRequest::StandaloneFolder`].
+    pub async fn standalone_folder(&self, session_id: String) -> Option<Option<(String, bool)>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::StandaloneFolder(session_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// See [`EngineRequest::NewFolderLookup`]. `None` when the engine is
+    /// gone.
+    pub async fn new_folder_lookup(
+        &self,
+        name: String,
+    ) -> Option<dux_core::agent_job::NewFolderLookup> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::NewFolderLookup(name, tx))
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
+
     /// See [`EngineRequest::RenamePushedProbe`].
     pub async fn rename_pushed_probe(&self, session_id: String) -> Option<(String, String)> {
         let (tx, rx) = oneshot::channel();
@@ -2811,6 +2850,8 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::SessionBranchDeleteInputs(..)
         | EngineRequest::PullRequestBranches(..)
         | EngineRequest::RenamePushedProbe(..)
+        | EngineRequest::StandaloneFolder(..)
+        | EngineRequest::NewFolderLookup(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::SessionMissingDirectoryReason(..)
         | EngineRequest::PtyKeyForPaneId(..)
@@ -4878,6 +4919,8 @@ fn request_row_change(req: &EngineRequest) -> Option<(RowChange, &RowAsker)> {
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::SessionBranchDeleteInputs(..)
         | EngineRequest::RenamePushedProbe(..)
+        | EngineRequest::StandaloneFolder(..)
+        | EngineRequest::NewFolderLookup(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::SessionMissingDirectoryReason(..)
         | EngineRequest::NoteChangedFilesOutcome(..)
@@ -5308,6 +5351,21 @@ fn handle_request(
         }
         EngineRequest::RenamePushedProbe(session_id, reply) => {
             answer(reply, engine.rename_pushed_probe(&session_id));
+        }
+        EngineRequest::StandaloneFolder(session_id, reply) => {
+            let folder = engine
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| {
+                    session
+                        .folder_path()
+                        .map(|path| (path.to_string(), session.workspace.folder_created_by_dux()))
+                });
+            answer(reply, folder);
+        }
+        EngineRequest::NewFolderLookup(name, reply) => {
+            answer(reply, engine.new_folder_lookup(&name));
         }
         EngineRequest::PullRequestBranches(session_id, reply) => {
             answer(
@@ -6410,6 +6468,7 @@ mod tests {
                     session_id: "s-cli".to_string(),
                     delete_worktree: false,
                     delete_branch: None,
+                    delete_folder: None,
                 }))
         });
         let deadline = Instant::now() + std::time::Duration::from_secs(15);
@@ -10507,6 +10566,16 @@ mod tests {
                 false,
             ),
             (
+                "StandaloneFolder",
+                EngineRequest::StandaloneFolder("s1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "NewFolderLookup",
+                EngineRequest::NewFolderLookup("otter".into(), dead_reply()),
+                false,
+            ),
+            (
                 "PtyKeyForPaneId",
                 EngineRequest::PtyKeyForPaneId("s1".into(), dead_reply()),
                 false,
@@ -10760,7 +10829,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            51,
+            53,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

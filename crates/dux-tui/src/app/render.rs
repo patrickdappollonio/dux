@@ -12041,88 +12041,171 @@ impl App {
             OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
     }
 
-    /// The standalone-agent name field, the terminal-UI twin of the web
-    /// dialog's name input.
-    ///
-    /// The folder's own name is what an empty field resolves to, so it is written
-    /// into the label rather than left implicit, the way the web dialog's
-    /// placeholder spells it out. The folder is on its own line underneath,
-    /// home-collapsed: the browser is gone by the time this modal is up, and the
-    /// path is what says which folder was picked.
+    /// The standalone-agent name field. A new folder's is followed by the folder
+    /// it names and a button on to the browser; a picked folder's says its default.
     fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame<'_>) {
-        let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
+        let PromptState::NameStandaloneAgent {
+            folder,
+            input,
+            focus,
+        } = &self.prompt
+        else {
             return;
         };
-        let folder_path = PathBuf::from(folder);
-        let default_name = dux_core::git::standalone_agent_title("", &folder_path);
-        let folder_label = dux_core::home_path::shorten_home(&folder_path);
+        let new_folder = *folder == crate::app::StandaloneFolder::New;
+        // The modal is 64 wide; its border takes one column each side.
+        let inner_width = 62;
+        let (above, below) = match folder {
+            crate::app::StandaloneFolder::New => {
+                let typed = input.text.trim();
+                let root = self.engine.standalone_agents_root();
+                let folder_label = if typed.is_empty() {
+                    format!("{}/\u{2026}", dux_core::home_path::shorten_home(&root))
+                } else {
+                    dux_core::home_path::shorten_home(&dux_core::agent_folders::folder_path_for(
+                        &root, typed,
+                    ))
+                };
+                let runs_in = Prose::new()
+                    .text("The agent runs in ")
+                    .name(folder_label)
+                    .text(". dux creates the folder.");
+                (
+                    vec![Line::from(Span::styled(
+                        " Agent name:",
+                        Style::default().fg(self.theme.input_label_fg),
+                    ))],
+                    self.hanging_prose_lines(
+                        &runs_in,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                        " ",
+                        inner_width,
+                    ),
+                )
+            }
+            crate::app::StandaloneFolder::Picked(folder) => {
+                let folder_path = PathBuf::from(folder);
+                let default_name = dux_core::git::standalone_agent_title("", &folder_path);
+                let folder_label = dux_core::home_path::shorten_home(&folder_path);
+                (
+                    vec![
+                        Line::from(vec![
+                            Span::styled(
+                                " Name this agent (optional, defaults to ",
+                                Style::default().fg(self.theme.input_label_fg),
+                            ),
+                            name_chip(&default_name, &self.theme),
+                            Span::styled("):", Style::default().fg(self.theme.input_label_fg)),
+                        ]),
+                        labelled_name(
+                            " It runs in ",
+                            &folder_label,
+                            Style::default().fg(self.theme.hint_desc_fg),
+                            &self.theme,
+                        ),
+                        Line::from(Span::styled(
+                            " dux never creates, moves or removes that folder.",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        )),
+                    ],
+                    Vec::new(),
+                )
+            }
+        };
+        let field_focused = *focus == crate::app::NameStandaloneAgentFocus::Input;
+        let above_height = u16::try_from(above.len()).unwrap_or(u16::MAX);
+        let below_height = u16::try_from(below.len()).unwrap_or(u16::MAX);
+        // The labels, the field, the folder under it, the button with the
+        // blank row above it, the hint row, and the border.
+        let action_height = if new_folder { 4 } else { 0 };
+        let height = above_height
+            .saturating_add(3)
+            .saturating_add(below_height)
+            .saturating_add(action_height)
+            .saturating_add(3);
         self.render_dim_overlay(frame);
-        let area = self.centered_modal_exact(64, 9, frame.area());
+        let area = self.centered_modal_exact(64, height, frame.area());
         self.clear_overlay_area(frame, area);
 
-        let outer = self.themed_overlay_block("Name standalone agent");
+        let outer = self.themed_overlay_block(if new_folder {
+            "New standalone agent"
+        } else {
+            "Name standalone agent"
+        });
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
 
-        let [label_area, input_area, hint_area] = Layout::default()
+        let [label_area, input_area, below_area, action_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(above_height),
                 Constraint::Length(3),
-                Constraint::Length(3),
+                Constraint::Length(below_height),
+                Constraint::Length(action_height),
                 Constraint::Min(1),
             ])
             .areas(inner);
+        Paragraph::new(above).render(label_area, frame.buffer_mut());
+        Paragraph::new(below).render(below_area, frame.buffer_mut());
 
-        let labels = vec![
-            Line::from(vec![
-                Span::styled(
-                    " Name this agent (optional, defaults to ",
-                    Style::default().fg(self.theme.input_label_fg),
-                ),
-                name_chip(&default_name, &self.theme),
-                Span::styled("):", Style::default().fg(self.theme.input_label_fg)),
-            ]),
-            labelled_name(
-                " It runs in ",
-                &folder_label,
-                Style::default().fg(self.theme.hint_desc_fg),
-                &self.theme,
-            ),
-            Line::from(Span::styled(
-                " dux never creates, moves or removes that folder.",
-                Style::default().fg(self.theme.hint_desc_fg),
-            )),
-        ];
-        Paragraph::new(labels).render(label_area, frame.buffer_mut());
+        let input_inner = self.render_dialog_field(
+            frame,
+            input_area,
+            input,
+            FocusState::of(*focus, crate::app::NameStandaloneAgentFocus::Input),
+        );
 
-        // The field is the modal's only control, so it is always focused:
-        // focused border, caret drawn.
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(FocusState::Focused));
-        let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_field(
-            " ",
-            &input.text,
-            input.cursor,
-            self.theme.input_cursor_fg,
-            self.theme.input_cursor_bg,
-            FocusState::Focused,
-            input_inner.width,
-        ))
-        .block(input_block)
-        .render(input_area, frame.buffer_mut());
+        // The way on to the folder browser, with a misclick-safe blank row
+        // above it.
+        let mut use_existing = None;
+        if new_folder && action_area.height >= 4 {
+            let label = "Use an existing folder or project\u{2026}";
+            let width = button_width_for(label).min(action_area.width);
+            let button = Rect {
+                x: action_area.x + (action_area.width.saturating_sub(width)) / 2,
+                y: action_area.y + 1,
+                width,
+                height: 3,
+            };
+            Button::new(label)
+                .kind(ButtonKind::Confirm)
+                .state(button_state_for(
+                    ButtonPressedTarget::StandaloneUseExistingFolder,
+                    self.pressed_button,
+                    if field_focused {
+                        ButtonState::Normal
+                    } else {
+                        ButtonState::Focused
+                    },
+                ))
+                .render(frame, button, &self.theme);
+            use_existing = Some(button);
+        }
 
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let hints = vec![
-            Hint::key(confirm_key, "create agent"),
-            Hint::key(close_key, "cancel").pinned(),
-        ];
+        let mut hints = vec![Hint::key(
+            confirm_key,
+            if field_focused {
+                "create agent"
+            } else {
+                "use an existing folder"
+            },
+        )];
+        if new_folder {
+            hints.push(Hint::maybe_key(
+                self.bindings
+                    .label_for_text_field_dialog(Action::ToggleSelection),
+                "move focus",
+            ));
+        }
+        hints.push(Hint::key(close_key, "cancel").pinned());
         Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
             .render(hint_area, frame.buffer_mut());
-        self.overlay_layout.active = OverlayMouseLayout::NameStandaloneAgent { input: input_inner };
+        self.overlay_layout.active = OverlayMouseLayout::NameStandaloneAgent {
+            input: input_inner,
+            use_existing,
+        };
     }
 
     fn render_configure_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -13835,7 +13918,11 @@ impl App {
     fn render_standalone_delete_prompt(&mut self, frame: &mut Frame<'_>) -> bool {
         let PromptState::ConfirmDeleteAgent {
             agent_label,
-            target: DeleteAgentTarget::Folder { folder_label },
+            target:
+                DeleteAgentTarget::Folder {
+                    folder_label,
+                    created,
+                },
             focus,
             attached,
             ..
@@ -13843,10 +13930,16 @@ impl App {
         else {
             return false;
         };
-        let (agent_label, folder_label, focus) =
-            (agent_label.clone(), folder_label.clone(), *focus);
+        let (agent_label, folder_label, focus, created) = (
+            agent_label.clone(),
+            folder_label.clone(),
+            *focus,
+            created.clone(),
+        );
         let confirm_label = guarded_confirm_label("Delete", attached);
-        let attached_lines = self.attached_section(attached, confirm_inner_width(frame.area()));
+        let inner_width = confirm_inner_width(frame.area());
+        let attached_lines = self.attached_section(attached, inner_width);
+        let muted = Style::default().fg(self.theme.hint_desc_fg);
         let mut body_lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -13855,21 +13948,73 @@ impl App {
                 Span::raw("?"),
             ]),
             Line::from(""),
-            Line::from(Span::styled(
-                " This removes dux's record of the agent only.",
-                Style::default().fg(self.theme.hint_desc_fg),
-            )),
-            Line::from(vec![
-                Span::styled(" Its folder ", Style::default().fg(self.theme.hint_desc_fg)),
-                name_chip(&folder_label, &self.theme),
-                Span::styled(
-                    " is left untouched.",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ),
-            ]),
         ];
+        // A folder dux created is said by its box; a folder the user chose is
+        // said to stay, because the question reads as though something on
+        // disk goes too.
+        if created.is_none() {
+            body_lines.push(Line::from(Span::styled(
+                " This removes dux's record of the agent only.",
+                muted,
+            )));
+            body_lines.push(Line::from(vec![
+                Span::styled(" Its folder ", muted),
+                name_chip(&folder_label, &self.theme),
+                Span::styled(" is left untouched.", muted),
+            ]));
+        }
         body_lines.extend(attached_lines);
-        self.render_delete_agent_frame(frame, body_lines, focus, &confirm_label);
+        let Some(folder_box) = created else {
+            self.render_delete_agent_frame(frame, body_lines, focus, &confirm_label);
+            return true;
+        };
+        let label = dux_core::delete_agent_prose::folder_box_label_prose(&folder_label);
+        let mark = CheckMark::from(folder_box.delete);
+        let state = CheckboxState::of(focus, DeleteAgentFocus::FolderCheckbox);
+        let checkbox_height = Checkbox::with_prose(&label, &self.theme)
+            .checked(mark)
+            .state(state)
+            .height_at(inner_width);
+        let warning_lines = folder_box
+            .files
+            .as_ref()
+            .filter(|_| folder_box.delete)
+            .and_then(dux_core::delete_agent_prose::folder_files_prose)
+            .map_or_default(|prose| {
+                self.hanging_prose_lines(
+                    &prose,
+                    Style::default().fg(self.theme.warning_fg),
+                    DELETE_AGENT_WARNING_INDENT,
+                    inner_width,
+                )
+            });
+        let warning_height = u16::try_from(warning_lines.len()).unwrap_or(u16::MAX);
+        let layout = self.render_confirm_dialog(
+            frame,
+            &ConfirmDialog {
+                title: "Delete Agent",
+                body: body_lines,
+                controls_height: checkbox_height.saturating_add(warning_height),
+                cancel: delete_agent_cancel_button(focus),
+                act: delete_agent_delete_button(focus, &confirm_label),
+                reserve_labels: &[],
+            },
+        );
+        let [box_area, warning_area] =
+            stack_rows(layout.controls, [checkbox_height, warning_height]);
+        let (rect, _) =
+            self.render_overlay_prose_checkbox(frame, box_area, &label, mark, state, None);
+        Paragraph::new(warning_lines).render(warning_area, frame.buffer_mut());
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
+            checkbox: Some(OverlayCheckbox {
+                id: OverlayCheckboxId::DeleteAgentFolder,
+                rect,
+            }),
+            branch_checkbox: None,
+            other_branches_checkbox: None,
+        };
         true
     }
 
@@ -17059,10 +17204,9 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/work/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/work/notes".to_string()),
+        );
         // No project selected, which is the real shape: a standalone agent's row
         // belongs to no project group.
         app.engine.projects.clear();
@@ -17205,10 +17349,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         let id = app.engine.sessions[0].id.clone();
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/notes".to_string()),
+        );
         app.engine
             .folder_repo_statuses
             .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
@@ -17721,10 +17864,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         app.engine.sessions[0].title = Some("My-Notes".to_string());
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/My Notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/My Notes".to_string()),
+        );
         app.open_rename_session();
 
         let PromptState::RenameSession {
@@ -17789,10 +17931,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         app.engine.sessions[0].title = None;
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/My Notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/My Notes".to_string()),
+        );
         app.open_rename_session();
         let rows = rename_modal_rows(&mut app);
         assert!(
@@ -17865,10 +18006,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         let id = app.engine.sessions[0].id.clone();
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/notes".to_string()),
+        );
         app.engine
             .folder_repo_statuses
             .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
@@ -17952,10 +18092,9 @@ mod tests {
         let app = test_app(default_bindings());
         let mut session = app.engine.sessions[0].clone();
         session.title = Some("notes".to_string());
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.to_string()),
+        );
         session
     }
 
@@ -17989,10 +18128,9 @@ mod tests {
         let mut standalone = app.engine.sessions[0].clone();
         standalone.id = "session-2".to_string();
         standalone.title = Some("Notes".to_string());
-        standalone.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/srv/notes".to_string(),
-            });
+        standalone.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/srv/notes".to_string()),
+        );
         app.engine.sessions.push(standalone);
         app.focus = FocusPane::Left;
         app.rebuild_left_items();
@@ -18081,10 +18219,9 @@ mod tests {
         let mut standalone = app.engine.sessions[0].clone();
         standalone.id = "session-2".to_string();
         standalone.title = Some("Notes".to_string());
-        standalone.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/srv/notes".to_string(),
-            });
+        standalone.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/srv/notes".to_string()),
+        );
         app.engine.sessions.push(standalone);
         app.focus = FocusPane::Left;
         app.rebuild_left_items();
@@ -24593,10 +24730,9 @@ mod tests {
     #[test]
     fn a_standalone_agents_folder_label_shortens_the_same_way() {
         let mut app = narrow_row_app("demo-api");
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/srv/notes-archive".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/srv/notes-archive".to_string()),
+        );
         app.engine.projects.clear();
         let star = crate::theme::Glyphs::PLAIN.standalone;
         assert_eq!(
@@ -28395,8 +28531,9 @@ mod tests {
         // renders the folder home-collapsed, so a fixture under $HOME would
         // come back as "~/..." and the assertion below would be a coin flip.
         app.prompt = PromptState::NameStandaloneAgent {
-            folder: "/dux-tests/ada/notes".to_string(),
+            folder: crate::app::StandaloneFolder::Picked("/dux-tests/ada/notes".to_string()),
             input: TextInput::new(),
+            focus: crate::app::NameStandaloneAgentFocus::Input,
         };
 
         let buf = draw(&mut app);
@@ -28428,13 +28565,15 @@ mod tests {
     fn the_standalone_name_modal_publishes_a_clickable_input_rect() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::NameStandaloneAgent {
-            folder: "/home/ada/notes".to_string(),
+            folder: crate::app::StandaloneFolder::Picked("/home/ada/notes".to_string()),
             input: TextInput::new(),
+            focus: crate::app::NameStandaloneAgentFocus::Input,
         };
 
         let buf = draw(&mut app);
 
-        let OverlayMouseLayout::NameStandaloneAgent { input } = app.overlay_layout.active else {
+        let OverlayMouseLayout::NameStandaloneAgent { input, .. } = app.overlay_layout.active
+        else {
             panic!(
                 "the standalone name modal must publish its input rect, got {:?}",
                 app.overlay_layout.active
@@ -28455,8 +28594,9 @@ mod tests {
             let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
             input.cursor = cursor;
             app.prompt = PromptState::NameStandaloneAgent {
-                folder: "/home/ada/notes".to_string(),
+                folder: crate::app::StandaloneFolder::Picked("/home/ada/notes".to_string()),
                 input,
+                focus: crate::app::NameStandaloneAgentFocus::Input,
             };
             draw(&mut app);
         }

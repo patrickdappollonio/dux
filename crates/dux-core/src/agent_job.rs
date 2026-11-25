@@ -1111,7 +1111,8 @@ impl CreatePlanContext<'_> {
 
     fn plan(&mut self, request: CreateAgentRequest) -> Option<ManagedCreatePlan> {
         match request {
-            CreateAgentRequest::Standalone { .. } => {
+            CreateAgentRequest::Standalone { .. }
+            | CreateAgentRequest::StandaloneInNewFolder { .. } => {
                 logger::error("standalone create reached managed provisioning");
                 self.send_failure(
                     "Could not create the standalone agent: dux took the wrong internal path. Nothing was created and no folder was touched. Please report this with the contents of dux.log."
@@ -2995,51 +2996,26 @@ fn run_create_standalone_agent_job(
                 "Cannot create a standalone agent in ",
                 q(folder_label),
                 ": that folder does not \
-                 exist, or is not a directory dux can read. Pick a folder that is already there; \
-                 dux never creates one."
+                 exist, or is not a directory dux can read. Pick a folder that is already there, \
+                 or start a standalone agent with only a name and dux creates a folder for it."
             ],
         });
         return;
     }
+    let Some(prepared) = prepare_standalone_launch(provider, config, worker_tx, &create_key) else {
+        return;
+    };
     let session = new_agent_session(
         provider.clone(),
-        AgentWorkspace::Folder(FolderWorkspace {
-            folder_path: folder.to_string_lossy().to_string(),
-        }),
+        AgentWorkspace::Folder(FolderWorkspace::chosen(
+            folder.to_string_lossy().to_string(),
+        )),
         // Always set. Every row label falls back through the branch name when
         // there is no title, and this agent has no branch, so a title-less
         // standalone agent would render as a nameless row.
         Some(title.to_string()),
         Vec::new(),
     );
-    let provider_cfg = provider_config(config, &session.provider);
-    if let Err(hint) = check_provider_available(&provider_cfg) {
-        logger::error(&format!("provider not found for {}: {hint}", session.id));
-        // Nothing to roll back: no directory was created, no branch was minted.
-        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-            status_op_id: create_key,
-            attempted_name: None,
-            message: hint.into(),
-        });
-        return;
-    }
-    // The global environment, with no project overlay. See the doc above.
-    let env =
-        match crate::config::resolve_agent_env(&config.env, &std::collections::BTreeMap::new()) {
-            Ok(env) => env,
-            Err(err) => {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                    status_op_id: create_key,
-                    attempted_name: None,
-                    message: format!(
-                        "Invalid global environment variables, so the standalone agent was not \
-                     started: {err:#}"
-                    )
-                    .into(),
-                });
-                return;
-            }
-        };
     let status_message = crate::status_text![
         "Created standalone agent ",
         q(title),
@@ -3048,14 +3024,260 @@ fn run_create_standalone_agent_job(
         " in ",
         q(folder_label),
         ". \
-         dux does not manage a branch or a worktree for it, and never creates, moves \
-         or removes that folder."
+         dux does not manage a branch or a worktree for it, and never moves or removes a \
+         folder you chose."
     ];
+    launch_standalone_session(
+        session,
+        prepared,
+        status_message,
+        config,
+        worker_tx,
+        term_size,
+        create_key,
+        identity,
+        gate,
+    );
+}
+
+/// Whether nothing works in the folder at `path` and no operation holds it
+/// but the `own_holds` the asker took, which is what lets a create take over
+/// a folder an earlier create left.
+fn left_folder_unused(
+    worktrees: &crate::worktree_ops::WorktreeOps,
+    path: &Path,
+    own_holds: usize,
+) -> bool {
+    worktrees.holders(path).len() == own_holds
+        && crate::process_sessions::read_process_table_strict()
+            .and_then(|table| crate::process_sessions::occupants_of(&table, &[path.to_path_buf()]))
+            .is_ok_and(|found| found.is_empty())
+}
+
+/// What the name step of a standalone agent in a new folder needs to say
+/// whether the create would refuse the name for its folder.
+pub struct NewFolderLookup {
+    /// The folder new agents' folders are created in.
+    pub root: PathBuf,
+    /// The agent's name.
+    pub name: String,
+    /// The agent already recorded at the folder's path, by its label.
+    pub recorded_agent: Option<String>,
+    /// The paths operations hold.
+    pub worktrees: crate::worktree_ops::WorktreeOps,
+}
+
+impl std::fmt::Debug for NewFolderLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewFolderLookup")
+            .field("root", &self.root)
+            .field("name", &self.name)
+            .field("recorded_agent", &self.recorded_agent)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a create in a new folder would refuse the name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NewFolderTaken {
+    /// It would not.
+    No,
+    /// Something it would not take over is at the folder's path.
+    FolderThere,
+    /// This agent is recorded at the folder's path.
+    AgentRecorded(String),
+}
+
+impl NewFolderLookup {
+    /// The answer, by the rules the create applies. Touches the filesystem.
+    pub fn taken(&self) -> NewFolderTaken {
+        if let Some(agent) = &self.recorded_agent {
+            return NewFolderTaken::AgentRecorded(agent.clone());
+        }
+        let unused = |path: &Path| left_folder_unused(&self.worktrees, path, 0);
+        if crate::agent_folders::new_folder_is_taken(&self.root, &self.name, &unused) {
+            NewFolderTaken::FolderThere
+        } else {
+            NewFolderTaken::No
+        }
+    }
+}
+
+/// A standalone agent in a new folder: create `<root>/<name>`, refusing a name
+/// whose folder is already there, then run the provider in it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the create job, handed over once by the job that planned it"
+)]
+fn run_create_standalone_agent_in_new_folder_job(
+    root: &Path,
+    title: &str,
+    provider: &crate::model::ProviderKind,
+    config: &Config,
+    worker_tx: &Sender<WorkerEvent>,
+    term_size: (u16, u16),
+    create_key: String,
+    identity: crate::term_identity::TerminalIdentity,
+    gate: &crate::process_sessions::SpawnGate,
+    worktrees: &crate::worktree_ops::WorktreeOps,
+) {
+    // Checked before the folder exists, so a provider that is missing leaves
+    // nothing on disk.
+    let Some(prepared) = prepare_standalone_launch(provider, config, worker_tx, &create_key) else {
+        return;
+    };
+    // Held until the engine has the agent's record, as a chosen folder is.
+    let hold = |path: &Path| {
+        worktrees
+            .hold_as(
+                crate::worktree_ops::HoldOwner::CreateOp(create_key.clone()),
+                path,
+                crate::worktree_ops::WorktreeOpKind::CreateAgent,
+            )
+            .map_err(|refused| refused.sentence("create an agent there"))
+    };
+    let unused = |path: &Path| left_folder_unused(worktrees, path, 1);
+    let checks = crate::agent_folders::CreateChecks {
+        hold: &hold,
+        unused: &unused,
+    };
+    let created = match crate::agent_folders::create_agent_folder_with(root, title, &checks) {
+        Ok(created) => created,
+        Err(crate::agent_folders::CreateAgentFolderError::Held(refusal)) => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: create_key,
+                attempted_name: None,
+                message: refusal,
+            });
+            return;
+        }
+        Err(crate::agent_folders::CreateAgentFolderError::AlreadyThere(path)) => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: create_key,
+                attempted_name: None,
+                message: crate::status_text![
+                    "The standalone agent was not created at ",
+                    q(crate::home_path::shorten_home(&path)),
+                    ". A folder with that name is already there. Pick another name."
+                ],
+            });
+            return;
+        }
+        Err(crate::agent_folders::CreateAgentFolderError::Failed { path, reason }) => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: create_key,
+                attempted_name: None,
+                message: crate::status_text![
+                    "dux could not create the folder ",
+                    q(crate::home_path::shorten_home(&path)),
+                    format!(" for the standalone agent, so the agent was not created: {reason}.")
+                ],
+            });
+            return;
+        }
+    };
+    let folder_label = crate::home_path::shorten_home(&created.path);
+    let session = new_agent_session(
+        provider.clone(),
+        AgentWorkspace::Folder(FolderWorkspace {
+            folder_path: created.path.to_string_lossy().to_string(),
+            origin: crate::model::FolderOrigin::CreatedByDux(created.identity),
+        }),
+        Some(title.to_string()),
+        Vec::new(),
+    );
+    let status_message = crate::status_text![
+        "Created standalone agent ",
+        q(title),
+        " running ",
+        n(provider.as_str()),
+        " in ",
+        q(folder_label),
+        ", a new folder dux created for it. Deleting the agent can delete the folder too."
+    ];
+    launch_standalone_session(
+        session,
+        prepared,
+        status_message,
+        config,
+        worker_tx,
+        term_size,
+        create_key,
+        identity,
+        gate,
+    );
+}
+
+/// What a standalone launch needs before it touches anything: the provider's
+/// config, checked to be runnable, and the global environment.
+struct PreparedStandaloneLaunch {
+    provider_config: crate::config::ProviderCommandConfig,
+    env: Vec<(String, String)>,
+}
+
+/// Check the provider can run and resolve the global environment, with no
+/// project overlay. `None` after the failure has been reported.
+fn prepare_standalone_launch(
+    provider: &crate::model::ProviderKind,
+    config: &Config,
+    worker_tx: &Sender<WorkerEvent>,
+    create_key: &str,
+) -> Option<PreparedStandaloneLaunch> {
+    let provider_config = provider_config(config, provider);
+    if let Err(hint) = check_provider_available(&provider_config) {
+        logger::error(&format!(
+            "provider {} not found for a standalone create: {hint}",
+            provider.as_str()
+        ));
+        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+            status_op_id: create_key.to_string(),
+            attempted_name: None,
+            message: hint.into(),
+        });
+        return None;
+    }
+    match crate::config::resolve_agent_env(&config.env, &std::collections::BTreeMap::new()) {
+        Ok(env) => Some(PreparedStandaloneLaunch {
+            provider_config,
+            env,
+        }),
+        Err(err) => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: create_key.to_string(),
+                attempted_name: None,
+                message: format!(
+                    "Invalid global environment variables, so the standalone agent was not \
+                     started: {err:#}"
+                )
+                .into(),
+            });
+            None
+        }
+    }
+}
+
+/// Launch a new standalone agent's first tab.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the create job, handed over once by the job that planned it"
+)]
+fn launch_standalone_session(
+    session: AgentSession,
+    prepared: PreparedStandaloneLaunch,
+    status_message: crate::status_text::StatusText,
+    config: &Config,
+    worker_tx: &Sender<WorkerEvent>,
+    term_size: (u16, u16),
+    create_key: String,
+    identity: crate::term_identity::TerminalIdentity,
+    gate: &crate::process_sessions::SpawnGate,
+) {
+    let folder_label = crate::home_path::shorten_home(Path::new(session.directory()));
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
         status_op_id: create_key.clone(),
         message: crate::status_text![
             "Launching ",
-            n(provider.as_str()),
+            n(session.provider.as_str()),
             " in ",
             q(folder_label),
             "..."
@@ -3071,8 +3293,8 @@ fn run_create_standalone_agent_job(
         // per-provider resume rule applies to later launches like any agent's.
         resume: false,
         session,
-        provider_config: provider_cfg,
-        env,
+        provider_config: prepared.provider_config,
+        env: prepared.env,
         identity,
         pty_size: (rows, cols),
         scrollback_lines: config.ui.agent_scrollback_lines,
@@ -3082,19 +3304,18 @@ fn run_create_standalone_agent_job(
             status_notes: None,
             pull_request_pin: None,
             // There is no repository behind this agent. The field is only read
-            // by the rollback, which `owns_worktree: false` switches off.
+            // by the worktree rollback, which `owns_worktree: false` switches
+            // off; a folder dux created is taken back by
+            // `roll_back_failed_create` on its own record.
             repo_path: String::new(),
-            // dux did not make this directory, so a failed launch must never
-            // remove it. Same flag, same reason, as adopting an existing
-            // managed worktree.
             owns_worktree: false,
             startup_result: None,
             status_op_id: create_key,
             birth_identity: None,
         },
         wants_fullscreen: false,
-        // Loud: dux's promise about never touching the user's folder is the
-        // whole point of the sentence and is nowhere on screen.
+        // Loud: what dux does and does not do with the folder is the whole
+        // point of the sentence and is nowhere on screen.
         status_quiet: crate::statusline::QuietSurfaces::LOUD,
     };
     run_agent_launch_job(request, worker_tx, gate);
@@ -3619,6 +3840,19 @@ pub fn run_create_agent_job(
         );
         return;
     }
+    if let CreateAgentRequest::StandaloneInNewFolder {
+        root,
+        title,
+        provider,
+    } = request
+    {
+        let gate = crate::process_sessions::SpawnGate::new(registry.clone(), worktrees.clone());
+        run_create_standalone_agent_in_new_folder_job(
+            &root, &title, &provider, config, worker_tx, term_size, create_key, identity, &gate,
+            &worktrees,
+        );
+        return;
+    }
     let plan = {
         let mut context = CreatePlanContext {
             paths: &paths,
@@ -3664,6 +3898,14 @@ pub fn run_agent_launch_job(
 /// Take back the worktree a create's launch `request` made, now that the
 /// launch failed: only a create's, and only one the create made.
 fn roll_back_failed_create(request: &AgentLaunchRequest, rollback: Option<&Rollback>) {
+    // A create's folder that dux created was created by this very create, so
+    // the failed launch takes it back, and only while nothing is in it.
+    if let AgentLaunchKind::Create { .. } = &request.kind
+        && let crate::model::FolderRemovalRight::CreatedByDux { path, identity } =
+            request.session.workspace.folder_removal_right()
+    {
+        crate::agent_folders::remove_if_unused(Path::new(path), identity);
+    }
     if let AgentLaunchKind::Create {
         repo_path,
         owns_worktree,
@@ -4242,6 +4484,177 @@ mod tests {
 
     /// Drive a standalone create to completion and collect what came back.
     fn drive_standalone_job(folder: &Path, config: &Config) -> StandaloneRun {
+        drive_standalone_request(
+            CreateAgentRequest::Standalone {
+                folder: folder.to_path_buf(),
+                title: "notes".to_string(),
+                provider: ProviderKind::new("ghost"),
+            },
+            config,
+        )
+    }
+
+    fn ghost_provider(command: &str) -> Config {
+        let mut config = Config::default();
+        config.providers.commands.insert(
+            "ghost".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: command.to_string(),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    fn new_folder_request(root: &Path, name: &str) -> CreateAgentRequest {
+        CreateAgentRequest::StandaloneInNewFolder {
+            root: root.to_path_buf(),
+            title: name.to_string(),
+            provider: ProviderKind::new("ghost"),
+        }
+    }
+
+    /// A standalone create in a new folder creates `<root>/<name>` and records
+    /// that dux created it, with the identity the new directory has.
+    #[test]
+    fn a_new_folder_create_makes_the_folder_and_records_that_dux_made_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let run = drive_standalone_request(
+            new_folder_request(&root, "brave-otter"),
+            &ghost_provider("true"),
+        );
+        let session = run.launched.expect("the agent launches");
+        let folder = std::fs::canonicalize(&root).unwrap().join("brave-otter");
+        assert!(folder.is_dir());
+        assert_eq!(session.folder_path(), Some(folder.to_str().unwrap()));
+        assert_eq!(session.title.as_deref(), Some("brave-otter"));
+        let crate::model::FolderRemovalRight::CreatedByDux { path, identity } =
+            session.workspace.folder_removal_right()
+        else {
+            panic!("the record says dux created the folder");
+        };
+        assert_eq!(path, folder.to_str().unwrap());
+        let numbers = crate::model::DirectoryIdentity::of(&folder).unwrap();
+        assert_eq!(
+            (identity.device, identity.inode),
+            (numbers.device, numbers.inode)
+        );
+        let marker =
+            std::fs::read_to_string(folder.join(crate::agent_folders::MARKER_FILE_NAME)).unwrap();
+        assert!(marker.contains(&identity.mark.expect("a mark").to_hex()));
+    }
+
+    /// A name whose folder is already there is refused, and what is there is
+    /// left exactly as it was.
+    #[test]
+    fn a_new_folder_create_refuses_a_name_that_is_already_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        std::fs::create_dir_all(root.join("taken")).unwrap();
+        std::fs::write(root.join("taken/mine.txt"), "mine").unwrap();
+        let run =
+            drive_standalone_request(new_folder_request(&root, "taken"), &ghost_provider("true"));
+        let failure = run.failure.expect("refused");
+        assert!(
+            failure.ends_with(". A folder with that name is already there. Pick another name."),
+            "{failure}"
+        );
+        assert!(failure.contains("taken"), "the path is named: {failure}");
+        assert!(run.launched.is_none());
+        assert_eq!(
+            folder_snapshot(&root.join("taken")),
+            vec!["mine.txt".to_string()]
+        );
+    }
+
+    /// A folder an earlier create made and left before any agent was recorded
+    /// in it, holding only its marker file, is taken over rather than refused.
+    #[test]
+    fn a_new_folder_create_takes_over_a_folder_an_earlier_create_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let left = crate::agent_folders::create_agent_folder(&root, "otter").unwrap();
+        let run =
+            drive_standalone_request(new_folder_request(&root, "otter"), &ghost_provider("true"));
+        let session = run.launched.expect("the agent launches");
+        let crate::model::FolderRemovalRight::CreatedByDux { path, identity } =
+            session.workspace.folder_removal_right()
+        else {
+            panic!("the record says dux created the folder");
+        };
+        assert_eq!(Path::new(path), left.path);
+        assert_ne!(identity.mark, left.identity.mark);
+        let marker =
+            std::fs::read_to_string(left.path.join(crate::agent_folders::MARKER_FILE_NAME))
+                .unwrap();
+        assert!(marker.contains(&identity.mark.expect("a mark").to_hex()));
+    }
+
+    /// A provider that cannot run is found before the folder is created, so
+    /// nothing is left behind.
+    #[test]
+    fn a_new_folder_create_with_a_missing_provider_creates_no_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let run = drive_standalone_request(
+            new_folder_request(&root, "otter"),
+            &ghost_provider("dux-no-such-provider-binary"),
+        );
+        assert!(run.failure.is_some());
+        assert!(!root.join("otter").exists());
+    }
+
+    /// A launch that fails after the folder was created takes the empty folder
+    /// back, and keeps one anything was written into.
+    #[test]
+    fn a_failed_launch_takes_back_the_empty_folder_its_create_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let created = crate::agent_folders::create_agent_folder(tmp.path(), "otter").unwrap();
+        let kept = crate::agent_folders::create_agent_folder(tmp.path(), "busy").unwrap();
+        std::fs::write(kept.path.join("note"), "x").unwrap();
+        for folder in [&created, &kept] {
+            let mut session = new_agent_session(
+                ProviderKind::new("ghost"),
+                AgentWorkspace::Folder(FolderWorkspace {
+                    folder_path: folder.path.to_string_lossy().into_owned(),
+                    origin: crate::model::FolderOrigin::CreatedByDux(folder.identity),
+                }),
+                Some("otter".to_string()),
+                Vec::new(),
+            );
+            session.desired_running = true;
+            let request = AgentLaunchRequest {
+                tab_id: session.slot_tab_id().to_owned(),
+                provider: session.provider.clone(),
+                resume: false,
+                session,
+                provider_config: crate::config::ProviderCommandConfig::default(),
+                env: Vec::new(),
+                identity: crate::term_identity::TerminalIdentity::default(),
+                pty_size: (24, 80),
+                scrollback_lines: 100,
+                kind: AgentLaunchKind::Create {
+                    status_message: "made".into(),
+                    status_warns: false,
+                    status_notes: None,
+                    pull_request_pin: None,
+                    repo_path: String::new(),
+                    owns_worktree: false,
+                    startup_result: None,
+                    status_op_id: "op".to_string(),
+                    birth_identity: None,
+                },
+                wants_fullscreen: false,
+                status_quiet: crate::statusline::QuietSurfaces::LOUD,
+            };
+            roll_back_failed_create(&request, None);
+        }
+        assert!(!created.path.exists(), "the empty folder goes");
+        assert!(kept.path.join("note").exists(), "a folder with files stays");
+    }
+
+    fn drive_standalone_request(request: CreateAgentRequest, config: &Config) -> StandaloneRun {
         let tmp = tempfile::tempdir().unwrap();
         let paths = DuxPaths {
             config_path: tmp.path().join("config.toml"),
@@ -4253,11 +4666,7 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         run_create_agent_job(
-            CreateAgentRequest::Standalone {
-                folder: folder.to_path_buf(),
-                title: "notes".to_string(),
-                provider: ProviderKind::new("ghost"),
-            },
+            request,
             paths,
             config,
             &tx,
@@ -4274,6 +4683,7 @@ mod tests {
                 }
                 WorkerEvent::AgentLaunchReady(ready) => {
                     run.launch_env = Some(ready.request.env.clone());
+                    run.launched = Some(ready.request.session.clone());
                 }
                 WorkerEvent::AgentLaunchFailed(failed) => {
                     run.launch_env = Some(failed.request.env.clone());
@@ -4289,6 +4699,7 @@ mod tests {
     struct StandaloneRun {
         failure: Option<String>,
         launch_env: Option<Vec<(String, String)>>,
+        launched: Option<AgentSession>,
     }
 
     #[test]
@@ -5999,7 +6410,8 @@ mod tests {
             | CreateAgentRequest::ForkSession { project, .. }
             | CreateAgentRequest::ExistingManagedWorktree { project, .. }
             | CreateAgentRequest::ForkExternalWorktree { project, .. } => Some(project.clone()),
-            CreateAgentRequest::Standalone { .. } => None,
+            CreateAgentRequest::Standalone { .. }
+            | CreateAgentRequest::StandaloneInNewFolder { .. } => None,
         };
         if let Some(project) = project
             && !engine.projects.iter().any(|known| known.id == project.id)

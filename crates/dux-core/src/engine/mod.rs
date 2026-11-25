@@ -13,6 +13,7 @@ pub mod config_saver;
 #[doc(hidden)]
 pub mod destructive_guard;
 mod events;
+mod folder_removal;
 mod followup;
 mod in_flight;
 mod lifecycle;
@@ -34,6 +35,8 @@ pub mod status_op;
 
 #[cfg(test)]
 mod classic_keys_tests;
+#[cfg(test)]
+mod folder_removal_tests;
 #[cfg(test)]
 mod races_review2_tests;
 #[cfg(test)]
@@ -93,11 +96,13 @@ pub use events::{
     FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, RemovedBranches,
     StatusUpdate, WorktreeOnDelete, WorktreeRemoval, survivors_kept_worktree_message,
 };
+pub use events::{FolderFate, FolderOnDelete};
 pub(crate) use events::{
     RemovalCoordinationInputs, cwd_keeps, end_agent_processes_before_removal, occupant_after_wait,
     perform_deferred_removal, remove_after_last_look, standalone_processes_keep,
     wait_then_last_look,
 };
+pub use folder_removal::program_working_in;
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
     BranchRenameDispatch, BranchRenamePlan, BranchRenameRejection, InFlightKey, InFlightSet,
@@ -113,11 +118,11 @@ pub use lifecycle::{
     detach_confirm_prose, detach_forced_final, detach_not_running_message, detach_status_key,
     detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
-pub use pending_removals::recorded_at_or_through_link;
 pub(crate) use pending_removals::{
     OccupancyFacts, Occupant, StoppingProcesses, is_symlink, link_occupant_in, occupant_in,
     stored_occupant,
 };
+pub use pending_removals::{created_folder_occupant, recorded_at_or_through_link};
 pub use pr_sync_control::PrSyncControl;
 pub use pull_requests::UNKNOWN_PULL_REQUEST_MARKER;
 pub use removal::{
@@ -590,6 +595,10 @@ pub struct Engine {
     /// [`GroupWorktreeRemoval`]). `reap_terminating_ptys` drains these as their
     /// members reap.
     pub pending_group_removals: Vec<lifecycle::GroupWorktreeRemoval>,
+    /// Folders dux created for deleted standalone agents, each waiting for the
+    /// agent's processes to reap before it is deleted (see
+    /// [`folder_removal::GroupFolderRemoval`]).
+    pub pending_folder_removals: Vec<folder_removal::GroupFolderRemoval>,
     /// In-flight detach requests, each waiting for every tab of one agent to
     /// reap before its one outcome sentence is emitted (see
     /// [`PendingDetach`]). `reap_terminating_ptys` drains these as their members
@@ -6415,21 +6424,7 @@ impl Engine {
         let title = crate::git::standalone_agent_title(typed, &folder);
         // The GLOBAL default provider, the same source the config's own default
         // uses, unless the caller overrode it.
-        //
-        // An override is validated against the configured provider list, the
-        // same rule `change_agent_provider_wire` applies, because this plan is
-        // reachable from an HTTP body: an unconfigured name falls back to being
-        // used AS THE COMMAND (`Config::provider_command`), so accepting one
-        // spawns whatever the caller named.
-        let provider = match provider.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(value) => {
-                if !self.config.providers.commands.contains_key(value) {
-                    anyhow::bail!("{}", crate::provider::provider_not_configured(value));
-                }
-                crate::model::ProviderKind::new(value)
-            }
-            None => self.config.default_provider(),
-        };
+        let provider = self.standalone_provider(provider)?;
         let busy_message = crate::status_text![
             "Creating a standalone agent in ",
             q(crate::home_path::shorten_home(&folder)),
@@ -6443,6 +6438,115 @@ impl Engine {
             },
             busy_message,
         ))
+    }
+
+    /// The folder new standalone agents' folders are created in.
+    pub fn standalone_agents_root(&self) -> PathBuf {
+        crate::config::standalone_agents_root(&self.config, &self.paths)
+    }
+
+    /// The agent recorded at the folder a new standalone agent called `name`
+    /// would get in `root`, which may be recorded there while it is missing.
+    fn agent_recorded_at_new_folder(&self, root: &Path, name: &str) -> Option<&AgentSession> {
+        let resolved = crate::agent_folders::folder_path_for(
+            &crate::project_browser::canonical_or_original(root),
+            name,
+        );
+        crate::standalone_shortcuts::directory_occupant(
+            &resolved,
+            self.sessions.iter().map(AgentSession::directory),
+        )
+        .and_then(|index| self.sessions.get(index))
+    }
+
+    /// What the name step needs to answer whether a create in a new folder
+    /// would refuse `name`, off this thread.
+    pub fn new_folder_lookup(&self, name: &str) -> crate::agent_job::NewFolderLookup {
+        let root = self.standalone_agents_root();
+        let name = name.trim();
+        crate::agent_job::NewFolderLookup {
+            recorded_agent: (!name.is_empty())
+                .then(|| self.agent_recorded_at_new_folder(&root, name))
+                .flatten()
+                .map(AgentSession::display_label),
+            name: name.to_string(),
+            root,
+            worktrees: self.worktree_ops().clone(),
+        }
+    }
+
+    /// Plan a standalone-agent create in a new folder dux creates for it,
+    /// named after the agent, in [`Self::standalone_agents_root`].
+    ///
+    /// The name is required, because it names the folder, and follows the
+    /// agent-name rules every agent's does. Whether a folder of that name is
+    /// already there is answered by the create itself, which refuses one
+    /// atomically on its worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal for an empty or invalid name, or a provider that is
+    /// not configured.
+    pub fn plan_standalone_agent_in_new_folder(
+        &self,
+        name: &str,
+        provider: Option<&str>,
+    ) -> anyhow::Result<(crate::worker::CreateAgentRequest, StatusText)> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!(
+                "A standalone agent in a new folder needs a name, because the name is what dux \
+                 calls the folder it creates. Give the agent a name and try again."
+            );
+        }
+        if !crate::git::is_valid_agent_name(name) {
+            anyhow::bail!("{}", crate::git::invalid_agent_name_refusal(name));
+        }
+        let provider = self.standalone_provider(provider)?;
+        let root = self.standalone_agents_root();
+        let folder = crate::agent_folders::folder_path_for(&root, name);
+        if let Some(existing) = self.agent_recorded_at_new_folder(&root, name) {
+            anyhow::bail!(
+                "The standalone agent was not created at \"{}\". Agent \"{}\" already has that \
+                 folder. Pick another name.",
+                crate::home_path::shorten_home(&folder),
+                existing.display_label()
+            );
+        }
+        let busy_message = crate::status_text![
+            "Creating the folder ",
+            q(crate::home_path::shorten_home(&folder)),
+            " and a standalone agent in it\u{2026}"
+        ];
+        Ok((
+            crate::worker::CreateAgentRequest::StandaloneInNewFolder {
+                root,
+                title: name.to_string(),
+                provider,
+            },
+            busy_message,
+        ))
+    }
+
+    /// The provider a standalone create runs: `provider` when it names a
+    /// configured one, the global default when it is absent.
+    fn standalone_provider(&self, provider: Option<&str>) -> anyhow::Result<ProviderKind> {
+        // An override is validated against the configured provider list, the
+        // same rule `change_agent_provider_wire` applies, because this plan is
+        // reachable from an HTTP body: an unconfigured name falls back to being
+        // used AS THE COMMAND (`Config::provider_command`), so accepting one
+        // spawns whatever the caller named.
+        Ok(
+            match provider.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(value) => {
+                    if !self.config.providers.commands.contains_key(value) {
+                        anyhow::bail!("{}", crate::provider::provider_not_configured(value));
+                    }
+                    crate::model::ProviderKind::new(value)
+                }
+                None => self.config.default_provider(),
+            },
+        )
     }
 
     /// The instant snapshot the standalone picker's project shortcuts are

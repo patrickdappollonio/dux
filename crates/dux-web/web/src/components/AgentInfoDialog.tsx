@@ -134,7 +134,13 @@ export function AgentInfoDialog() {
             <>
               <InfoRow label="Kind">Standalone agent</InfoRow>
               <InfoRow label="Folder">
-                <SimpleTooltip content="The folder you pointed this agent at. dux runs the provider here and never creates, moves or removes it.">
+                <SimpleTooltip
+                  content={
+                    workspace.created_by_dux === true
+                      ? "The folder dux created for this agent. dux runs the provider here, never moves it, and deleting the agent can delete it too."
+                      : "The folder you pointed this agent at. dux runs the provider here and never creates, moves or removes it."
+                  }
+                >
                   <InlineCode>{workspace.folder_label}</InlineCode>
                 </SimpleTooltip>
               </InfoRow>

@@ -681,6 +681,19 @@ pub enum CreateAgentRequest {
         /// optional override or the global default.
         provider: ProviderKind,
     },
+    /// A standalone agent in a new folder dux creates for it, named after the
+    /// agent, inside `root`. The job creates the folder and refuses a name
+    /// whose folder is already there; a launch that fails removes the folder
+    /// again while it is still empty.
+    StandaloneInNewFolder {
+        /// The folder the new folder is created in.
+        root: PathBuf,
+        /// The agent's name, already checked against the agent-name rules.
+        /// The folder is named after it.
+        title: String,
+        /// The provider to launch.
+        provider: ProviderKind,
+    },
 }
 
 impl CreateAgentRequest {
@@ -696,7 +709,7 @@ impl CreateAgentRequest {
             | Self::ForkSession { project, .. }
             | Self::ExistingManagedWorktree { project, .. }
             | Self::ForkExternalWorktree { project, .. } => Some(&project.id),
-            Self::Standalone { .. } => None,
+            Self::Standalone { .. } | Self::StandaloneInNewFolder { .. } => None,
         }
     }
 }

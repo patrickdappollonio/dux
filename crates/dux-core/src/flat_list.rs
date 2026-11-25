@@ -390,9 +390,9 @@ mod tests {
     fn a_standalone_agent_sorts_by_its_label_like_any_other() {
         let mut untitled = session("sa1", SessionStatus::Active, 12, "ignored");
         untitled.title = None;
-        untitled.workspace = crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-            folder_path: "/home/someone/beta".to_string(),
-        });
+        untitled.workspace = crate::model::AgentWorkspace::Folder(
+            crate::model::FolderWorkspace::chosen("/home/someone/beta".to_string()),
+        );
         let sessions = vec![
             session("z", SessionStatus::Active, 12, "zulu"),
             untitled,

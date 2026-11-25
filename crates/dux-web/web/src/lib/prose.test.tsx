@@ -24,6 +24,8 @@ import {
   branchesCheckingProse,
   currentBranchLabelProse,
   currentBranchWarningProse,
+  folderBoxLabelProse,
+  folderFilesProse,
   otherBranchesLabelProse,
   otherBranchesWarningProse,
   protectedBranchesProse,
@@ -229,6 +231,14 @@ describe("the sentences both surfaces print", () => {
         return branchesCheckingProse()
       case "delete_worktree_files_checking":
         return worktreeFilesCheckingProse(args.agent as string)
+      case "delete_folder_label":
+        return folderBoxLabelProse(args.folder as string)
+      case "delete_folder_files":
+        return (
+          folderFilesProse(
+            args.files as import("./sessionsApi").FolderFilesReply["files"],
+          ) ?? []
+        )
       case "delete_worktree_files":
         return (
           worktreeFilesProse(

@@ -95,6 +95,10 @@ export type AgentWorkspaceWire =
        * Shortened server-side because the browser is not necessarily on the
        * same machine and has no `~` of the server's to collapse against. */
       folder_label: string
+      /** Whether dux created the folder for this agent, which is what lets
+       * deleting the agent delete the folder too. Absent from a server that
+       * predates it, which reads as a folder the user chose. */
+      created_by_dux?: boolean
       repo_status: FolderRepoStatus
       /** Why the changes region is quiet, in the user's terms. Authored
        * server-side so the terminal UI and the web say the same thing. */
@@ -259,8 +263,8 @@ export function missingDirectoryInfoLine(
 
 /** Whether a MANAGED agent's working copy is gone from disk, which is the one
  * state the recreate action exists for. False for a standalone agent, whose
- * folder is the user's: dux never creates, moves or removes that one, so a
- * missing folder is a sentence rather than a button. */
+ * folder dux never recreates, whoever made it, so a missing folder is a
+ * sentence rather than a button. */
 export function workingCopyMissing(workspace: AgentWorkspaceWire): boolean {
   return matchWorkspace(workspace, {
     managed: (w) => w.worktree_missing === true,

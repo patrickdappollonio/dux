@@ -2026,6 +2026,10 @@ impl Engine {
             self.pending_group_removals = still_pending;
         }
 
+        // A folder dux created for a deleted standalone agent is deleted once
+        // the last of that agent's processes is gone.
+        self.release_folder_removals(&reaped_ids);
+
         // Restart barrier: the tabs a recreate restarts start again only once
         // the last of their old processes is gone, which
         // `sweep_recreate_restarts` checks right after this pass.
@@ -2140,6 +2144,9 @@ impl Engine {
         );
         // A worktree removal the last run accepted and never finished.
         self.resume_pending_worktree_removals();
+        // A folder dux created that the last run was to delete with its
+        // agent and never did.
+        self.resume_pending_folder_removals();
     }
 
     /// Classify the directory every agent lives in, one off-thread probe each.
@@ -7005,10 +7012,9 @@ mod tests {
     fn a_standalone_agent_whose_folder_vanished_is_not_a_candidate() {
         let (mut engine, _tmp, folder) = standalone_auto_reopen_fixture();
         let gone = folder.path().join("no-such-directory");
-        engine.sessions[0].workspace =
-            crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-                folder_path: gone.to_string_lossy().to_string(),
-            });
+        engine.sessions[0].workspace = crate::model::AgentWorkspace::Folder(
+            crate::model::FolderWorkspace::chosen(gone.to_string_lossy().to_string()),
+        );
         assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 

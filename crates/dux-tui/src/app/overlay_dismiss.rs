@@ -649,8 +649,9 @@ mod tests {
             (
                 "NameStandaloneAgent",
                 PromptState::NameStandaloneAgent {
-                    folder: "/home/ada/notes".to_string(),
+                    folder: crate::app::StandaloneFolder::Picked("/home/ada/notes".to_string()),
                     input: TextInput::with_text("half-typed-name".to_string()),
+                    focus: crate::app::NameStandaloneAgentFocus::Input,
                 },
             ),
             ("NameNewAgent", name_new_agent_prompt(app)),

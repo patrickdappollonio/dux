@@ -24,7 +24,11 @@ vi.mock("@/lib/sessionsApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/sessionsApi")>()
   return {
     ...actual,
-    sessionsApi: { ...actual.sessionsApi, branchUnpushed: vi.fn() },
+    sessionsApi: {
+      ...actual.sessionsApi,
+      branchUnpushed: vi.fn(),
+      folderFiles: vi.fn(),
+    },
   }
 })
 
@@ -51,6 +55,7 @@ const api = await import("@/lib/sessionsApi")
 const deleteSession = vi.mocked(store.deleteSession)
 const closeDelete = vi.mocked(store.closeDelete)
 const branchUnpushed = vi.mocked(api.sessionsApi.branchUnpushed)
+const folderFiles = vi.mocked(api.sessionsApi.folderFiles)
 
 function managed(branch: string) {
   return {
@@ -118,6 +123,8 @@ beforeEach(() => {
   closeDelete.mockClear()
   branchUnpushed.mockReset()
   branchUnpushed.mockResolvedValue(offer({ name: "dux/s1", origin: "dux" }))
+  folderFiles.mockReset()
+  folderFiles.mockResolvedValue({ created_by_dux: true, files: { state: "counted", count: 0 } })
 })
 
 afterEach(() => {
@@ -210,6 +217,7 @@ describe("DeleteSessionDialog", () => {
         true,
         { current: unchecked, others: unchecked },
         null,
+        null,
       )
     } finally {
       vi.useRealTimers()
@@ -244,6 +252,7 @@ describe("DeleteSessionDialog", () => {
       true,
       { current: unchecked, others: unchecked },
       null,
+        null,
     )
   })
 
@@ -276,6 +285,7 @@ describe("DeleteSessionDialog", () => {
         },
       },
       null,
+        null,
     )
   })
 
@@ -390,6 +400,7 @@ describe("DeleteSessionDialog", () => {
       true,
       { current: notOffered, others: notOffered },
       null,
+        null,
     )
   })
 
@@ -483,6 +494,7 @@ describe("DeleteSessionDialog", () => {
         },
       },
       null,
+        null,
     )
   })
 
@@ -514,6 +526,7 @@ describe("DeleteSessionDialog", () => {
         others: { delete: false, branches: [], offered: ["spike"] },
       },
       null,
+        null,
     )
   })
 
@@ -652,6 +665,7 @@ describe("DeleteSessionDialog", () => {
       true,
       { current: notOffered, others: notOffered },
       null,
+        null,
     )
   })
 
@@ -853,6 +867,7 @@ describe("DeleteSessionDialog", () => {
         others: { delete: false, branches: [], unchecked: "not_offered" },
       },
       null,
+        null,
     )
   })
 
@@ -894,6 +909,7 @@ describe("DeleteSessionDialog", () => {
         others: { delete: false, branches: [], unchecked: "failed" },
       },
       null,
+        null,
     )
   })
 
@@ -993,7 +1009,7 @@ describe("DeleteSessionDialog", () => {
     ])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("s1", false, null, null)
+    expect(deleteSession).toHaveBeenCalledWith("s1", false, null, null, null)
 
     const override = await screen.findByRole("button", { name: "Delete anyway" })
     expect(closeDelete).not.toHaveBeenCalled()
@@ -1012,7 +1028,7 @@ describe("DeleteSessionDialog", () => {
     deleteSession.mockResolvedValueOnce(null)
     fireEvent.click(override)
     // The override goes ahead over exactly who it showed.
-    expect(deleteSession).toHaveBeenLastCalledWith("s1", false, null, ["k-firefox"])
+    expect(deleteSession).toHaveBeenLastCalledWith("s1", false, null, ["k-firefox"], null)
     await vi.waitFor(() => expect(closeDelete).toHaveBeenCalled())
   })
 
@@ -1050,7 +1066,7 @@ describe("DeleteSessionDialog", () => {
     expect((confirm as HTMLButtonElement).disabled).toBe(false)
     deleteSession.mockResolvedValueOnce(null)
     fireEvent.click(confirm)
-    expect(deleteSession).toHaveBeenLastCalledWith("s2", false, null, null)
+    expect(deleteSession).toHaveBeenLastCalledWith("s2", false, null, null, null)
   })
 
   // THE PIN. There is no worktree to remove and no branch to delete, so the
@@ -1099,7 +1115,74 @@ describe("DeleteSessionDialog", () => {
     ])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, null)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, null, null)
+  })
+
+  const madeFolder = {
+    id: "sa2",
+    title: "talk-to-me",
+    workspace: {
+      kind: "folder",
+      folder_path: "/home/someone/.config/dux/agents/talk-to-me",
+      folder_label: "~/.config/dux/agents/talk-to-me",
+      created_by_dux: true,
+      repo_status: "no_repo",
+      quiet_reason: "",
+    },
+  }
+
+  it("offers to delete a folder dux created, ticked, naming the folder", async () => {
+    seed("sa2", [madeFolder])
+    render(<DeleteSessionDialog />)
+    const box = screen.getByRole("checkbox", { name: /Also delete its folder/ })
+    expect(box.getAttribute("aria-checked") ?? String((box as HTMLInputElement).checked)).toBe(
+      "true",
+    )
+    expect(screen.getByText("~/.config/dux/agents/talk-to-me")).toBeTruthy()
+    await act(async () => {})
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("sa2", false, null, null, true)
+  })
+
+  it("keeps the folder dux created when its box is unticked", async () => {
+    seed("sa2", [madeFolder])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox", { name: /Also delete its folder/ }))
+    await act(async () => {})
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("sa2", false, null, null, false)
+  })
+
+  it("says how many files go with the folder while its box is ticked", async () => {
+    folderFiles.mockResolvedValue({ created_by_dux: true, files: { state: "counted", count: 7 } })
+    seed("sa2", [madeFolder])
+    render(<DeleteSessionDialog />)
+    expect(
+      await screen.findByText("The folder holds 7 files. They will be deleted with it."),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole("checkbox", { name: /Also delete its folder/ }))
+    expect(screen.queryByText(/The folder holds/)).toBeNull()
+  })
+
+  it("offers no folder box for a folder the user chose, and says it stays", () => {
+    seed("sa1", [
+      {
+        id: "sa1",
+        title: "notes",
+        workspace: {
+          kind: "folder",
+          folder_path: "/home/someone/notes",
+          folder_label: "~/notes",
+          created_by_dux: false,
+          repo_status: "working_repo",
+          quiet_reason: "",
+        },
+      },
+    ])
+    render(<DeleteSessionDialog />)
+    expect(screen.queryByRole("checkbox")).toBeNull()
+    expect(paragraph(/never moves or removes a folder you chose/)).toBeTruthy()
+    expect(folderFiles).not.toHaveBeenCalled()
   })
 
   // The checkbox state outlives one open: the dialog stays mounted. A box ticked
@@ -1125,7 +1208,7 @@ describe("DeleteSessionDialog", () => {
     seed("sa1", [session1, standalone])
     rerender(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, null)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, null, null)
   })
 
   // Deleting ends the agent's row, so it cannot be confirmed over a row this
