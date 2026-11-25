@@ -776,6 +776,11 @@ describe("DeleteSessionDialog", () => {
       const pill = screen.getByRole("status")
       expect(pill.textContent).toBe(says)
       expect(chipsIn(pill)).toEqual(chips)
+      // The box lays its chips out as the shared chip does everywhere else: it
+      // carries no rule of its own for the chip's display, line height or margin.
+      for (const el of [pill, ...pill.querySelectorAll("*")]) {
+        expect(el.getAttribute("class") ?? "").not.toContain("inline-code")
+      }
       // No green anywhere: neutral is the app's grey, a loss its warning yellow.
       expect(pill.outerHTML).not.toContain("dux-success")
       const classes = pill.className.split(/\s+/)

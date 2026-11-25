@@ -326,12 +326,12 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 // be lost or git could not answer. Quiet grey and a soft yellow rather than
 // green and strong tints, by the user's decision of 2026-11-23: the pill
 // informs, the boxes and the loss warning under them are what ask for care.
-// Every state has an icon of its own, so the tone is never the only signal. The icon sits on the first line however many the text wraps to, and
-// a pill that wraps becomes a rounded rectangle, since a capsule that tall has
-// corners eating its text. A chip moves to the next line whole rather than
-// splitting, unless it is longer than a line on its own; its negative margin
-// keeps it from making its line taller than the text's, so a wrapped pill
-// grows by whole lines and its padding stays even.
+// Every state has an icon of its own, so the tone is never the only signal.
+// The icon sits on the first line however many the text wraps to, and a pill
+// that wraps becomes a rounded rectangle, since a capsule that tall has
+// corners eating its text. A chip flows with the sentence as it does in the
+// dialog's other prose, on the text's own line height, so a wrapped pill grows
+// by whole lines and its padding stays even.
 // The room a two-line pill takes, held from the dialog's first frame so an
 // answer of one or two lines moves nothing around it: two of the pill's text
 // lines plus its `py-[5px]` and its 1px border, top and bottom.
@@ -374,10 +374,7 @@ function BranchCheckPill({ check }: { check: BranchCheck }) {
       )}
     >
       {icon}
-      <span
-        ref={text}
-        className="min-w-0 [&_[data-slot=inline-code]]:-my-[3px] [&_[data-slot=inline-code]]:inline-block [&_[data-slot=inline-code]]:leading-none"
-      >
+      <span ref={text} className="min-w-0">
         {renderProse(prose)}
       </span>
     </div>
