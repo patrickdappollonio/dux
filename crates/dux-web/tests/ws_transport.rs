@@ -1,9 +1,7 @@
 //! End-to-end WebSocket transport tests (the "debug client").
 //!
-//! Post-cutover (Phase 6) the legacy `/ws` socket, the broadcast `ViewModel`, and
-//! the `ServerMessage`/`ClientMessage` command protocol are gone. Reads and actions
-//! are REST (`/api/v1/...`); change/status signals ride `/ws/events`; terminal byte
-//! streams ride the nested per-PTY sockets.
+//! Reads and actions are REST (`/api/v1/...`); change/status signals ride
+//! `/ws/events`; terminal byte streams ride the nested per-PTY sockets.
 
 use std::net::SocketAddr;
 use std::time::Duration;

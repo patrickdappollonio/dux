@@ -248,7 +248,7 @@ const MAX_EDIT_WRITE_BYTES: usize =
 /// session-nested terminal address: a session-owned terminal shares its agent's
 /// worktree, so its editor is the agent's editor.
 ///
-/// Terminal roots are pinned at spawn, parting company with the file-drop tenet,
+/// Terminal roots are pinned at spawn, unlike a file drop,
 /// which follows the live shell so a dropped file lands where the user is typing.
 /// An editor root backs a tree, a set of buffers, their drafts and a bookmarkable
 /// URL, and a root that moved on a `cd` would invalidate all four at once.

@@ -521,14 +521,14 @@ async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down
     serve_thread.join().expect("serve thread joined");
 }
 
-/// Regression for the flip hang: a subscribed PTY forwarder must not wedge the
-/// runtime teardown on `ReturnToTui`. A ws client subscribes to a live `cat`
-/// companion terminal and gets an echoed binary frame (so the forwarder is live
-/// and parked on its blocking `recv_timeout`, with the engine (and thus the
-/// `PtyClient` `Sender`) still alive). Then a `ReturnToTui` tick stops serving,
-/// and the serve thread must JOIN within a tight bound. Before the fix the
-/// forwarder parked on `recv()` forever (the Sender never dropped on
-/// `ReturnToTui`), so dropping the multi-thread runtime hung indefinitely.
+/// A subscribed PTY forwarder must not wedge the runtime teardown on
+/// `ReturnToTui`. A ws client subscribes to a live `cat` companion terminal and
+/// gets an echoed binary frame (so the forwarder is live and parked on its
+/// blocking `recv_timeout`, with the engine (and thus the `PtyClient` `Sender`)
+/// still alive). Then a `ReturnToTui` tick stops serving, and the serve thread
+/// must JOIN within a tight bound: a forwarder parked on `recv()` forever (the
+/// Sender never dropped on `ReturnToTui`) would hang the multi-thread runtime
+/// drop indefinitely.
 #[tokio::test]
 async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
     let (mut engine, _tmp) = build_engine();

@@ -38,8 +38,8 @@ brotli = "8"
 
 # Brotli-compress the built web assets while staging them into $OUT_DIR/ui, so
 # rust-embed bakes the compressed bytes into the binary (and they're served with
-# Content-Encoding: br). flate2 stays for one legacy job: a checkout whose dist
-# was gzipped IN PLACE by an old version of build.rs must be inflated before it
+# Content-Encoding: br). flate2 stays for one job: a checkout whose dist
+# was gzipped IN PLACE by an older build.rs must be inflated before it
 # is recompressed (and the not-built notice detection reads such a dist too).
 [build-dependencies]
 brotli = "8"

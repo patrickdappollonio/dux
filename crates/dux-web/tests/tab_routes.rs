@@ -304,8 +304,8 @@ async fn post_tabs_rejects_an_unconfigured_provider() {
 }
 
 /// Poll `/api/v1/sessions/:id` until `pred` matches the decoded body, or give
-/// up after ~5s. Used to wait out the async tab-launch job before asserting on
-/// its liveness, rather than racing it.
+/// up after ~5s. Waits out the async tab-launch job before asserting on its
+/// liveness, rather than racing it.
 async fn wait_for_session<F>(
     client: &reqwest::Client,
     addr: SocketAddr,
@@ -435,10 +435,10 @@ fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
 /// The drop-paste profile a tab launched with rides the SPINE, per tab, and
 /// retires with the process.
 ///
-/// It used to ride the BOOTSTRAP document, which a browser refetches only on a
-/// config change, so a client's copy went stale for the whole life of a process:
-/// a tab relaunched under a different provider was still quoted for the previous
-/// one until a reconnect. A launch and a termination both refresh the spine, so
+/// It does not ride the BOOTSTRAP document, which a browser refetches only on a
+/// config change, so a client's copy would go stale for the whole life of a
+/// process: a tab relaunched under a different provider would still be quoted
+/// for the previous one until a reconnect. A launch and a termination both refresh the spine, so
 /// that is where it belongs, and this drives a REAL launch and a REAL close to
 /// say so.
 ///
@@ -669,8 +669,8 @@ async fn delete_extra_tab_removes_its_row() {
         .send()
         .await
         .unwrap();
-    // G15: an extra-tab close now returns 200 + `{ "detached": bool }` (matching
-    // the session-slot branch) instead of a bare 204, so a caller can learn
+    // An extra-tab close returns 200 + `{ "detached": bool }` (matching the
+    // session-slot branch) rather than a bare 204, so a caller can learn
     // whether this close detached the agent without a follow-up poll. Here it
     // was the agent's only live tab, so it must report detached.
     assert_eq!(resp.status(), 200);
@@ -715,7 +715,7 @@ async fn delete_extra_tab_removes_its_row() {
 
 #[tokio::test]
 async fn stopping_or_closing_an_extra_tab_with_a_live_sibling_does_not_detach() {
-    // G15 companion case: closing an extra tab while a sibling (here, the
+    // Companion case: closing an extra tab while a sibling (here, the
     // session-slot tab) is still live must report `detached: false`, not just
     // default to `true` because the closed tab itself is gone.
     let (addr, _tmp) = boot().await;
@@ -828,8 +828,8 @@ async fn patch_tab_rejects_an_unconfigured_provider() {
     assert_eq!(resp.status(), 400);
 }
 
-// G-T7: PATCH retarget only had a negative (unconfigured-provider) test; add the
-// success path. `codex` is a default-configured provider. Retargeting a tab
+// PATCH retarget success path (the negative, unconfigured-provider case is
+// tested separately). `codex` is a default-configured provider. Retargeting a tab
 // while its process is still live only PINS the previous provider for display
 // (the pane title must not lie about what's on screen until relaunch), so the
 // tab is killed (dormant, no live process) first: only then does the tab
@@ -880,8 +880,8 @@ async fn patch_tab_retargets_to_a_valid_provider() {
     );
 }
 
-// G21: an out-of-bound `:id` must be reported as an unknown SESSION, not an
-// unknown TAB: the two checks used to be collapsed into one tab-worded 404
+// An out-of-bound `:id` must be reported as an unknown SESSION, not an
+// unknown TAB: the two checks must not collapse into one tab-worded 404
 // regardless of which path segment was actually bad.
 #[tokio::test]
 async fn delete_tab_with_bad_session_id_is_unknown_session_not_unknown_tab() {
@@ -1123,9 +1123,9 @@ async fn tab_pty_socket_cap_refuses_beyond_the_per_agent_limit() {
     );
 }
 
-// G-T3: the socket-reap behavior was only tested for a whole-agent kill
-// (`ws_transport.rs::tearing_down_agent_pty_closes_its_attached_socket`);
-// exercise the single-tab close path too: `DELETE .../tabs/:tab` on an EXTRA
+// The socket-reap behavior for a whole-agent kill is tested in
+// `ws_transport.rs::tearing_down_agent_pty_closes_its_attached_socket`; this
+// exercises the single-tab close path: `DELETE .../tabs/:tab` on an EXTRA
 // tab must proactively close that tab's own nested PTY socket (not merely go
 // quiet), and the per-agent socket sub-quota slot it held must be released,
 // not leaked.

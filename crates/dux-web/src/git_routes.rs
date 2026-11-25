@@ -2752,7 +2752,7 @@ mod tests {
         assert!(!worktree.join("out").exists());
     }
 
-    /// Review 14: the TRACKED file `f.txt` has been replaced in the working
+    /// The TRACKED file `f.txt` has been replaced in the working
     /// tree by a folder of the same name holding a repository of its own (a
     /// clone with its history). git lists only ` D f.txt`, so the browser
     /// offers discard as restoring one file, and confirms it as a file. The
@@ -3174,8 +3174,8 @@ mod tests {
         );
     }
 
-    /// Review 6: "the same check also decides every destructive file
-    /// operation: the changes pane's folder discard, nested-repo discard". The
+    /// The same check also decides every destructive file
+    /// operation: the changes pane's folder discard, nested-repo discard. The
     /// web changes pane's discard route deletes an untracked folder whole
     /// without asking the one occupancy question, so a standalone agent whose
     /// folder sits untracked inside the worktree loses its folder (dux "never

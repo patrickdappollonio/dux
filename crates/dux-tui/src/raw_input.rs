@@ -1103,9 +1103,9 @@ mod tests {
 
     #[test]
     fn osc_not_fragmented_into_garbage() {
-        // Before the fix, ESC ] was treated as a 2-byte alt-key sequence,
-        // leaving "11;rgb:0000/0000/0000\x07" as separate bytes that would
-        // be forwarded to the PTY child as garbage text input.
+        // ESC ] is not a 2-byte alt-key sequence: otherwise
+        // "11;rgb:0000/0000/0000\x07" would be left as separate bytes forwarded
+        // to the PTY child as garbage text input.
         let input = b"\x1b]11;rgb:0000/0000/0000\x07";
         let (seqs, rem) = split_sequences(input);
         // Must be exactly 1 sequence, not fragmented.

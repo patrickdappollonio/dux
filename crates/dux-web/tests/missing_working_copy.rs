@@ -191,9 +191,9 @@ async fn a_deleted_working_copy_answers_with_its_own_verdict() {
     let client = reqwest::Client::new();
 
     // A browser looking at this agent, which is what makes the poller ask about
-    // it every cycle and is exactly the situation the bug was reported from.
-    // Read, not merely opened: what the browser is told is half the bug, and a
-    // socket nobody drains proves nothing about what travels on it.
+    // it every cycle. Read, not merely opened: what the browser is told is half
+    // the point, and a socket nobody drains proves nothing about what travels
+    // on it.
     let (events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .unwrap();
@@ -396,9 +396,9 @@ async fn recreating_a_working_copy_that_is_there_is_refused() {
     assert_eq!(unknown.status(), 404);
 }
 
-/// The editor is another door onto the same directory. It used to open its own
-/// hole and answer with whatever the filesystem said, which named no path and
-/// offered no way back; it now refuses with the working copy's own sentence.
+/// The editor is another door onto the same directory: it refuses with the
+/// working copy's own sentence rather than answering with whatever the
+/// filesystem said, which names no path and offers no way back.
 #[tokio::test]
 async fn the_editor_refuses_a_directory_that_is_gone_in_the_same_sentence() {
     let (addr, _tmp, worktree) = boot().await;

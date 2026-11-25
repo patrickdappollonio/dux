@@ -2787,7 +2787,7 @@ pub(super) mod tests {
             .join("\n")
     }
 
-    /// The user's rule: only the device driving a row sees that the agent has
+    /// Only the device driving a row sees that the agent has
     /// terminals. Under the card the center pane is the agent alone, whatever
     /// layout is remembered: no dock, no dock strip, no layout control, no
     /// divider, no terminal in the caption or the header, and the agent's own
@@ -3138,11 +3138,11 @@ pub(super) mod tests {
         }
     }
 
-    /// THE REPORTED BUG, as a test. A browser starts an agent; this surface
-    /// merely draws the new pane, and that draw must not make this terminal the
-    /// agent's driver. The browser's own attach resize arrives afterwards, and
-    /// attaching never steals, so a passive claim here leaves the browser that
-    /// started the agent watching a take-over card over its own new terminal.
+    /// A browser starts an agent; this surface merely draws the new pane, and
+    /// that draw must not make this terminal the agent's driver. The browser's
+    /// own attach resize arrives afterwards, and attaching never steals, so a
+    /// passive claim here would leave the browser that started the agent
+    /// watching a take-over card over its own new terminal.
     #[test]
     fn merely_rendering_a_free_pty_leaves_it_free_for_the_browser_that_started_it() {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
@@ -3172,9 +3172,9 @@ pub(super) mod tests {
         );
     }
 
-    /// The other half of the reported bug: once the browser has attached, this
-    /// surface keeps drawing the agent every frame, and none of those frames may
-    /// hand it the pty back. Losing (or never having) a pty is sticky.
+    /// The other half: once the browser has attached, this surface keeps drawing
+    /// the agent every frame, and none of those frames may hand it the pty back.
+    /// Losing (or never having) a pty is sticky.
     #[test]
     fn a_browser_launched_agent_stays_browser_driven_however_often_it_is_drawn() {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
@@ -3934,10 +3934,9 @@ pub(super) mod tests {
             .collect()
     }
 
-    /// THE REPORTED BUG. The user was typing into their agent a second ago and
-    /// no browser exists yet; switching serving on from the palette must not
-    /// cover that agent, or any other running tab or terminal, with `Running in
-    /// the background`.
+    /// The user was typing into their agent a second ago and no browser exists
+    /// yet; switching serving on from the palette must not cover that agent, or
+    /// any other running tab or terminal, with `Running in the background`.
     #[test]
     fn switching_serving_on_here_claims_every_running_agent_tab_and_terminal() {
         let (mut app, _recorded, seat) = app_running_everything_with_nothing_serving();

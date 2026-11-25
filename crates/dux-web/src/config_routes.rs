@@ -2170,11 +2170,10 @@ mod tests {
     }
 
     // The `[defaults]` group is the first non-`ui`/`capabilities` group on this
-    // PATCH. It exists because the Preferences dialog now carries the random
-    // pet-name default, which used to be a web command-palette toggle. Unlike
-    // `github_integration` (whose flip has PR-sync side effects and therefore
-    // keeps its dedicated endpoint), this is a plain field write, so it rides
-    // the generic settings PATCH.
+    // PATCH. It exists because the Preferences dialog carries the random
+    // pet-name default. Unlike `github_integration` (whose flip has PR-sync side
+    // effects and therefore keeps its dedicated endpoint), this is a plain field
+    // write, so it rides the generic settings PATCH.
     #[tokio::test]
     async fn set_settings_accepts_a_defaults_patch() {
         let (_tmp, app) = router_no_auth();

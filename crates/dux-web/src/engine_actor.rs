@@ -1868,7 +1868,7 @@ impl EngineHandle {
     /// agent of that name would start fresh or attach to an existing branch.
     /// `None` when the project is unknown or the engine thread is gone. The create
     /// route uses this to refuse an unconfirmed existing-branch attach with a
-    /// confirmable 409 (the web's half of the "no silent attach" tenet).
+    /// confirmable 409 (an existing branch is never attached silently).
     pub async fn create_agent_branch_plan(
         &self,
         project_id: String,
@@ -2765,7 +2765,7 @@ pub(crate) fn spawn_engine_thread_with_console(
     let join = thread::spawn(move || {
         // The dedicated thread never asks the loop to exit; the loop stops only
         // on the `Shutdown` request handled inline. The returned engine is
-        // dropped here (thread end), exactly as the previous implementation did.
+        // dropped here (thread end).
         let surface = ServeSurface::DuxServer;
         let _engine = run_engine_loop(
             engine,
@@ -8213,9 +8213,9 @@ mod tests {
 
     #[test]
     fn an_error_raised_into_an_empty_room_waits_for_the_first_page_to_open() {
-        // The reported failure: while the terminal UI serves in its background,
-        // an engine error can be raised with no browser open, and the browser
-        // that opens later never learned it existed.
+        // While the terminal UI serves in its background, an engine error can be
+        // raised with no browser open, and the browser that opens later must
+        // still learn it existed.
         let mut e = emitter_with_nobody_watching();
         let _ = e.send(WireStatus::keyed("pr", "error", "gh could not resolve it"));
         e.tick(Instant::now() + dux_core::statusline::FINAL_REPLAY_WINDOW);
@@ -11096,7 +11096,7 @@ mod tests {
 
     // ── The raw editor's save carries proof of what it read ────────────────
 
-    /// Review probe (ported): a password set with `dux config set` while a
+    /// A password set with `dux config set` while a
     /// browser has the raw editor open must not be undone when that editor
     /// saves an unrelated change. The save carries the read's token, the file
     /// moved, so the save is refused as a conflict and nothing is written.

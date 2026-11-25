@@ -1201,12 +1201,11 @@ struct MetaCounts {
 /// whole-line safety net at the end cuts whatever still overflows.
 ///
 /// The web sidebar keeps its tab count (`shrink-0`) and truncates its project
-/// tag instead. The terminal UI deliberately gives the tab count up first at
-/// narrow widths, because the tab strip above the terminal already shows the
-/// tabs (user decision, 2026-09-30: "Tab count is the least important part
-/// here"). The web also has no branch on line two, and lets its project name
-/// truncate all the way to nothing where this drops a name below its narrowest
-/// useful cut along with its separator.
+/// tag instead. The terminal UI gives the tab count up first at narrow widths,
+/// because the tab strip above the terminal already shows the tabs. The web
+/// also has no branch on line two, and lets its project name truncate all the
+/// way to nothing where this drops a name below its narrowest useful cut along
+/// with its separator.
 ///
 /// A state change moves the word's width (Working and its dot slot are six
 /// cells wider than Idle). The remote count keeps its place; only its word is
@@ -12420,7 +12419,7 @@ impl App {
 
     /// The configure dialog's Cancel and Save buttons, centred in `area`.
     /// Cancel discards typing, so the pair sits behind a blank row and a wide
-    /// gap (the misclick-safety tenet).
+    /// gap, so an imprecise click cannot hit the wrong one.
     fn render_configure_buttons(
         &self,
         frame: &mut Frame<'_>,
@@ -14388,7 +14387,7 @@ impl App {
 
         // ── Cancel / Save ─────────────────────────────────────────────────
         // Cancel discards typing, so the two targets are separated by more than
-        // the usual gap and by a blank row above (the misclick-safety tenet).
+        // the usual gap and by a blank row above.
         let (cancel_button, save_button) =
             self.render_macro_editor_buttons(frame, buttons_area, focus);
 
@@ -17243,7 +17242,7 @@ mod tests {
         );
         assert!(
             rendered.contains("provider:"),
-            "and keep the provider crumb it used to lose; got:\n{rendered}"
+            "and keep the provider crumb; got:\n{rendered}"
         );
     }
 
@@ -17536,10 +17535,10 @@ mod tests {
         );
     }
 
-    /// REGRESSION: a 30x10 changes pane painted an EMPTY frame. The card was
-    /// measured at the ring's narrower measure, judged one row too tall for the
-    /// pane it was about to be laid out bare in, and dropped whole. A pane with
-    /// rows must show the sentence, or the user is told nothing at all.
+    /// A 30x10 changes pane must not paint an EMPTY frame: the card, measured
+    /// at the ring's narrower measure, can be judged one row too tall for the
+    /// pane it is laid out bare in and dropped whole. A pane with rows must show
+    /// the sentence, or the user is told nothing at all.
     #[test]
     fn the_quiet_changes_message_survives_a_short_pane() {
         let reason = format!(
@@ -19940,11 +19939,11 @@ mod tests {
         assert!(!close_tab_detaches(TabLiveness::Dormant, 1));
     }
 
-    /// Render-level regression for the drift crumb gate: when the agent's
-    /// branch equals the project's current branch but has DRIFTED from the
-    /// branch it was created on, the header must still surface the "agent:"
-    /// crumb with "(orig: <initial>)". Exercises the real `render_header`
-    /// buffer, not just the pure `top_bar_branch_suffix` helper.
+    /// Render-level check of the drift crumb gate: when the agent's branch
+    /// equals the project's current branch but has DRIFTED from the branch it
+    /// was created on, the header must still surface the "agent:" crumb with
+    /// "(orig: <initial>)". Exercises the real `render_header` buffer, not just
+    /// the pure `top_bar_branch_suffix` helper.
     #[test]
     fn header_shows_drift_crumb_when_agent_on_project_branch_but_drifted() {
         use ratatui::Terminal;
@@ -20142,9 +20141,9 @@ mod tests {
         );
     }
 
-    /// REGRESSION: at 60x16 the card dropped the run's last output and kept the
-    /// standing resume rule. The excerpt is the one thing on this card that
-    /// cannot be learned anywhere else, so it must outlive the paragraph that is
+    /// At 60x16 the card must drop the standing resume rule before the run's
+    /// last output: the excerpt is the one thing on this card that cannot be
+    /// learned anywhere else, so it must outlive the paragraph that is
     /// identical on every dormant card in the app.
     #[test]
     fn dormant_tab_card_keeps_the_excerpt_over_the_standing_resume_rule() {
@@ -20174,10 +20173,10 @@ mod tests {
     }
 
     /// A CLIPPED BUTTON IS A LIE. `Button::render` does not clip, so a card laid
-    /// out one column too narrow used to paint "Start sess" and publish a click
+    /// out one column too narrow would paint "Start sess" and publish a click
     /// rect for it. Below the width that fits the label whole the button is
     /// GIVEN UP, and the words stay: a narrow pane that painted nothing at all
-    /// was the worse of the two bugs.
+    /// would be worse.
     #[test]
     fn dormant_tab_card_never_paints_a_clipped_button_and_keeps_the_sentence() {
         let mut app = test_app(default_bindings());
@@ -22295,12 +22294,12 @@ mod tests {
         );
     }
 
-    /// Regression test for issue #258: while the interactive agent terminal is
-    /// rendered, the real (hardware) terminal cursor must be moved onto the
-    /// embedded PTY cursor cell. IME composition popups (e.g. a Korean IME) are
-    /// drawn by the terminal/OS at the hardware cursor position, so if it is
-    /// left at the origin the composing character appears detached from the
-    /// prompt near the top-left instead of at the agent's cursor.
+    /// While the interactive agent terminal is rendered, the real (hardware)
+    /// terminal cursor must be moved onto the embedded PTY cursor cell. IME
+    /// composition popups (e.g. a Korean IME) are drawn by the terminal/OS at the
+    /// hardware cursor position, so if it is left at the origin the composing
+    /// character appears detached from the prompt near the top-left instead of
+    /// at the agent's cursor.
     #[test]
     fn interactive_agent_aligns_hardware_cursor_with_pty_cursor() {
         use ratatui::Terminal;
@@ -22688,9 +22687,8 @@ mod tests {
 
     /// A Confirm-family modal's buttons centre their labels too.
     ///
-    /// The take-over card's button was found one cell right of centre, and the
-    /// cause was in the SHARED button widget rather than in the card, so this
-    /// pins the fix where every other button in the app renders: the confirm
+    /// Centring is the SHARED button widget's job rather than any one card's,
+    /// so this pins it where every other button in the app renders: the confirm
     /// pair of an ordinary modal, measured off the drawn frame.
     #[test]
     fn a_confirm_modals_button_labels_are_centred_in_their_buttons() {
@@ -22851,10 +22849,9 @@ mod tests {
     }
 
     /// Switching to a different agent must resize THAT agent's PTY, even when
-    /// the centre pane measures exactly what it measured for the previous one.
-    /// The dedupe used to compare geometry alone against one workspace-wide slot,
-    /// so the second agent kept whatever geometry it was spawned with for as long
-    /// as it lived.
+    /// the centre pane measures exactly what it measured for the previous one:
+    /// the dedupe is per agent, not one workspace-wide slot, so the second agent
+    /// does not keep whatever geometry it was spawned with.
     #[test]
     fn switching_agents_resizes_the_newly_shown_pty_at_an_unchanged_pane_size() {
         use ratatui::Terminal;
@@ -23024,26 +23021,21 @@ mod tests {
     /// The agent pane's themed background must be the SAME whether or not the
     /// scrollback offset moved since the previous frame.
     ///
-    /// This is a regression test for a real, measured defect. The pane used to
-    /// `Clear.render(term_area, ..)` whenever the offset differed from the
-    /// previous frame's. `Clear` is `Cell::reset()` per cell, which drops the
-    /// background to `Color::Reset` (the host terminal's default), and it ran
-    /// AFTER the frame-wide `app_bg` fill, so every cell the snapshot loop
-    /// leaves alone lost its theme colour. That branch used to be unreachable
-    /// while a user read history, because output parsing stopped on scroll; now
-    /// output always flows and the terminal library holds the view still by
-    /// incrementing the offset per arriving line, so the branch fired on
-    /// essentially every frame and the pane background visibly flipped between
-    /// themed and terminal-default while the agent talked.
+    /// The pane must not `Clear.render(term_area, ..)` on offset change:
+    /// `Clear` is `Cell::reset()` per cell, which drops the background to
+    /// `Color::Reset` (the host terminal's default), and it would run AFTER the
+    /// frame-wide `app_bg` fill, so every cell the snapshot loop leaves alone
+    /// would lose its theme colour. Output always flows and the terminal
+    /// library holds the view still by incrementing the offset per arriving
+    /// line, so such a branch would fire on essentially every frame and the pane
+    /// background would flip between themed and terminal-default while the
+    /// agent talked.
     ///
-    /// PTY cell colors now render verbatim in every mode, so a child cell with
-    /// a default background legitimately carries `Color::Reset` here. What this
+    /// PTY cell colors render verbatim in every mode, so a child cell with a
+    /// default background legitimately carries `Color::Reset` here. What this
     /// test pins is STABILITY: the pane's background distribution must be
     /// byte-identical between a frame where the offset moved and one where it
-    /// did not, which is exactly what the old clear broke (it fired only on
-    /// offset-change frames and stripped the frame-wide fill off every cell
-    /// the snapshot loop leaves alone, so the pane flickered while the agent
-    /// talked).
+    /// did not.
     #[test]
     fn agent_pane_background_survives_a_scrollback_offset_change() {
         use ratatui::Terminal;
@@ -23228,22 +23220,21 @@ mod tests {
         }
     }
 
-    /// Regression test for the invisible-caret-in-Alacritty bug.
+    /// The embedded-PTY caret is the hardware cursor, not a pre-painted block.
     ///
-    /// The renderer used to pre-paint the cursor cell into a block
-    /// (`fg(input_cursor_fg).bg(prompt_cursor)`) *and* move the real hardware
-    /// cursor onto the same cell. Alacritty draws its block cursor by INVERTING
-    /// the cell's colors, so inverting a cell that was already styled to look
-    /// like a cursor cancelled it back to invisibility, so the caret vanished
-    /// only under Alacritty. The fix stops pre-painting the cell and relies on
-    /// the hardware cursor (set via `set_cursor_position`) for the visible
-    /// block, leaving Alacritty a normal cell to invert.
+    /// Pre-painting the cursor cell into a block
+    /// (`fg(input_cursor_fg).bg(prompt_cursor)`) *and* moving the real hardware
+    /// cursor onto the same cell makes the caret vanish under Alacritty, which
+    /// draws its block cursor by INVERTING the cell's colors: inverting a cell
+    /// already styled to look like a cursor cancels it back to invisibility. So
+    /// the renderer leaves a normal cell for the host to invert and relies on the
+    /// hardware cursor (set via `set_cursor_position`) for the visible block.
     ///
-    /// This asserts both halves of the fix:
-    ///   1. the cursor cell is no longer pre-painted into the invisible block
-    ///      style (so Alacritty's inversion produces a visible cursor), and
-    ///   2. the hardware cursor is still placed exactly on the cursor cell, so
-    ///      IME composition alignment (issue #258) is preserved.
+    /// This asserts both halves:
+    ///   1. the cursor cell is not pre-painted into the invisible block style
+    ///      (so Alacritty's inversion produces a visible cursor), and
+    ///   2. the hardware cursor is placed exactly on the cursor cell, so IME
+    ///      composition alignment is preserved.
     #[test]
     fn interactive_agent_does_not_prepaint_cursor_cell_block() {
         use ratatui::Terminal;
@@ -23321,7 +23312,7 @@ mod tests {
         );
 
         // (2) The hardware cursor must still land exactly on the cursor cell so
-        // IME composition popups align with the prompt (issue #258).
+        // IME composition popups align with the prompt.
         terminal.backend_mut().assert_cursor_position((cx, cy));
     }
 
@@ -23430,10 +23421,10 @@ mod tests {
 
     #[test]
     fn top_bar_branch_suffix_annotates_drift_even_on_project_current_branch() {
-        // F-E regression: when the agent's branch equals the project's current
-        // branch but has drifted from its initial branch, the suffix helper still
-        // annotates the drift. (The header gate now shows the crumb on drift
-        // alone, so this value reaches the screen.)
+        // When the agent's branch equals the project's current branch but has
+        // drifted from its initial branch, the suffix helper still annotates the
+        // drift. (The header gate shows the crumb on drift alone, so this value
+        // reaches the screen.)
         assert_eq!(
             top_bar_branch_suffix("main", "server-mode"),
             "main (orig: server-mode)"
@@ -25084,22 +25075,19 @@ mod tests {
         assert!(!line_of("an-idle-one").contains("<0.1%"));
     }
 
-    /// Render-level regression, confirmed against the pre-fix code by
-    /// instrumenting a `TestBackend` render before writing this fix (see the
-    /// PR description): at a 50-column terminal (inner content width 40),
-    /// the old hardcoded `[Min(30), Length(8), Length(6), Length(8),
-    /// Length(12)]` widths did NOT protect PID/Procs/CPU/RSS as rigid
-    /// columns the way the constraint names suggest. ratatui's Table
-    /// constraint solver instead let the greedy `Min(30)` column consume
-    /// nearly all the width and compressed every `Length` column far below
-    /// its stated size, down to unreadable slivers: the header rendered as
-    /// `"PI P CP R"` (CPU shrunk to "CP", RSS to "R") and the data rows as
-    /// `"5."` for a 5.0% reading and `"1"` for a 1.0 MiB reading. That is
-    /// exactly backwards from this monitor's purpose: CPU and RSS are the
-    /// numbers the user opened this popup to read, and the tenet is that
-    /// they must survive longest. This test proves they render in full
-    /// after the fix; dropping PID and Procs (below) is what keeps CPU/RSS
-    /// intact.
+    /// Render-level check, measured with a `TestBackend` render: at a 50-column
+    /// terminal (inner content width 40), hardcoded `[Min(30), Length(8),
+    /// Length(6), Length(8), Length(12)]` widths would NOT protect
+    /// PID/Procs/CPU/RSS as rigid columns the way the constraint names suggest.
+    /// ratatui's Table constraint solver instead lets the greedy `Min(30)`
+    /// column consume nearly all the width and compresses every `Length` column
+    /// far below its stated size, down to unreadable slivers: the header
+    /// would render as `"PI P CP R"` (CPU shrunk to "CP", RSS to "R") and the
+    /// data rows as `"5."` for a 5.0% reading and `"1"` for a 1.0 MiB reading.
+    /// That is backwards from this monitor's purpose: CPU and RSS are the
+    /// numbers the user opened this popup to read, and they must survive
+    /// longest. This test proves they render in full; dropping PID and Procs
+    /// (below) is what keeps CPU/RSS intact.
     #[test]
     fn resource_monitor_cpu_and_rss_columns_stay_legible_at_narrow_width() {
         use ratatui::Terminal;
@@ -25161,14 +25149,10 @@ mod tests {
     }
 
     /// Companion check for the child name itself at the same width as the
-    /// CPU/RSS regression above: the fix's `RESOURCE_MONITOR_NAME_MIN_WIDTH`
-    /// floor keeps the child's process name fully legible (not just "beyond
-    /// two characters") once PID/Procs are dropped to make room. Name was
-    /// not actually the column that collapsed pre-fix at this width (the
-    /// greedy `Min(30)` gave it plenty of room while crushing CPU/RSS
-    /// instead, see the test above) - this test guards against a *new*
-    /// regression where rebalancing the budget toward CPU/RSS would in turn
-    /// starve Name.
+    /// CPU/RSS test above: the `RESOURCE_MONITOR_NAME_MIN_WIDTH` floor keeps
+    /// the child's process name fully legible (not just "beyond two
+    /// characters") once PID/Procs are dropped to make room, and rebalancing the
+    /// budget toward CPU/RSS must not starve Name.
     #[test]
     fn resource_monitor_child_name_legible_at_narrow_width() {
         use ratatui::Terminal;
@@ -25211,8 +25195,8 @@ mod tests {
 
         // The Name column floor (16) plus the child's 6-character tree
         // prefix ("    └ ") leaves room for an 11-character prefix of the
-        // 13-character name before the ellipsis kicks in - well beyond the
-        // "first couple of characters" the reported bug described.
+        // 13-character name before the ellipsis kicks in, well beyond the
+        // "first couple of characters".
         assert!(
             rendered.contains("rust-analyz"),
             "child process name must remain legible at narrow terminal widths; rendered: {rendered}"
@@ -25570,8 +25554,8 @@ mod tests {
 
     /// Pre-wrapping the help page must not change how it LOOKS, only how many
     /// rows it admits to being. Measured on the real content, at the widths that
-    /// wrap it: paint the same lines with ratatui's `Wrap { trim: false }` (what
-    /// the overlay used to do) and with our pre-wrap, and compare every cell.
+    /// wrap it: paint the same lines with ratatui's `Wrap { trim: false }` and
+    /// with our pre-wrap, and compare every cell.
     #[test]
     fn pre_wrapping_the_help_page_paints_what_wrap_did() {
         use ratatui::Terminal;
@@ -26546,8 +26530,8 @@ mod tests {
 
     /// Which of the two error dialogs to put on screen. They are separate
     /// `PromptState` variants with the same problem: a long, multi-line message
-    /// (a TOML validation error is normally many lines) used to be cut at six
-    /// lines with nothing to say so.
+    /// (a TOML validation error is normally many lines) must not be cut off at
+    /// six lines with nothing to say so.
     #[derive(Clone, Copy)]
     enum ErrorDialog {
         ConfigReload,
@@ -26834,10 +26818,10 @@ mod tests {
 
     #[test]
     fn the_diff_hint_bar_reports_the_clamped_scroll_position() {
-        // The hint text used to print the raw `center_mode` scroll while the view
-        // rendered a clamped one, so after the content shrank (a shorter file, a
-        // refresh) the number overstated where the reader actually was until the
-        // next key press.
+        // The hint text must print the clamped `center_mode` scroll the view
+        // renders, not the raw one: after the content shrinks (a shorter file, a
+        // refresh) the raw number overstates where the reader actually is until
+        // the next key press.
         for gutter_width in [0usize, 6] {
             // A stale offset far past the end of a long diff: the hint must
             // report the position the view actually drew.
@@ -28128,12 +28112,10 @@ mod tests {
 
     /// The text-field dialogs suppress the typing keys when they pick a focus
     /// hint. That suppression must stay LOCAL to them: the shared label the
-    /// rest of the app renders is still the action's real first key.
-    ///
-    /// This used to be checked by rendering the provider pickers, which
-    /// advertised the unsuppressed `<h>` for "move to the buttons". They have
-    /// no buttons now, so there is nothing left to render that would show it,
-    /// and the claim is asserted against the bindings directly instead.
+    /// rest of the app renders is still the action's real first key. The
+    /// provider pickers have no buttons, so nothing renders that would show the
+    /// unsuppressed `<h>`, and the claim is asserted against the bindings
+    /// directly.
     #[test]
     fn suppressing_the_focus_key_in_a_text_field_dialog_leaves_the_shared_label_alone() {
         let app = test_app(default_bindings());
@@ -28217,10 +28199,10 @@ mod tests {
 
     // ── Single-line modal text fields: UTF-8 safety and honest focus ──────
     //
-    // Three modals used to hand-roll their caret with a BYTE split, so a caret
-    // sitting before a multi-byte character panicked, and they drew the caret
-    // unconditionally, so the field looked focused while a checkbox had focus.
-    // These tests pin both, against the drawn buffer.
+    // A caret must not be drawn with a BYTE split (a caret sitting before a
+    // multi-byte character would panic) and must not be drawn unconditionally
+    // (the field would look focused while a checkbox had focus). These tests
+    // pin both, against the drawn buffer.
 
     /// A name with a two-byte character and a four-byte one, so a byte-based
     /// split has two different ways to land inside a character.
@@ -28845,9 +28827,9 @@ mod tests {
         (app, buf)
     }
 
-    /// The Apply button used to grey out when the highlighted row was already
-    /// the active provider. With the button gone that cue has to live on the
-    /// row, and it has to survive the selection highlight (the cue matters
+    /// A provider picker has no Apply button to grey out when the highlighted
+    /// row is already the active provider, so that cue lives on the row,
+    /// and it has to survive the selection highlight (the cue matters
     /// exactly when that row IS highlighted), so it is a MARKER IN THE TEXT and
     /// not a style. Row 0 is the active provider in every fixture here.
     #[test]
@@ -29028,16 +29010,14 @@ mod tests {
     /// The project chooser's footer is state-aware, like its two filterable
     /// peers (the project browser and the kill-running dialog).
     ///
-    /// It used to be built unconditionally, so while the search row was up it
-    /// still read `<j> down  <k> up  </> search  <Enter> choose  <Esc> cancel`
-    /// even though `j`, `k` and `/` were all being typed into the filter and
-    /// Escape was leaving search rather than cancelling. Only two of its five
-    /// segments survive contact with search mode, so only those two are drawn.
+    /// While the search row is up, `j`, `k` and `/` are typed into the filter
+    /// and Escape leaves search rather than cancelling, so only the segments
+    /// that survive search mode are drawn.
     ///
     /// Note the deliberate difference from the two peers: they say
     /// `<Enter> done`, but this chooser's confirm key PICKS the highlighted row
     /// (pinned by `pick_project_confirm_picks_the_highlighted_row_while_searching`),
-    /// so it says `choose`. Matching their wording would have been a new lie.
+    /// so it says `choose`.
     #[test]
     fn the_project_chooser_footer_is_state_aware_while_searching() {
         /// The chooser's footer, read off the bottom border of its header block.

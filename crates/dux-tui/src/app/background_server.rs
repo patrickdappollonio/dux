@@ -1775,9 +1775,9 @@ pub(crate) mod tests {
     }
 
     /// A status the engine produced from a worker reaches BOTH surfaces while
-    /// both are up. The reported failure was a gh error on the terminal's status
-    /// line that no browser ever saw, in exactly this mode, so the drained path
-    /// is walked end to end rather than the seam being poked directly.
+    /// both are up (a gh error on the terminal's status line must also reach a
+    /// browser), so the drained path is walked end to end rather than the seam
+    /// being poked directly.
     #[test]
     fn a_worker_born_status_reaches_the_terminal_and_the_seam() {
         let mut app = test_app(default_bindings());
@@ -2789,11 +2789,10 @@ pub(crate) mod tests {
     /// prompt here even though the web fanout, which runs FIRST, has already taken
     /// its pending op out of the map the routing reads.
     ///
-    /// The earlier routing test passed while the bug was live, because its fake
-    /// companion did nothing. Here the fake removes the entry exactly as
-    /// `drive_pr_lookup_followup` does, and the whole thing goes through the real
-    /// `drain_events` on a real worker event, so "the verdict is taken before the
-    /// fanout" is what is being asserted rather than "the helper works".
+    /// The fake companion removes the entry exactly as `drive_pr_lookup_followup`
+    /// does, and the whole thing goes through the real `drain_events` on a real
+    /// worker event, so "the verdict is taken before the fanout" is what is being
+    /// asserted rather than "the helper works".
     ///
     /// A browser's clone is the same shape: its follow-up adds a project and
     /// dispatches an agent, so it runs once, in the web layer, while a clone this

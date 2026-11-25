@@ -1090,7 +1090,7 @@ mod tests {
         #[tokio::test]
         async fn a_tree_drop_lands_in_the_folder_that_was_dropped_on() {
             // The editor's file tree addresses an agent root by its session id
-            // too (`rootPtyId`), so it regressed with the pane.
+            // too (`rootPtyId`).
             let (_tmp, wt, app) = router();
             std::fs::create_dir_all(wt.join("assets")).unwrap();
             let resp = app

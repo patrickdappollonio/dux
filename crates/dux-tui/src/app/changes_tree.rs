@@ -1210,7 +1210,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "");
     }
 
-    /// Review 13: a changes-pane folder delete whose claim is refused leaves
+    /// A changes-pane folder delete whose claim is refused leaves
     /// its keyed busy open and its status key registered as live: no final
     /// ever lands for it, so the "Deleting" spinner outlives the refusal.
     #[test]

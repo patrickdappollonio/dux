@@ -822,8 +822,7 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Current wall-clock time as `HH:MM:SS`. Wall-clock, not a tick counter, per the
-/// project's animation/refresh tenet.
+/// Current wall-clock time as `HH:MM:SS`. Wall-clock, not a tick counter.
 fn now_hms() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }

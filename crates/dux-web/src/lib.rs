@@ -243,8 +243,8 @@ enum LegNeed {
 ///
 /// - REQUIRED (the configured `host:port` or an explicit `--bind`): a bind
 ///   failure is FATAL: it logs a `logger::error` with the failing address and
-///   returns the error (with address context) so the serve aborts. This is the
-///   explicit-failure tenet: the operator named this address.
+///   returns the error (with address context) so the serve aborts. The operator
+///   named this address.
 /// - BEST-EFFORT (the Tailscale leg of LOCAL MODE): a bind failure logs a WARN
 ///   naming the address, the cause, and both remedies, collects the SAME text in
 ///   the returned warnings vec, and CONTINUES without that listener.
@@ -3148,8 +3148,8 @@ pub fn serve_with_engine(
         &engine.config,
         &console,
         // `[server] access_log` governs the flip exactly as it does `dux server`:
-        // the user decided (2026-10-02) that the two logs match completely, so
-        // the viewer carries the access log too.
+        // the two logs match completely, so the viewer carries the access log
+        // too.
         access_log,
         SignalPolicy::Adopt {
             flag: Arc::clone(&signal_quit),
@@ -3271,10 +3271,10 @@ pub fn serve_with_engine(
     // `libc::signal` would point the OS away from the master handler, and because
     // registry won't re-`sigaction`, the TUI's re-registration could not re-arm
     // it: an external `kill` post-flip would then terminate hard instead of
-    // winding the agents down. The earlier "unkillable resumed TUI" this reset
-    // once guarded against can no longer occur: the TUI now always installs a
-    // terminating handler on resume. (tokio's stale per-runtime action lingers in
-    // the registry across flips but is a harmless no-op once its runtime drops.)
+    // winding the agents down. The TUI always installs a terminating handler on
+    // resume, so no "unkillable resumed TUI" can occur. (tokio's stale
+    // per-runtime action lingers in the registry across flips but is a harmless
+    // no-op once its runtime drops.)
 
     // If a listener's accept loop died, surface the captured error rather
     // than reporting a clean exit. The engine has already been wound down above,
@@ -4177,7 +4177,7 @@ mod tests {
     #[tokio::test]
     async fn bind_plan_addrs_required_failure_is_fatal_and_names_the_addr() {
         // A REQUIRED address that is already held must FAIL the whole bind with the
-        // address in the error message (the explicit-failure tenet: the operator
+        // address in the error message (the operator
         // named this address). dux.log also gets a logger::error (not asserted here
         // because the test logger is process-global; the message text is the
         // contract we pin).
@@ -5428,7 +5428,7 @@ mod live_tailscale_mode_tests {
     /// A raw TCP Funnel to dux's port hands dux bare loopback streams from the
     /// internet, so while one stands loopback is not this machine: with a
     /// password set, this machine signs in like everyone else; with none, dux
-    /// serves (the owner's call) and nothing is refused.
+    /// serves and nothing is refused.
     #[tokio::test]
     async fn a_tcp_funnel_to_dux_makes_this_machine_sign_in_until_it_goes() {
         use axum::http::StatusCode;

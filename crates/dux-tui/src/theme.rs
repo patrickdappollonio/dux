@@ -166,7 +166,7 @@ pub(crate) const TYPING_GLYPH: &str = "▍";
 /// Not here, because they are the same in both sets: the
 /// working spinner, the status and attention dots, the typing caret, scroll
 /// markers, the ellipsis and box drawing. Those are state cues whose shape
-/// the working-cue and attention tenets pin, not icons.
+/// the working cue and the attention cue fix, not icons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Glyphs {
     /// Ahead of the project name on a managed agent row's second line.
@@ -1164,8 +1164,8 @@ mod tests {
 
     #[test]
     fn a_named_token_still_pulses_and_still_rests_by_name() {
-        // A named ANSI working color used to stop the pulse dead. It blends
-        // through its canonical channels now, while the resting cell keeps the
+        // A named ANSI working color must not stop the pulse dead. It blends
+        // through its canonical channels, while the resting cell keeps the
         // NAME so the terminal's own profile still picks that shade.
         let muted = Color::Rgb(0x64, 0x64, 0x64);
         assert_eq!(working_word_color(Color::Green, muted, 0), Color::Green);

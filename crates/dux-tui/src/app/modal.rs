@@ -2044,7 +2044,7 @@ pub(super) mod tests {
 
     #[test]
     fn the_field_gate_only_closes_while_a_field_has_focus() {
-        // The shipped bug: Left is in the movement action's default key set.
+        // Left is in the movement action's default key set.
         assert!(binding_lookup_is_suppressed(
             key(KeyCode::Left),
             crate::app::modal::TextFieldFocus::Field,

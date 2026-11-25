@@ -1538,9 +1538,8 @@ mod tests {
     }
 
     /// The exact rows a long line produces with no gutter, recorded rather than
-    /// described. The diff pane used to hand this case to the paragraph's own
-    /// wrapping and measure it with a hard division, so the two disagreed; now
-    /// one wrapper answers, and this is the answer.
+    /// described. One wrapper answers for both the paragraph's wrapping and the
+    /// measure, and this is the answer.
     #[test]
     fn wrap_diff_lines_with_zero_gutter_pins_a_long_line_with_spaces() {
         let line = Line::from("    indented words here supercalifragilistic tail   ");

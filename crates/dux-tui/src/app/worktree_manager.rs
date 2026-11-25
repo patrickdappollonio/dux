@@ -552,8 +552,8 @@ mod tests {
     #[test]
     fn the_listing_spinner_survives_the_busy_timeout_and_is_retired_by_its_final() {
         // The TUI keeps several op registries of its own, in the App rather than
-        // the engine, and the first cut of liveness could not see any of them:
-        // this spinner was replaced by a false "timed out" twenty seconds in.
+        // the engine, and liveness must not be derived by enumerating them: this
+        // spinner would be replaced by a false "timed out" twenty seconds in.
         // The App registers into the ENGINE's live-key set, which is the same set
         // the App's status controller retires from, so there is one mechanism
         // rather than one per layer.

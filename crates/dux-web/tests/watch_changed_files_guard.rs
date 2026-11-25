@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 /// The wire name a client would have to use, and the Rust variant a route would
-/// have to name. Either one appearing web-side is the regression.
+/// have to name. Either one appearing web-side fails the guard.
 const FORBIDDEN: [&str; 2] = ["WatchChangedFiles", "watch_changed_files"];
 
 /// Files that are allowed to contain the name: this test, which has to spell it

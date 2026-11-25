@@ -376,11 +376,10 @@ impl App {
     /// a different agent.
     ///
     /// An agent detaching is a fact about the workspace, not about the pane in
-    /// front of you, and this surface used to make it conditional on selection:
-    /// a browser was told every time and the terminal UI only when the agent
-    /// happened to be the selected one, so the same exit produced two different
-    /// screens. The sentence is the shared one; the selected agent keeps the
-    /// richer line above, which names the pane's own way back.
+    /// front of you, so this is not conditional on selection: a browser is told
+    /// every time and the terminal UI must be too, or the same exit produces two
+    /// different screens. The sentence is the shared one; the selected agent
+    /// keeps the richer line above, which names the pane's own way back.
     fn apply_unselected_agent_exits(&mut self, pruned: &[PrunedPty], reported: Option<&str>) {
         let key = self.bindings.label_for(Action::ReconnectAgent);
         let remedy = format!(
@@ -2603,8 +2602,8 @@ mod tests {
     use dux_core::worker::AgentLaunchRequest;
     use std::collections::BTreeMap;
 
-    /// An agent detaching is a fact about the workspace: a browser has always
-    /// been told, and this surface used to speak only for the selected agent.
+    /// An agent detaching is a fact about the workspace: a browser is
+    /// always told, so this surface must speak for an unselected agent too.
     #[test]
     fn an_agent_that_detaches_while_another_is_selected_still_says_so() {
         let mut app =
@@ -3664,8 +3663,8 @@ mod tests {
 
     /// Reconnecting a dormant agent flips it Active in the engine; the view must
     /// rebuild the flat list so the agent leaves the collapsed Inactive tail and
-    /// rejoins the active section (regression: the Reconnect arm forgot to
-    /// rebuild, stranding a just-reactivated agent under Inactive).
+    /// rejoins the active section (the Reconnect arm must rebuild, or a
+    /// just-reactivated agent stays stranded under Inactive).
     #[test]
     fn reconnect_moves_a_reactivated_agent_out_of_the_inactive_tail() {
         let mut app =
@@ -3881,8 +3880,8 @@ mod tests {
     }
 
     /// A standing git failure in the background poller reaches the status line.
-    /// It used to reach nothing at all here while the browser raised a warning
-    /// about the same repository, which is two screens for one fact.
+    /// The browser raises a warning about the same repository, so the terminal UI
+    /// must not show nothing: one fact, two screens.
     #[test]
     fn a_standing_changed_files_failure_reaches_the_status_line() {
         let mut app =

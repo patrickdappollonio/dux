@@ -2317,7 +2317,7 @@ impl App {
             }
         };
         // No confirmation: the centre pane launches the shell and streams its
-        // prompt, which is the big and unmistakable change the tenet exempts.
+        // prompt, which is a big and unmistakable change.
         self.activate_new_terminal(&terminal_id);
     }
 
@@ -6838,8 +6838,8 @@ mod tests {
 
     #[test]
     fn finish_add_project_ends_on_final_status_not_stuck_busy() {
-        // Regression: the add is INLINE, so the reaction already carries the
-        // FINAL status (the `Added` arm's success info). A trailing
+        // The add is INLINE, so the reaction already carries the FINAL status
+        // (the `Added` arm's success info). A trailing
         // `set_busy("Saving project…")` after `apply_reaction` would run last and
         // never resolve, leaving a stuck spinner. The post-add status must be the
         // success Info, not a Busy.
@@ -7333,18 +7333,18 @@ mod tests {
 
     #[test]
     fn finish_add_project_writes_config_once_through_the_queue() {
-        // Regression: the engine handler already writes config.toml through the
-        // eager queue (authoritative, with SQLite rollback). The `Added` reaction
-        // arm must NOT also write it off-queue via
-        // `persist_config_projects_from_runtime`, which was a DOUBLE write.
+        // The engine handler already writes config.toml through the eager queue
+        // (authoritative, with SQLite rollback). The `Added` reaction arm must
+        // NOT also write it off-queue via `persist_config_projects_from_runtime`,
+        // which would be a DOUBLE write.
         //
         // The two writes leave byte-identical content, so the only observable that
         // distinguishes one write from two is the WRITE COUNT. We isolate the
         // off-queue write: point the eager queue at a DIFFERENT, writable path
         // than `config_path`, so the handler's (queue) write lands elsewhere and
         // leaves `config_path` untouched. Then `config_path` exists on disk if and
-        // only if the off-queue `persist_config_projects_from_runtime` ran. With
-        // the fix it must NOT exist; under the bug it would.
+        // only if the off-queue `persist_config_projects_from_runtime` ran, and it
+        // must NOT exist.
         let repo = tempdir().expect("repo tempdir");
         let raw_path = repo.path().to_string_lossy().into_owned();
 
@@ -7372,7 +7372,7 @@ mod tests {
             queue_target.exists(),
             "the inline-Add handler must write config through the queue"
         );
-        // The `Added` arm must NOT have written config off-queue: with the fix the
+        // The `Added` arm must NOT have written config off-queue: the
         // original config_path is never touched.
         assert!(
             !app.engine.paths.config_path.exists(),
@@ -8865,7 +8865,7 @@ mod tests {
     /// Graceful delete vanishes the session immediately: its PTY is `SIGTERMed` and
     /// held for a background reap, and the worktree is removed in the background
     /// only after the agent exits. The session never lingers until the worker
-    /// reports, the user-chosen tradeoff for a snappy, non-blocking delete.
+    /// reports, for a snappy, non-blocking delete.
     #[test]
     fn begin_delete_session_vanishes_session_immediately() {
         let project_dir = tempdir().expect("project tempdir");
@@ -12675,7 +12675,7 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::ProjectActions(_)));
     }
 
-    // ── manage-projects: review round two ───────────────────────────────────
+    // ── manage-projects ─────────────────────────────────────────────────────
 
     /// The holder of a held branch is named from what the listing worker
     /// resolved, not from a lookup on every paint: the label survives the

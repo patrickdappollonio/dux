@@ -12059,8 +12059,7 @@ impl App {
     }
 
     /// Shared behavior for `ToggleFullscreen` landing on a dormant tab: never
-    /// launch it (only an explicit action launches, per the Agent Tabs
-    /// tenet). If the pane happens to be showing a fullscreen overlay,
+    /// launch it (only an explicit action launches). If the pane happens to be showing a fullscreen overlay,
     /// minimize it so Ctrl-g still "does something" visible; otherwise this
     /// is a silent no-op.
     fn exit_interactive_without_launch(&mut self) {
@@ -14006,8 +14005,8 @@ mod tests {
     use std::fmt::Write as _;
 
     /// The commit success message advertises the push key only where pushing can
-    /// succeed. A standalone agent has no branch, so the key it used to name
-    /// unconditionally refuses one keystroke later.
+    /// succeed: a standalone agent has no branch, so it must not name a push key
+    /// that refuses one keystroke later.
     #[test]
     fn the_commit_success_message_only_advertises_a_push_that_can_happen() {
         let managed = commit_success_message(Some("Ctrl-u"));
@@ -23614,8 +23613,7 @@ not_a_real_action = ["x"]
         }
         // 41 lines (40 fed plus the READY sentinel) through a 24-row grid,
         // with the trailing newline pushing the cursor onto a 42nd row, leaves
-        // 18 lines in history. MEASURED, not derived: the first version of this
-        // said 17 and the helper reported 18.
+        // 18 lines in history (measured, not derived).
         feed_until_history(app, &fill, 18);
         let row = snapshot_row_of(app, "L30");
         select_row(app, row, 2);
@@ -24274,12 +24272,9 @@ not_a_real_action = ["x"]
         );
     }
 
-    /// A plain horizontal arrow no longer switches tabs. It used to be a
-    /// default alongside the Ctrl arrow, justified by Center scope being
-    /// unreachable while keys flowed to a PTY; minimized typing killed that
-    /// premise, so the plain arrows now belong to the agent (they type a
-    /// caret move into a live one) and must never move the tab focus, live or
-    /// dormant.
+    /// A plain horizontal arrow does not switch tabs: with typing minimized the
+    /// plain arrows belong to the agent (they type a caret move into a live
+    /// one) and must never move the tab focus, live or dormant.
     #[test]
     fn a_plain_horizontal_arrow_no_longer_switches_tabs() {
         for key in [KeyCode::Right, KeyCode::Left] {
@@ -24356,12 +24351,11 @@ not_a_real_action = ["x"]
     /// hit-test.
     ///
     /// The renderer clearing the registry is what makes this unreachable
-    /// today, which is exactly why a test that lets the clear happen proves
-    /// nothing about the gate: with the registry empty the hit-test returns
-    /// `false` whatever the gate says, and the previous version of this test
-    /// passed with `windowed &&` deleted. So the rects are deliberately put
-    /// BACK after the maximized frame, standing in for "some future path
-    /// reaches the tab hit-test" that the guard's own comment names.
+    /// today, so a test that lets the clear happen proves nothing about the
+    /// gate: with the registry empty the hit-test returns `false` whatever the
+    /// gate says. So the rects are deliberately put BACK after the maximized
+    /// frame, standing in for "some future path reaches the tab hit-test" that
+    /// the guard's own comment names.
     #[test]
     fn click_inside_maximized_agent_switches_no_tab() {
         let mut app = test_app(default_bindings());
@@ -24637,9 +24631,9 @@ not_a_real_action = ["x"]
         assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
     }
 
-    /// Regression test: double-clicking a file when focus starts on Center
-    /// must open the diff even though focus changes (and the mouse layout
-    /// shifts due to the hint bar appearing) between the two clicks.
+    /// Double-clicking a file when focus starts on Center must open the diff
+    /// even though focus changes (and the mouse layout shifts due to the hint
+    /// bar appearing) between the two clicks.
     #[test]
     fn mouse_double_click_unstaged_file_opens_diff_from_center_focus() {
         let mut app = test_app(default_bindings());
@@ -27885,9 +27879,9 @@ cyan = "#00ffff"
 
     #[test]
     fn prompt_mouse_down_on_checkbox_still_fires_on_down() {
-        // Regression guard: non-button targets (text inputs, list rows,
-        // checkboxes) keep their original on-Down behavior so users get
-        // immediate feedback for cursor moves and toggles.
+        // Non-button targets (text inputs, list rows, checkboxes) keep their
+        // on-Down behavior so users get immediate feedback for cursor moves and
+        // toggles.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             offer: crate::app::DeleteBranchOffer::Pending,
@@ -28348,8 +28342,8 @@ cyan = "#00ffff"
 
     #[test]
     fn retarget_prompt_still_opens_in_retarget_mode() {
-        // Regression: opening the ctrl+p retarget prompt (as opposed to the
-        // new-agent-tab picker) must keep using ChangeAgentProviderMode::Retarget.
+        // Opening the ctrl+p retarget prompt (as opposed to the new-agent-tab
+        // picker) must use ChangeAgentProviderMode::Retarget.
         let mut app = test_app(default_bindings());
         app.open_change_agent_provider_prompt();
         match &app.prompt {
@@ -29545,11 +29539,10 @@ cyan = "#00ffff"
         assert_eq!(app.focus, FocusPane::Center);
     }
 
-    /// #8 regression: TUI terminal spawn now routes through the shared core
-    /// creator, so every terminal gets a DISTINCT monotonic `sort_order` (the old
-    /// TUI copy hardcoded `sort_order: 1`, leaving the default drag order at the
-    /// mercy of `HashMap` iteration order) and the canonical "Terminal N" identity
-    /// label (the old copy never assigned one).
+    /// TUI terminal spawn routes through the shared core creator, so every
+    /// terminal gets a DISTINCT monotonic `sort_order` (not a hardcoded `1`,
+    /// which would leave the default drag order at the mercy of `HashMap`
+    /// iteration order) and the canonical "Terminal N" identity label.
     #[test]
     fn tui_terminal_spawn_stamps_distinct_sort_order_and_identity_label() {
         let mut app = test_app(default_bindings());
@@ -30623,13 +30616,11 @@ cyan = "#00ffff"
         assert_eq!(contents, "fn main() {}\n");
     }
 
-    /// Staleness regression: the discard confirm must classify tracked-vs-untracked
-    /// against LIVE git status at confirm time, not trust a flag snapshotted when
-    /// the prompt opened. Here a file is untracked when the prompt opens (so the
-    /// old code snapshots `is_untracked = true`), but becomes tracked-and-clean
-    /// before the user confirms. The old code would `fs::remove_file` it (deleting
-    /// a now-committed file); the correct behavior re-checks live status, finds
-    /// nothing to discard, and leaves the file on disk.
+    /// The discard confirm must classify tracked-vs-untracked against LIVE git
+    /// status at confirm time, not trust a flag snapshotted when the prompt
+    /// opened. Here a file is untracked when the prompt opens but becomes
+    /// tracked-and-clean before the user confirms: the confirm re-checks live
+    /// status, finds nothing to discard, and leaves the file on disk.
     #[test]
     fn discard_confirm_reclassifies_live_and_does_not_delete_a_now_tracked_file() {
         let mut app = test_app(default_bindings());
@@ -30718,8 +30709,8 @@ cyan = "#00ffff"
     }
 
     /// Commit reads LIVE git status for the nothing-staged refusal, not the cached
-    /// `staged_files` list. A stale non-empty cache used to let the commit proceed
-    /// to `git commit`, which then failed; now the live check refuses cleanly.
+    /// `staged_files` list: a stale non-empty cache must not let the commit
+    /// proceed to a failing `git commit`.
     #[test]
     fn execute_commit_refuses_nothing_staged_from_live_status_not_the_stale_cache() {
         let mut app = test_app(default_bindings());
@@ -30744,7 +30735,7 @@ cyan = "#00ffff"
         git(&["add", "a.txt"]);
         git(&["commit", "-m", "initial"]);
         // Worktree is now clean (nothing staged), but the in-memory cache is STALE
-        // and still lists a staged file. The old code trusted this cache.
+        // and still lists a staged file.
         app.engine.staged_files = vec![ChangedFile {
             path: "a.txt".into(),
             status: "M".into(),
@@ -30777,7 +30768,7 @@ cyan = "#00ffff"
         );
     }
 
-    /// Review 25: while a commit runs on its worker the box stays editable;
+    /// While a commit runs on its worker the box stays editable;
     /// a message typed for the NEXT commit is wiped when the first one lands.
     #[test]
     fn review25_a_message_typed_while_a_commit_runs_survives_its_final() {
@@ -31843,10 +31834,9 @@ cyan = "#00ffff"
         assert_eq!(startup_logs_prompt(&app).content, "old log");
     }
 
-    /// Reproduction of a shipped bug: the "open in the OS" actions resolved
-    /// their path from the fullscreen VIEWER, so with the picker open and a run
-    /// plainly highlighted they reported "No startup command log is selected."
-    /// It survived because nothing outside tests could open the picker.
+    /// The "open in the OS" actions resolve their path from the picker's own
+    /// selection, not from the fullscreen VIEWER: with the picker open and a run
+    /// highlighted they must not report "No startup command log is selected."
     #[test]
     fn the_open_actions_resolve_the_pickers_own_selection() {
         let mut app = test_app(default_bindings());
@@ -34659,15 +34649,12 @@ cyan = "#00ffff"
     /// The PREMISE and the INVARIANT are asserted separately, and that split is
     /// the point. The premise is the measured claim in the paragraph above,
     /// that each of these three sequences zeroes the offset; the invariant is
-    /// that the mode never ends, and forwarding never resumes, in silence. An
-    /// earlier version asserted only the invariant, inside an `if ended` with a
-    /// timing-tolerant `else`. That arm was written as a slow-machine
-    /// allowance, but it doubled as a hiding place: the day one of these
-    /// sequences stopped zeroing the offset, the run would have taken the
-    /// `else` branch, proved only that a still-scrolled-back pane suppresses
-    /// typing (which is trivially true), and passed. So the premise is now
-    /// polled and asserted on its own, and once it holds the reconcile is
-    /// synchronous, which is why the invariant below needs no tolerance at all.
+    /// that the mode never ends, and forwarding never resumes, in silence.
+    /// Asserting only the invariant inside a timing-tolerant `else` would hide
+    /// a sequence that stopped zeroing the offset, since a still-scrolled-back
+    /// pane suppresses typing trivially. So the premise is polled and asserted
+    /// on its own, and once it holds the reconcile is synchronous, which is why
+    /// the invariant below needs no tolerance at all.
     #[test]
     fn no_child_escape_sequence_silently_resumes_forwarding() {
         for (name, escape) in [
@@ -34801,7 +34788,7 @@ cyan = "#00ffff"
     /// A resize is the OTHER way the view snaps back under the user, and it is
     /// DUX's own doing: the render path resizes the PTY whenever the pane
     /// geometry changes, and growing the viewport pulls the offset down. So
-    /// merely widening the dux window while reading scrollback used to produce
+    /// merely widening the dux window while reading scrollback must not produce
     /// a warning accusing "the program in this pane" of something it had not
     /// done. The message must name the effect and offer causes, not assert one.
     #[test]
@@ -34880,15 +34867,14 @@ cyan = "#00ffff"
         );
     }
 
-    /// The other direction of the same tenet, and the one that shipped broken.
+    /// The other direction of the same rule.
     ///
-    /// Scroll mode used to be a single slot while the offset it mirrors is
-    /// per-surface, living in each PTY client. So snapping ANY surface to its
-    /// live edge cleared the one slot, and the agent the user had left parked in
-    /// scrollback kept its frozen view and its offset while losing its mode: no
-    /// cue, no status, and the next keystroke straight through to its child.
-    /// Two surfaces scrolled back at once is an ordinary state, and one slot
-    /// cannot represent it.
+    /// The offset scroll mode mirrors is per-surface, living in each PTY client,
+    /// so scroll mode is per-surface too: snapping ANY surface to its live edge
+    /// must not clear the mode of an agent parked in scrollback, or it would
+    /// keep its frozen view and offset while losing its cue, its status and the
+    /// suppression of typed keys. Two surfaces scrolled back at once is an
+    /// ordinary state.
     #[test]
     fn snapping_another_surface_to_its_live_edge_leaves_this_ones_scroll_mode_alone() {
         let mut app = app_with_scrolled_back_pty();
@@ -35060,7 +35046,7 @@ cyan = "#00ffff"
     fn arrow_key_passthrough_records_input_when_not_scrolled_back() {
         // Arrow keys are bound to line-scroll but pass through to the PTY when
         // not scrolled back. They echo back like typing, so they must also
-        // record input: the earlier Forward-only check missed this path.
+        // record input.
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
         app.process_raw_input_bytes(b"\x1b[A");
@@ -35122,10 +35108,9 @@ cyan = "#00ffff"
         );
     }
 
-    /// A forwarded wheel is not a keystroke. It used to stamp the same window
-    /// typing does, purely because the forward path tracked "did anything reach
-    /// the PTY" as one boolean, so scrolling an alt-screen agent read as Typing.
-    /// It must stamp the POINTER window instead, which suppresses the repaint it
+    /// A forwarded wheel is not a keystroke: stamping the window typing does
+    /// would make scrolling an alt-screen agent read as Typing. It stamps the
+    /// POINTER window instead, which suppresses the repaint it
     /// provokes without ever claiming the user typed.
     #[test]
     fn a_forwarded_wheel_stamps_the_pointer_window_not_the_typing_one() {
@@ -36077,9 +36062,9 @@ cyan = "#00ffff"
     }
 
     /// A key the option handed to the agent is a TYPED key, and while scrolled
-    /// back every typed key is suppressed. Tab used to be the one exception:
-    /// the scroll-mode gate sent it back down the Global ladder, where
-    /// `FocusNext` moved the focus out from under a frozen view.
+    /// back every typed key is suppressed. Tab is no exception: it must not go
+    /// back down the Global ladder, where `FocusNext` would move the focus out
+    /// from under a frozen view.
     #[test]
     fn scrolled_back_tab_neither_types_nor_moves_focus_when_the_option_is_on() {
         let mut app = app_with_minimized_typeable_agent();
@@ -38255,9 +38240,8 @@ cyan = "#00ffff"
 
     #[test]
     fn macro_edit_escape_from_the_body_cancels_and_leaves_config_untouched() {
-        // The whole point of the rework: Escape must ABANDON the edit, exactly
-        // like every other text surface in dux. It used to SAVE from the body,
-        // which left no way to back out of a change.
+        // Escape must ABANDON the edit, exactly like every other text surface
+        // in dux, so there is a way to back out of a change.
         let mut app = app_with_two_macros();
         open_macro_editor_on_body(&mut app);
         type_chars(&mut app, "!");
@@ -38760,9 +38744,9 @@ cyan = "#00ffff"
 
     #[test]
     fn macro_add_two_both_survive_flush_to_disk() {
-        // Regression: when the config snapshot passed to save_eager is built from
-        // the CURRENT in-memory macros (not a pre-edit clone), adding A then B
-        // must result in BOTH A and B on disk after a flush.
+        // The config snapshot passed to save_eager is built from the CURRENT
+        // in-memory macros (not a pre-edit clone), so adding A then B must
+        // result in BOTH A and B on disk after a flush.
         let mut app = test_app(default_bindings());
         let config_path = app.engine.paths.config_path.clone();
         app.open_edit_macros();
@@ -41501,8 +41485,8 @@ cyan = "#00ffff"
 
     /// With the buttons gone, EVERY click that lands inside a provider picker
     /// must resolve to a row or to nothing. This walks every cell of the
-    /// modal's frame rather than probing the two rects that used to hold the
-    /// buttons, so a button re-added anywhere in the modal fails the test.
+    /// modal's frame rather than probing the rects of former buttons,
+    /// so a button re-added anywhere in the modal fails the test.
     #[test]
     fn nothing_inside_a_provider_picker_is_a_button() {
         use super::super::modal::layout_publishes_confirm_button;
@@ -42875,12 +42859,12 @@ cyan = "#00ffff"
 
     /// Open one confirmation through the production path that opens it.
     ///
-    /// This is the load-bearing half of the test below. The previous version
-    /// built each `PromptState` inline with `focus: ConfirmFocus::Cancel` and
-    /// then asserted the focus was `Cancel`, so it read back the literal it had
-    /// just written: flipping the REAL `begin_quit` site to
-    /// `ConfirmFocus::Confirm` (Enter on the quit dialog would then kill every
-    /// running agent) left the whole suite green.
+    /// This is the load-bearing half of the test below: building each
+    /// `PromptState` inline with `focus: ConfirmFocus::Cancel` and asserting
+    /// the focus was `Cancel` would read back the literal just written, so
+    /// flipping the REAL `begin_quit` site to `ConfirmFocus::Confirm` (Enter on
+    /// the quit dialog would then kill every running agent) would leave the
+    /// suite green.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per confirmation, each opening it through its production path"
@@ -43058,14 +43042,9 @@ cyan = "#00ffff"
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // This block used to record the opposite FINDING: that
-    // `PromptState::StartupCommandLogs` was a surface no user could reach,
-    // because nothing outside `#[cfg(test)]` assigned it and the read-logs
-    // journey ended in the fullscreen viewer. That was measured and true, and
-    // it is now deliberately false: the journey opens the PICKER, and the
-    // fullscreen viewer is what the picker promotes to. The test is inverted
-    // rather than deleted so the reachability claim stays measured in whichever
-    // direction it currently points.
+    // `PromptState::StartupCommandLogs` is reachable: the read-logs journey
+    // opens the PICKER, and the fullscreen viewer is what the picker promotes
+    // to. These tests keep that reachability claim measured.
     // ══════════════════════════════════════════════════════════════════════
 
     #[test]
@@ -43250,12 +43229,12 @@ cyan = "#00ffff"
         assert_eq!(
             at(2, list.y + 1),
             Some(0),
-            "and so does its timestamp line, which used to select the NEXT run"
+            "and so does its timestamp line, which must not select the NEXT run"
         );
         assert_eq!(
             at(2, list.y + 2),
             Some(1),
-            "the second run starts two rows down; this used to resolve to 2"
+            "the second run starts two rows down"
         );
         assert_eq!(at(2, list.y + 5), Some(2));
         assert_eq!(
@@ -43515,8 +43494,8 @@ cyan = "#00ffff"
     }
 
     /// The resource monitor's row cursor must answer to the movement BINDINGS,
-    /// like every other list in dux. It used to match `KeyCode::Up | Char('k')`
-    /// literally, so a user who rebound movement lost it here alone.
+    /// like every other list in dux, so a user who rebound movement keeps it
+    /// here too.
     #[test]
     fn the_resource_monitor_row_cursor_answers_to_the_movement_bindings() {
         let mut app = test_app(bindings_with_overrides(&[

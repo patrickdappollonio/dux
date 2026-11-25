@@ -1078,7 +1078,7 @@ mod tests {
         assert!(app.agent_row_card().is_some(), "{what}: the card came down");
     }
 
-    /// The user's rule: under the card nothing from this window changes the
+    /// Under the card nothing from this window changes the
     /// agent's row, and only the card's own button claims it. Every palette
     /// command and every binding of the Projects pane, the agent pane, the
     /// Changes pane, the maximized pane and Global is walked in each state the
@@ -1537,7 +1537,7 @@ mod tests {
             .expect("a second provider is configured");
     }
 
-    /// The user's rule holds whenever a change began: a dialog opened while
+    /// The rule holds whenever a change began: a dialog opened while
     /// this window drove the row changes nothing once another device drives
     /// it. Asked two ways for every action that goes through a dialog: the
     /// next key closes the dialog and says why, and the dialog's own

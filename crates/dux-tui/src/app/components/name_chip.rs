@@ -7,7 +7,7 @@
 //! delimiter. Swapping the body's pair means a chip reads exactly as well as
 //! the sentence around it, in every theme, with nothing to configure. A padded
 //! chip is exactly as wide as the quoted text it replaces, so a sentence that
-//! used to quote its names keeps its width. It is the terminal counterpart of
+//! quotes its names in plain text has the same width. It is the terminal counterpart of
 //! the web's inline code chip. The prose around a chip is painted in `text_fg`
 //! on the modal surface, never the host terminal's default foreground.
 //!
