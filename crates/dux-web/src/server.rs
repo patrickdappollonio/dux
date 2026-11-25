@@ -7530,7 +7530,7 @@ mod tests {
         );
     }
 
-    /// End-to-end regression: saving macros through the engine actor (the
+    /// End-to-end: saving macros through the engine actor (the
     /// `PUT /api/v1/macros` path) must ALSO emit `config.changed` on the bus, just
     /// like a reload does. The macro is written to disk and adopted in memory, but
     /// without this signal a `config`-subscribed client never refetches bootstrap,

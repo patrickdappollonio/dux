@@ -122,7 +122,7 @@ describe("dividerPressHits", () => {
 
   // The browser adjusts a touch point before it dispatches, so a press it has
   // already given to the divider can arrive with coordinates well outside the
-  // band. That verdict wins; the strip between the two widths used to be dead.
+  // band. That verdict wins; the strip between the two widths is not dead.
   it("takes a press the browser has already given to the divider", () => {
     const el = divider(200, 201)
     expect(dividerPressHits(el, press(el, 260), DIVIDER_TARGET_MIN.coarse)).toBe(

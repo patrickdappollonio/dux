@@ -586,10 +586,9 @@ pub fn detached_agent_notice(pruned: &PrunedPty, remedy: &str) -> crate::status_
 /// same session is still running.
 ///
 /// Shares its head with [`detached_agent_notice`] rather than writing its own:
-/// the two surfaces used to word this exit differently, one naming the agent and
-/// the other naming neither the agent nor what survived it. A refused resume
-/// still wins, because what the provider said is the more useful sentence and
-/// the terminal is beside the point there.
+/// the two surfaces must word this exit the same way, naming the agent and what
+/// survived it. A refused resume still wins, because what the provider said is
+/// the more useful sentence and the terminal is beside the point there.
 pub fn agent_exit_with_companion_notice(
     pruned: &PrunedPty,
     remedy: &str,
@@ -6883,7 +6882,7 @@ mod tests {
     fn auto_reopen_candidates_skip_a_provider_without_session_resume() {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
         // Copilot ships with `resume_args: None` (excluded from resume by
-        // design, see the tabs tenet), so it can never auto-reopen.
+        // design), so it can never auto-reopen.
         engine.sessions[0].provider = crate::model::ProviderKind::new("copilot");
         assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
@@ -7367,8 +7366,7 @@ mod tests {
     /// A forced shutdown says its stragglers were killed, so they are dead
     /// and reaped by the time it returns, not merely sent a SIGKILL that the
     /// kernel has yet to act on. Read with no polling on purpose: the reap is
-    /// recorded only by a wait, so before the fix nothing had waited and this
-    /// failed every time, not just on a slow machine.
+    /// recorded only by a wait.
     #[test]
     fn a_forced_shutdown_returns_only_once_the_kill_has_landed() {
         let (mut engine, _tmp) = test_engine();

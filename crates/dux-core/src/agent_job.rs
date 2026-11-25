@@ -6796,10 +6796,9 @@ mod tests {
 
     #[test]
     fn a_failed_attach_create_leaves_the_pre_existing_branch_alone() {
-        // Regression: the create rollback removed the worktree AND deleted the
-        // branch whenever dux had made the directory. For an attach, dux made
-        // the directory but NOT the branch, so a create that failed on a
-        // missing provider destroyed the user's branch on the way out.
+        // The create rollback must not delete a branch dux did not make. For an
+        // attach, dux made the directory but NOT the branch, so a create that
+        // failed on a missing provider must leave the user's branch alone.
         let repo = init_test_repo();
         create_branch(repo.path(), "develop");
         let mut project = test_project(repo.path());
@@ -7715,15 +7714,12 @@ mod tests {
         );
     }
 
-    /// Review 6: "Before a worktree is removed, every non-standalone process in
-    /// or under it is ended" and "one occupancy function decides every
-    /// removal". A create whose startup command left a job running (a dev
-    /// server) and whose provider then turns out not to be installed rolls the
-    /// worktree back with `git worktree remove --force` directly: nothing ends
-    /// the startup command's session first, so the folder is deleted from under
-    /// the job dux started there.
+    /// A create whose startup command left a job running (a dev server) and
+    /// whose provider then cannot start rolls its worktree back through the
+    /// removal pipeline, which ends that job before the folder goes, so the
+    /// job is never left running in a deleted directory.
     #[test]
-    fn review6_a_failed_create_does_not_remove_its_worktree_from_under_its_startup_job() {
+    fn a_failed_create_does_not_remove_its_worktree_from_under_its_startup_job() {
         let (mut engine, engine_dir) = crate::engine::test_support::test_engine();
         let repo = init_test_repo();
         let pidfile = engine_dir.path().join("job.pid");

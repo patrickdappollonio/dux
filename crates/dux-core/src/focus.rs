@@ -10,7 +10,7 @@
 //! This module is a pure state machine over the host's DEC mode 1004 focus
 //! reports (`ESC [ I` / `ESC [ O`). It is deliberately free of I/O so the exact
 //! grace semantics can be unit tested with explicit `Instant`/`Duration`
-//! arithmetic, honoring the "wall-clock, not tick counts" tenet.
+//! arithmetic; it runs on wall-clock time, not tick counts.
 //!
 //! Core-owned: the TUI drives this from crossterm focus events, and the pure
 //! [`within_attention_grace`] predicate is the cross-language twin of the web's

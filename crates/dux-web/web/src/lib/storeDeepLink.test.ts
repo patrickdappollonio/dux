@@ -49,7 +49,7 @@ function makeSpine(
     })) as unknown as Spine["sessions"],
     // Every terminal, of every owner, in one flat owner-tagged collection: the
     // sessions' terminals in session order, then the projects' in project order
-    // (the order the nested collections used to carry).
+    // (the order the nested collections carry).
     terminals: [
       ...sessions.flatMap((s) =>
         (s.terminals ?? []).map((id) => ({

@@ -1935,8 +1935,8 @@ port = 3890
     #[test]
     fn a_password_set_over_duplicate_project_ids_is_not_in_force() {
         let (_tmp, paths) = setup(Some(
-            "[[projects]]\nid = \"same\"\npath = \"/tmp/review19-a\"\n\n\
-             [[projects]]\nid = \"same\"\npath = \"/tmp/review19-b\"\n",
+            "[[projects]]\nid = \"same\"\npath = \"/tmp/same-id-a\"\n\n\
+             [[projects]]\nid = \"same\"\npath = \"/tmp/same-id-b\"\n",
         ));
         let mut secrets = Canned {
             stdin: Some(STRONG_PASSWORD),

@@ -420,8 +420,8 @@ describe("MobileShell standalone terminals", () => {
     expect(screen.getByText("~/code")).toBeTruthy()
   })
 
-  // ONE MACHINE PER SCREEN. The agent screen used to hold the flight hook above
-  // its own early returns, so an agentless terminal screen ran a second one:
+  // ONE MACHINE PER SCREEN. The agent screen must not hold the flight hook above
+  // its own early returns, or an agentless terminal screen would run a second one:
   // two phases, two sets of timers, and every stage of a flight re-rendering a
   // tree that was showing somebody else's screen.
   it("runs exactly one flight machine on an agentless terminal screen", () => {
@@ -850,8 +850,8 @@ describe("MobileShell dormant first tab", () => {
 // The in-app Back chevrons and the not-found screen's way out are UP controls,
 // not history steps. A deep-link boot pushes nothing, so on those screens dux's
 // own first entry IS the screen being shown, and a relative step from there
-// leaves the application: the reported bug, through a different door. Each
-// control names its destination instead and lets the store rewrite the URL.
+// leaves the application. Each control names its destination instead and lets
+// the store rewrite the URL.
 describe("MobileShell up navigation never steps history", () => {
   function upState(overrides: Record<string, unknown> = {}): DuxState {
     return makeState({
@@ -1019,8 +1019,7 @@ describe("MobileShell phone terminal chrome", () => {
     expect(screen.getByLabelText("Session actions")).toBeTruthy()
   })
 
-  // The agentless (project/standalone) terminal screens are the other surface
-  // the retired preference used to reach, so they get the same pair.
+  // The agentless (project/standalone) terminal screens get the same pair.
   function agentlessState(bootstrap: Record<string, unknown>): DuxState {
     return terminalState({
       spine: {
@@ -1199,8 +1198,8 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
   })
 
   // NEVER INERT: the pane publishes the keys row only where a key row is on
-  // offer for this device, so a flap whose pane says nothing has no button. The
-  // control used to render on a fine-pointer laptop and do nothing when pressed.
+  // offer for this device, so a flap whose pane says nothing has no button (a
+  // fine-pointer laptop must not get a control that does nothing when pressed).
   it("drops the keys toggle when the pane does not offer it", () => {
     media.set(COARSE_POINTER_QUERY, false)
     mockState = terminalState()
@@ -1800,12 +1799,12 @@ describe("MobileShell agent header PR chip", () => {
   })
 })
 
-// The phone header's two lanes. The approved mock draws lane one as the robot
-// glyph plus the agent name and lane two as folder+project and chip+assistant
-// at 11px muted; the phone deliberately carries only those two secondary
-// fields (no branch, no terminal count) because there is no hover on a phone,
-// so a glyph there can never explain itself. The lanes must fit the header's
-// existing height: two lines in the room one line used.
+// The phone header's two lanes: lane one is the robot glyph plus the agent
+// name, lane two is folder+project and chip+assistant at 11px muted. The phone
+// deliberately carries only those two secondary fields (no branch, no terminal
+// count) because there is no hover on a phone, so a glyph there can never
+// explain itself. The lanes must fit the header's existing height: two lines in
+// the room one line used.
 describe("MobileShell agent header lanes", () => {
   function laneState(): DuxState {
     return makeState({
@@ -1848,7 +1847,7 @@ describe("MobileShell agent header lanes", () => {
     expect(assistant?.querySelector("svg.lucide-cpu")).toBeTruthy()
   })
 
-  // The second lane is the smaller fact, at the 11px muted size the mock draws.
+  // The second lane is the smaller fact, at the 11px muted size.
   it("renders lane two at 11px in the muted tone", () => {
     mockState = laneState()
     render(<MobileShell />)

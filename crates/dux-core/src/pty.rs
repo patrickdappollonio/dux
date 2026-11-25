@@ -972,12 +972,11 @@ pub struct PtyClient {
     writer: PtyWriter,
     terminal: Arc<Mutex<TerminalState>>,
     child: Box<dyn Child + Send + Sync>,
-    /// The directory this PTY's child was spawned in, kept verbatim. It used to
-    /// be handed to the spawn call and forgotten, but this is the type that owns
-    /// the child's process id and the foreground-group probe, so it is the one
-    /// place a "where is this terminal actually working" question can be
-    /// answered from without spreading half the policy across the terminal
-    /// record and the web routes.
+    /// The directory this PTY's child was spawned in, kept verbatim. This is
+    /// the type that owns the child's process id and the foreground-group
+    /// probe, so it is the one place a "where is this terminal actually
+    /// working" question can be answered from without spreading half the
+    /// policy across the terminal record and the web routes.
     ///
     /// This is the SPAWN directory and nothing more: a shell's directory changes
     /// the moment someone types `cd`, so this is a fallback, not the live
@@ -1026,8 +1025,8 @@ pub struct PtyClient {
     /// other end, while an error means dux stopped listening to a child that may
     /// well still be alive, and which the teardown that follows then kills. The
     /// difference does not show up in the exit status (there frequently is none)
-    /// and used to not show up in the log either, so an agent that vanished
-    /// under a read error looked exactly like one that quit. Written once,
+    /// so it is recorded and logged, or an agent that vanished under a
+    /// read error would look exactly like one that quit. Written once,
     /// before `exited`, so anyone who observes the exit also sees this.
     read_error: Arc<OnceLock<String>>,
     has_output: Arc<AtomicBool>,
@@ -1159,8 +1158,7 @@ impl ReaderLoopState {
     /// End the read side because reading FAILED, rather than because the child
     /// closed it. The child may still be running; nothing here kills it, and the
     /// teardown that follows this will. Recorded and logged at warning level
-    /// because it is a real fault with a real cost, and it used to leave nothing
-    /// behind but a debug line.
+    /// because it is a real fault with a real cost.
     fn mark_dead_after_read_error(&self, err: &std::io::Error) {
         let _ = self.read_error.set(err.to_string());
         logger::warn(&format!(
@@ -4405,8 +4403,8 @@ mod tests {
 
     /// Replies leave in the order their queries arrived, whatever kind of
     /// reply each one is. A color query is answered through a different event
-    /// than a cursor report, and the two used to be collected separately, so a
-    /// chunk holding both came back with every cursor-style reply first.
+    /// than a cursor report, so they must not be collected separately: a chunk
+    /// holding both would come back with every cursor-style reply first.
     #[test]
     fn a_color_reply_precedes_a_cursor_report_queried_after_it() {
         let mut terminal = TerminalState::with_scrollback(24, 80, 100);
@@ -4668,14 +4666,13 @@ mod tests {
 
     #[test]
     fn region_scroll_while_scrolled_back_keeps_offset_renderable() {
-        // Regression for a panic inside alacritty_terminal 0.26.0: its
-        // `Grid::scroll_up` bumps the display offset for every scroll while the
-        // offset is non-zero, but only pushes to history when the region starts
-        // at row zero, and it clamps to `max_scroll_limit` rather than to the
-        // current history size. A top-margin region scrolled while the user is
-        // scrolled back and the history ring is unsaturated therefore drives the
-        // offset past the history size, and the next render panics in
-        // `grid/storage.rs`.
+        // Panic guard for alacritty_terminal 0.26.0: its `Grid::scroll_up` bumps
+        // the display offset for every scroll while the offset is non-zero, but
+        // only pushes to history when the region starts at row zero, and it
+        // clamps to `max_scroll_limit` rather than to the current history size.
+        // A top-margin region scrolled while the user is scrolled back and the
+        // history ring is unsaturated therefore drives the offset past the
+        // history size, and the next render panics in `grid/storage.rs`.
         let mut terminal = TerminalState::with_scrollback(5, 16, 1000);
         terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\n");
         let history = terminal.term.grid().history_size();
@@ -5629,9 +5626,9 @@ mod tests {
 
         for (shape, blinking, expected) in [
             (CursorShape::Block, true, "\x1b[1 q"),
-            // Steady block used to be suppressed as "the client default", but
-            // dux's web client opens xterm with a blinking cursor, so a child
-            // that asked for DECSCUSR 2 must get it.
+            // Steady block is not suppressed as "the client default": dux's web
+            // client opens xterm with a blinking cursor, so a child that asked
+            // for DECSCUSR 2 must get it.
             (CursorShape::Block, false, "\x1b[2 q"),
             (CursorShape::Underline, true, "\x1b[3 q"),
             (CursorShape::Underline, false, "\x1b[4 q"),
@@ -5937,8 +5934,8 @@ mod tests {
                 .find(|c| c.row == row && c.col == col)
                 .map(|c| c.symbol.as_str())
         };
-        // Columns must line up after the round-trip; the pre-fix code emitted the
-        // raw tab AND the fill spaces, double-advancing the cursor (b drifted to
+        // Columns must line up after the round-trip: emitting the raw tab AND
+        // the fill spaces would double-advance the cursor (b would drift to
         // col 14, c to col 22).
         assert_eq!(at(0, 0), Some("a"));
         assert_eq!(at(0, 8), Some("b"));
@@ -6348,15 +6345,15 @@ mod tests {
         // A companion terminal runs an interactive shell, which enables job
         // control and places each foreground command in its OWN process group.
         // `terminate()` must signal that foreground group, not only the shell's,
-        // or a running app never receives SIGTERM on close/shutdown (the user's
-        // "waiting the 30s and the app never got asked to exit" report).
+        // or a running app never receives SIGTERM on close/shutdown and the
+        // close waits out the 30s without it ever being asked to exit.
         //
         // Proof: run a foreground `sleep` (which lands in its own group),
         // `terminate()`, and watch the terminal foreground return to the shell.
         // That return happens ONLY if sleep's own group was signaled: an
         // interactive shell ignores SIGTERM, so signaling just the shell's group
-        // (the pre-fix behavior) would leave sleep running with the foreground
-        // pinned to it, and the assertion below would time out.
+        // would leave sleep running with the foreground pinned to it, and the
+        // assertion below would time out.
         let args = vec![
             "--norc".to_string(),
             "--noprofile".to_string(),
@@ -6656,13 +6653,12 @@ mod tests {
         );
     }
 
-    /// Review 25: a client dropped while its child still runs. The drop's
-    /// `child.kill()` (portable-pty's) already REAPS the child through its
-    /// own `try_wait`, so the WNOWAIT wait after it finds nothing and the
-    /// leader-exit hook only runs after the reap, the order the drop's own
-    /// comment ("Recorded before the reap") promises never happens.
+    /// A client dropped while its child still runs runs the leader-exit hook
+    /// before the leader is reaped. portable-pty's `child.kill()` REAPS the
+    /// child through its own `try_wait`, so the hook must run before that
+    /// kill, while a WNOWAIT wait can still find the child.
     #[test]
-    fn review25_a_dropped_clients_hook_runs_before_its_leader_is_reaped() {
+    fn a_dropped_clients_hook_runs_before_its_leader_is_reaped() {
         let dir = tempfile::tempdir().expect("tempdir");
         let args = vec!["-c".to_string(), "exec sleep 300".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
@@ -6866,16 +6862,14 @@ mod tests {
         drop(client);
     }
 
-    /// Review 26: "before dux reaps a child that exited, it records what that
-    /// child left running". `try_wait` fires the leader-exit hook and then
-    /// reaps at once, but the hook only STARTS the record on a thread of its
-    /// own. Only a worktree removal waits for that thread; every other look
-    /// (a pull or switch's move check, an editor or changes-pane delete,
-    /// which all ask `cwd_occupant`) runs straight after the reap, finds the
-    /// leader gone (so the session number proves nothing) and nothing
-    /// recorded yet, and misses a job the shell left working in the folder.
+    /// Before dux reaps a child that exited, it records what that child left
+    /// running. `try_wait` fires the leader-exit hook and then reaps, and the
+    /// hook's record runs on a thread of its own, so a look that runs straight
+    /// after the reap (a pull or switch's move check, an editor or
+    /// changes-pane delete, which all ask `cwd_occupant`) finds the leader gone
+    /// and must still see the job the shell left working in the folder.
     #[test]
-    fn review26_a_look_right_after_the_reap_misses_the_job_the_leader_left() {
+    fn a_look_right_after_the_reap_sees_the_job_the_leader_left() {
         let mut misses = 0;
         let attempts = 10;
         for _ in 0..attempts {
@@ -7567,7 +7561,7 @@ mod tests {
 
         // A subscriber sees the raw byte stream regardless of what the grid is
         // doing, which is how this test knows the child has finished echoing
-        // without asking the grid a question the grid used to refuse to answer.
+        // without asking the grid a question it may refuse to answer.
         let (_guard, rx) = client.subscribe();
 
         client.write_bytes(b"1\r").expect("write the first line");
@@ -7653,16 +7647,14 @@ mod tests {
 
     #[test]
     fn many_clients_attaching_to_a_busy_pty_each_get_a_seamless_stream() {
-        // The user-visible reproduction: a real, continuously streaming,
-        // line-oriented PTY with clients attaching while it runs. For every
-        // attach, the repaint and the first live chunk must join seamlessly, with
-        // no id repeated and none skipped. Before the fix this failed within the
-        // first few dozen attaches (measured: 5 of 78 attaches overlapped, one by
-        // more than three thousand lines).
+        // A real, continuously streaming, line-oriented PTY with clients
+        // attaching while it runs. For every attach, the repaint and the first
+        // live chunk must join seamlessly, with no id repeated and none skipped.
         //
-        // This is the SYSTEM-level check and it is inherently sampled, so the two
-        // halves of the fix each also carry a constructed, deterministic test of
-        // their own (`a_client_does_not_join_the_fan_out_list_before_it_can_reach_its_snapshot`
+        // This is the SYSTEM-level check and it is inherently sampled, so the
+        // two halves of the guarantee each also carry a constructed,
+        // deterministic test of their own
+        // (`a_client_does_not_join_the_fan_out_list_before_it_can_reach_its_snapshot`
         // for the subscribe side, which pins that registration happens behind the
         // terminal lock rather than the no-duplicate outcome itself, and
         // `a_chunk_the_reader_already_holds_still_reaches_a_client_that_registers_first`
@@ -8561,12 +8553,10 @@ mod tests {
         assert!(text.contains('x'));
     }
 
-    /// Regression guard for the sender-clone shutdown hazard: a clone of the
-    /// writer's `SyncSender` (just as the reader thread holds) must NOT prevent
-    /// `PtyWriter::drop` from stopping the writer thread promptly. Before the fix
-    /// the `Drop` relied on channel disconnect; with a live clone, no disconnect
-    /// ever fired and the join blocked indefinitely. Now `Drop` sends an explicit
-    /// `Shutdown` so the thread exits regardless of surviving clones.
+    /// A clone of the writer's `SyncSender` (just as the reader thread holds)
+    /// must NOT prevent `PtyWriter::drop` from stopping the writer thread
+    /// promptly: `Drop` sends an explicit `Shutdown`, so the thread exits
+    /// regardless of surviving clones.
     #[test]
     fn pty_writer_drop_exits_promptly_with_a_surviving_sender_clone() {
         // A no-op writer: we are only testing shutdown timing, not data delivery.

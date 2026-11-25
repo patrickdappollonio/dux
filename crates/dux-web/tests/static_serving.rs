@@ -1,24 +1,20 @@
 //! Static-asset serving, including the guard that the page baked into the binary
 //! is a REAL frontend build.
 //!
-//! ## Why the real-build guard exists
+//! ## The real-build guard
 //!
-//! `crates/dux-web/build.rs` used to turn a failed `npm run build` into a
-//! placeholder page plus a `cargo:warning`, and let `cargo build` succeed. The
-//! test that should have caught it asserted the served page contained
-//! `<!doctype html` OR `id="root"`, and the placeholder contained BOTH, so a
-//! release could have shipped four platform binaries with no web UI and every
-//! check green. `doctype_and_root_element_are_not_evidence_of_a_build` pins that
-//! finding so nobody reintroduces the weak assertion, and
-//! `index_references_a_real_hashed_asset_that_is_actually_served` is the check
-//! that a placeholder cannot satisfy.
+//! `crates/dux-web/build.rs` fails the build when `npm run build` fails, and
+//! writes no placeholder. A weak assertion (the served page contains
+//! `<!doctype html` OR `id="root"`) would pass on a placeholder page, so a
+//! release could ship platform binaries with no web UI and every check green.
+//! `doctype_and_root_element_are_not_evidence_of_a_build` pins that finding,
+//! and `index_references_a_real_hashed_asset_that_is_actually_served` is the
+//! check that a placeholder cannot satisfy.
 //!
-//! That weak assertion had SURVIVED in two routing tests here even after the
-//! finding was pinned, so this file simultaneously argued that the assertion
-//! proves nothing and made it twice. Both now go through [`assert_is_spa_shell`],
-//! which demands a hashed bundle reference when this binary has a real build and
-//! demands the notice page when it does not; routing has to work either way, so
-//! these two assert rather than skip.
+//! The routing tests go through [`assert_is_spa_shell`], which demands a hashed
+//! bundle reference when this binary has a real build and demands the notice
+//! page when it does not; routing has to work either way, so these assert
+//! rather than skip.
 //!
 //! ## Reaching past the page
 //!
@@ -46,21 +42,19 @@
 //! With `DUX_DISABLE_UI_BUILD` set, no frontend build happened for this binary, so
 //! the tests that need one SKIP via [`require_real_ui_build`] rather than pass.
 //! That covers BOTH skip routes: the notice page, and a previously built
-//! `web/dist` embedded unchanged. The second used to be invisible (build.rs marked
-//! nothing, so these tests asserted happily against a UI of unknown age); build.rs
-//! now stamps `DUX_UI_BUILD_STATE=stale` and it skips here too, with its own
-//! reason, since the notice-page sentence is false of it.
+//! `web/dist` embedded unchanged (build.rs stamps `DUX_UI_BUILD_STATE=stale` on
+//! that route, and the skip gives its own reason, since the notice-page sentence
+//! is false of it).
 //!
 //! The two tests that do NOT skip, because they are about routing, read the same
-//! state to decide WHICH page to demand. Reading a "was it skipped" boolean
-//! instead made them demand the notice page from a binary serving a real reused
-//! app, so they failed in a configuration CONTRIBUTING.md documents as supported.
+//! state to decide WHICH page to demand, so they pass in every configuration
+//! CONTRIBUTING.md documents as supported.
 //!
-//! A silently-passing test is exactly how the original defect survived, so the
-//! reason is printed, and build.rs also emits a `cargo:warning` on those paths so
-//! the reason surfaces even when the test harness captures stdout. A skipped test
-//! is still a hiding place, which is why the release and PR workflows refuse to
-//! build with `DUX_DISABLE_UI_BUILD` set at all.
+//! A silently-passing test hides a missing UI, so the skip reason is printed,
+//! and build.rs also emits a `cargo:warning` on those paths so the reason
+//! surfaces even when the test harness captures stdout. A skipped test is still
+//! a hiding place, which is why the release and PR workflows refuse to build
+//! with `DUX_DISABLE_UI_BUILD` set at all.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -74,12 +68,11 @@ use tower::ServiceExt;
 /// Run with `cargo test -- --nocapture` to see the line; the build script's
 /// `cargo:warning` says the same thing unconditionally.
 ///
-/// The reason is per-STATE, not one sentence covering both skip routes. It used to
-/// say "no previously built web/dist, so the embedded page is build.rs's notice
-/// page" whichever route had been taken, which is false on the reuse route: there
-/// IS a previous dist and the page is a real app. A printed reason nobody can
-/// trust is how people stop reading printed reasons, and this module's docs
-/// promise that the reason is printed.
+/// The reason is per-STATE, not one sentence covering both skip routes: a
+/// sentence saying the embedded page is build.rs's notice page would be false
+/// on the reuse route, where there IS a previous dist and the page is a real
+/// app. A printed reason nobody can trust is how people stop reading printed
+/// reasons, and this module's docs promise that the reason is printed.
 macro_rules! require_real_ui_build {
     ($test:literal) => {
         match dux_web::web_assets::ui_build_state() {
@@ -528,15 +521,15 @@ fn chunk_refs(js: &str) -> Vec<String> {
     found
 }
 
-/// The exact placeholder `build.rs` used to write on a failed frontend build, kept
-/// verbatim so the assertions below are about the real thing and not a paraphrase.
-const HISTORICAL_PLACEHOLDER: &str = "<!doctype html><title>dux</title><div id=\"root\">web assets not built - run npm run build in crates/dux-web/web</div>";
+/// A placeholder page of the kind a build script that tolerated a failed
+/// frontend build would embed: a doctype and a `root` element, no bundle.
+const PLACEHOLDER_PAGE: &str = "<!doctype html><title>dux</title><div id=\"root\">web assets not built - run npm run build in crates/dux-web/web</div>";
 
 #[test]
 fn doctype_and_root_element_are_not_evidence_of_a_build() {
-    // THE FINDING, pinned. The assertion this suite used to make passes happily on
-    // the placeholder, which is why a placeholder release would have been green.
-    let placeholder = HISTORICAL_PLACEHOLDER.to_lowercase();
+    // THE FINDING, pinned. The weak assertion passes happily on the placeholder,
+    // which is why a placeholder release would have been green.
+    let placeholder = PLACEHOLDER_PAGE.to_lowercase();
     assert!(
         placeholder.contains("<!doctype html") && placeholder.contains("id=\"root\""),
         "the placeholder satisfies both halves of the old assertion, so the old \
@@ -544,7 +537,7 @@ fn doctype_and_root_element_are_not_evidence_of_a_build() {
     );
     // The real check rejects it, because it references no built bundle.
     assert!(
-        hashed_asset_refs(HISTORICAL_PLACEHOLDER).is_empty(),
+        hashed_asset_refs(PLACEHOLDER_PAGE).is_empty(),
         "the placeholder must not look like a build"
     );
 }
@@ -904,20 +897,14 @@ fn the_embed_folder_resolves_to_something() {
     // on the REUSE route nothing is written at all, but that route is only chosen
     // when `dist/index.html` already exists, so there is something to stage
     // either way. An empty embed is a 404 at the root with nothing said anywhere,
-    // which is the defect this layout was changed to avoid, so it gets a cheap
-    // assertion that runs in every configuration.
+    // so it gets a cheap assertion that runs in every configuration.
     //
-    // What this does NOT do, despite an earlier version of this comment saying
-    // so, is pin the rust-embed `interpolate-folder-path` feature. That feature
-    // is enforced by rust-embed itself, at COMPILE time, so no runtime assertion
-    // could reach it: read against the pinned 8.11.0, the `$OUT_DIR` expansion in
-    // `rust-embed-impl` is `#[cfg(feature = "interpolate-folder-path")]`, and
-    // without it the literal string `$OUT_DIR/ui` is RELATIVE, so it is joined
-    // onto `CARGO_MANIFEST_DIR` and yields a path containing the placeholder
-    // text. That path does not exist, and the derive returns an error naming it
-    // (plus a hint about the feature). There is no "resolves somewhere that
-    // exists and is empty" branch to guard against; dropping the feature simply
-    // fails to build.
+    // This does NOT pin the rust-embed `interpolate-folder-path` feature. That
+    // feature is enforced by rust-embed itself, at COMPILE time, so no runtime
+    // assertion could reach it: without it the literal string `$OUT_DIR/ui` is
+    // RELATIVE, so it is joined onto `CARGO_MANIFEST_DIR`, the path does not
+    // exist, and the derive returns an error naming it (plus a hint about the
+    // feature). Dropping the feature simply fails to build.
     assert!(
         dux_web::web_assets::WebAssets::iter().next().is_some(),
         "the binary embeds ZERO files, so server mode will 404 at the root. \

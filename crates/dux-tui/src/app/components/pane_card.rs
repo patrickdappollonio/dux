@@ -555,7 +555,7 @@ mod tests {
 
     /// THE FLOOR. A lone block with no button behind it is cut to the rows it
     /// has rather than dropped: a pane that paints nothing inside its own frame
-    /// tells the user nothing at all, and this was a real regression.
+    /// tells the user nothing at all.
     #[test]
     fn a_lone_block_is_truncated_rather_than_dropped() {
         // Nine rows of content in a pane with five: too tall for the ring, too
@@ -592,10 +592,10 @@ mod tests {
         assert!(plan.blocks.iter().all(|b| !b.truncated));
     }
 
-    /// Blocks are re-measured at the BARE width when the ring is given up. The
-    /// regression this pins: a sentence measured at the ring's narrower measure
-    /// looked one row too tall for the pane it was about to be laid out bare in,
-    /// so it was dropped and the frame was painted empty.
+    /// Blocks are re-measured at the BARE width when the ring is given up: a
+    /// sentence measured at the ring's narrower measure can look one row too
+    /// tall for the pane it is about to be laid out bare in, and would be dropped
+    /// and the frame painted empty.
     #[test]
     fn giving_up_the_ring_re_measures_at_the_wider_bare_measure() {
         // Five rows at the ring's 26-column measure, four at the bare 28.

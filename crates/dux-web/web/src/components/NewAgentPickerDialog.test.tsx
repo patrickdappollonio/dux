@@ -432,8 +432,8 @@ describe("NewAgentPickerDialog", () => {
   })
 
   it("shrinks the list instead of clipping when the popup hits its viewport cap", () => {
-    // Phone-keyboard regression pin (the "cannot scroll the New Agent modal
-    // with a finger" bug): the popup must NOT be overflow-hidden with a rigid
+    // Phone-keyboard pin (a finger must be able to scroll the New Agent modal):
+    // the popup must NOT be overflow-hidden with a rigid
     // inner list. The idiom is a flex column whose list is the one shrinkable
     // child, so when the soft keyboard shrinks the popup's dvh cap the list
     // gives up height and the header + Add-project footer stay reachable; the

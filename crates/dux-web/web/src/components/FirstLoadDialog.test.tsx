@@ -203,7 +203,7 @@ describe("FirstLoadDialog", () => {
       }
     })
 
-    it("offers exactly the two approved buttons, with Add a project as the filled primary", () => {
+    it("offers exactly the two buttons, with Add a project as the filled primary", () => {
       seed({ screen: "welcome" })
       render(<FirstLoadDialog />)
 
@@ -217,7 +217,7 @@ describe("FirstLoadDialog", () => {
       expect(add.className).toContain("bg-primary")
       expect(site.className).toContain("border-border")
       // And nothing else: two buttons in the footer, the website first, and
-      // the way out is the corner close, per the approved design.
+      // the way out is the corner close.
       expect(footerControls()).toEqual(["Visit the website", "Add a project"])
       const close = screen.getByRole("button", { name: "Close" })
       expect(footer().contains(close)).toBe(false)
@@ -289,7 +289,7 @@ describe("FirstLoadDialog", () => {
       }
     })
 
-    it("offers exactly the two approved buttons, with Open full notes as the primary", () => {
+    it("offers exactly the two buttons, with Open full notes as the primary", () => {
       seed({ screen: "whats_new", notes: NOTES })
       render(<FirstLoadDialog />)
 

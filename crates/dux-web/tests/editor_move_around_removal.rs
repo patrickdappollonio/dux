@@ -1,4 +1,5 @@
-//! review9: an editor move of a folder around a worktree whose removal is running.
+//! An editor move of a folder around a worktree whose removal is running
+//! waits for the removal.
 
 use std::net::SocketAddr;
 
@@ -126,7 +127,7 @@ async fn fixture() -> Fixture {
 }
 
 #[tokio::test]
-async fn review9_editor_move_waits_for_a_removal_running_inside_the_folder() {
+async fn editor_move_waits_for_a_removal_running_inside_the_folder() {
     let Fixture {
         ops,
         _tmp,

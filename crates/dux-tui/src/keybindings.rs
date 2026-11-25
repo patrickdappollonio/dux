@@ -1836,7 +1836,7 @@ const SELECT_TAB_ACTIONS: [Action; 9] = [
     Action::SelectTab9,
 ];
 
-/// The tab-number defaults an older dux shipped, which every config file it
+/// The tab-number defaults an older dux wrote, which every config file it
 /// wrote carries as live rows. None of them reached its tab on the legacy key
 /// encoding (see the tab-number `BindingDef`s), so a row that still says
 /// exactly that is read as the unbound default it would be today.
@@ -2539,12 +2539,12 @@ fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
     na.codes == nb.codes && na.modifiers == nb.modifiers
 }
 
-/// Defaults that shipped after configs already existed. A `[keys]` written
+/// Defaults added after configs already existed. A `[keys]` written
 /// before one of these could not have avoided it, so where its default key
 /// meets a key the file binds to another action on purpose, the default steps
 /// aside and the action starts unbound, with a warning saying how to bind it
 /// ([`late_default_warnings`]), rather than refusing a config that loaded the
-/// day before. Every other default keeps the old rule: a collision refuses.
+/// day before. For every other default a collision refuses.
 ///
 /// The Pull requests modal's own keys are late too, and so is what a binding
 /// of the shared `move_up`/`move_down` there now meets: those two answer in

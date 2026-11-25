@@ -92,8 +92,8 @@ describe("a PTY socket closed by the page lifecycle", () => {
     expect(FakeWS.instances).toHaveLength(2)
   })
 
-  // The gate's own wake is the other way back, and it used to be unsubscribed by
-  // `close()` along with everything else.
+  // The gate's own wake is the other way back, and `close()` must not
+  // unsubscribe it along with everything else.
   it("comes back when the run-identity gate opens", () => {
     const sock = socket()
     sock.connect()

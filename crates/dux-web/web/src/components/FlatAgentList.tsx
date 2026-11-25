@@ -382,7 +382,7 @@ function AgentFlatRow({
                   word={word}
                   working={working}
                 />
-                {/* No branch here, by decision: a drifted agent would put a
+                {/* No branch here: a drifted agent would put a
                     long mono branch inline on every row, noise, and worst on a
                     tablet. The branch's one home is the top bar's
                     branch chip (InsetHeader), which shows the CURRENT branch and

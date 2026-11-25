@@ -1087,11 +1087,11 @@ mod tests {
         );
     }
 
-    /// The regression that made the prune targeted. Measured on git 2.55:
+    /// The prune is targeted. Measured on git 2.55:
     /// `git worktree prune` removes EVERY registration whose directory is
     /// unreachable at that instant, so recreating one agent's working copy while
-    /// a sibling's directory was merely renamed away severed the sibling
-    /// permanently, and moving its directory back left `git status` in it
+    /// a sibling's directory was merely renamed away would sever the sibling
+    /// permanently, and moving its directory back would leave `git status` in it
     /// answering "not a git repository".
     #[test]
     fn recreating_one_working_copy_leaves_a_sibling_on_an_unreachable_path_alone() {

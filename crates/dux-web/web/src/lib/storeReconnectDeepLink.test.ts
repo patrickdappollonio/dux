@@ -9,15 +9,15 @@ import "./store"
 
 import type { Spine } from "./workspaceApi"
 
-// Regression coverage for the reconnect deep-link loss: when the connection
-// drops while the user is deep-linked to a running agent, clicking "Reconnect
-// now" used to land them on the HOME screen. The center pane transiently ejects
-// to the welcome screen while the agent is momentarily `detached` (it exited
-// during the outage and has not finished resuming), which wipes the URL hash to
-// home; nothing restored the route because `restoreDeepLink` is a spent boot
-// one-shot. The store now re-arms the deep-link from `location.hash` on every
-// events reconnect (BEFORE any spine apply can wipe it) and re-restores it once
-// the agent is present AND back to `active`.
+// Coverage for the reconnect deep link: when the connection drops while the
+// user is deep-linked to a running agent, clicking "Reconnect now" must not
+// land them on the HOME screen. The center pane transiently ejects to the
+// welcome screen while the agent is momentarily `detached` (it exited during
+// the outage and has not finished resuming), which wipes the URL hash to home,
+// and `restoreDeepLink` is a spent boot one-shot. So the store re-arms the deep
+// link from `location.hash` on every events reconnect (BEFORE any spine apply
+// can wipe it) and re-restores it once the agent is present AND back to
+// `active`.
 
 type Sess = {
   id: string
@@ -256,12 +256,11 @@ describe("reconnect preserves a deep-linked agent route", () => {
   })
 
   it("restores the changes screen, not just the agent, after the eject", async () => {
-    // The arming used to read the hash with `parseSelectionHash`, whose regexes
-    // are anchored, so `#/agent/s1/changes` parsed as null and the reconnect
-    // armed NOTHING: the transient eject then left the user on home for good.
-    // Arming through `parseRoute` fixes the parse; carrying the `changes` flag
-    // through to the restore is what keeps the screen from downgrading to the
-    // terminal.
+    // The arming reads the hash with `parseRoute`, not `parseSelectionHash`,
+    // whose regexes are anchored: `#/agent/s1/changes` would parse as null and
+    // the reconnect would arm NOTHING, leaving the user on home for good after a
+    // transient eject. Carrying the `changes` flag through to the restore is
+    // what keeps the screen from downgrading to the terminal.
     const mod = await loadStore("#/agent/s1/changes", [
       { id: "s1", project_id: "p1", status: "active" },
     ])

@@ -152,7 +152,7 @@ describe("the branch chip", () => {
   })
 
   it("appears for a DRIFTED branch even when it matches the agent name", () => {
-    // Deliberately beyond the mock, which never draws a drifted agent. Without
+    // Deliberately beyond the design, which never draws a drifted agent. Without
     // this the drift note has no chip to live on and the fact is dropped
     // silently, which is worse than one extra chip in a rare case.
     const drifted = { ...AGENT, initialBranch: "main" }

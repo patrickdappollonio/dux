@@ -1395,7 +1395,7 @@ mod tests {
         }
     }
 
-    // The browser used to apply these rules itself; it runs what it is sent now.
+    // The browser runs what it is sent; it applies none of these rules itself.
 
     #[test]
     fn a_zero_timing_means_its_default() {

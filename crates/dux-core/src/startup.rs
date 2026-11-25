@@ -1379,11 +1379,11 @@ mod tests {
         );
     }
 
-    /// review8: an agent deleted with its worktree KEPT while its startup
-    /// command runs: nothing ends the command, it runs to completion (here it
-    /// succeeds), and the result still tells the user dux stopped it.
+    /// An agent deleted with its worktree KEPT while its startup command runs:
+    /// the result says dux stopped the command only when it did, and never
+    /// when the command ran to completion.
     #[test]
-    fn review8_a_keep_worktree_delete_does_not_claim_it_stopped_the_command() {
+    fn a_keep_worktree_delete_does_not_claim_it_stopped_the_command() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
         let registry = crate::process_sessions::AgentProcessRegistry::default();
@@ -1402,9 +1402,9 @@ mod tests {
         let _ = registry.forget_agent("session-1");
         let result = handle.join().expect("run thread");
         let err = result.status.expect_err("the run reports the deletion");
-        // Forgetting the agent now ends its startup command (review 10), so
-        // the run is stopped; what matters is that the sentence says what
-        // actually happened either way.
+        // Forgetting the agent ends its startup command, so the run is
+        // stopped; what matters is that the sentence says what actually
+        // happened either way.
         if done.exists() {
             assert!(
                 !err.contains("dux stopped the command"),
@@ -1444,13 +1444,13 @@ mod tests {
         );
     }
 
-    /// review10: a rerun is claimed on the engine thread and its worker starts
+    /// A rerun is claimed on the engine thread and its worker starts
     /// a moment later. An agent deleted (worktree kept) in between has its
     /// logs deleted and its registration forgotten; `startup_session_of` is
     /// still `None`, so the delete ends nothing. The worker must not then
     /// start the deleted agent's command anyway, nor bring its log folder back.
     #[test]
-    fn review10_a_rerun_claimed_before_a_delete_never_starts_for_the_deleted_agent() {
+    fn a_rerun_claimed_before_a_delete_never_starts_for_the_deleted_agent() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
         let registry = crate::process_sessions::AgentProcessRegistry::default();
@@ -1625,13 +1625,13 @@ mod tests {
         );
     }
 
-    /// A job the startup command left running keeps writing into the capture
-    /// file dux made for the command's output, which was unlinked at once:
-    /// after the run has returned and its log is written, nothing ever reads
-    /// it, no file names it, and it grows on disk in dux's config folder for
-    /// as long as the job runs.
+    /// A job the startup command left running does not keep writing into an
+    /// unlinked capture file for the command's output: after the run has
+    /// returned and its log is written, nothing would read it and no file
+    /// would name it, yet it would grow on disk in dux's config folder for as
+    /// long as the job runs.
     #[test]
-    fn review15_a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
+    fn a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
         let pidfile = tmp.path().join("job.pid");
@@ -1689,7 +1689,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod review16_tests {
+mod left_running_job_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -1799,7 +1799,7 @@ mod review16_tests {
     /// it stands in for a dux that runs a startup command and then quits.
     #[test]
     #[ignore = "a helper the parent test runs in a process of its own"]
-    fn review16_helper_run_startup_command_then_quit() {
+    fn helper_run_startup_command_then_quit() {
         let Ok(dir) = std::env::var("DUX_REVIEW16_DIR") else {
             return;
         };
@@ -1828,17 +1828,17 @@ mod review16_tests {
     }
 
     /// The docs say a job the startup command leaves running in the
-    /// background keeps running after the command exits. It does, only for
-    /// as long as dux does: its output is a pipe whose only reader is a dux
-    /// thread, so when dux quits the job's next write gets SIGPIPE and the
-    /// job (a dev server, say) is killed.
+    /// background keeps running after the command exits, and it outlives dux
+    /// too: its output must not be a pipe whose only reader is a dux thread,
+    /// or the job's next write after dux quits would get SIGPIPE and kill it
+    /// (a dev server, say).
     #[test]
-    fn review16_a_left_running_job_survives_dux_quitting() {
+    fn a_left_running_job_survives_dux_quitting() {
         let tmp = tempfile::tempdir().unwrap();
         let exe = std::env::current_exe().unwrap();
         let status = std::process::Command::new(exe)
             .args([
-                "startup::review16_tests::review16_helper_run_startup_command_then_quit",
+                "startup::left_running_job_tests::helper_run_startup_command_then_quit",
                 "--exact",
                 "--ignored",
                 "--test-threads=1",

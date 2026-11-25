@@ -855,8 +855,7 @@ describe("FileTree", () => {
     // What the highlight actually IS: the classes the row paints while it is
     // the drop target. Asserted rather than a marker attribute, because a
     // marker no CSS reads keeps its test green while the tree lights up
-    // nothing at all, which is exactly what the previous version of these
-    // tests did.
+    // nothing at all.
     const DROP_HIGHLIGHT = ["bg-primary/10", "ring-1", "ring-primary"]
     const isHighlighted = (el: Element | null) =>
       el !== null && DROP_HIGHLIGHT.every((c) => el.classList.contains(c))

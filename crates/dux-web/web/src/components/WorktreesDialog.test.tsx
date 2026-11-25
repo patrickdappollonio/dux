@@ -359,9 +359,9 @@ describe("WorktreesDialog", () => {
   // inside the confirmation needs `hidden: true`. The older confirm tests dodge
   // this by reading a testid instead.
   it("defaults the branch checkbox ON and deletes the branch with the worktree", () => {
-    // The maintainer's decision: this dialog already says the removal is
-    // forcible and has no trash, and deleting the branch is what the user came
-    // for. The server still defaults to false for a request that says nothing.
+    // This dialog already says the removal is forcible and has no trash, and
+    // deleting the branch is what the user came for. The server still defaults
+    // to false for a request that says nothing.
     const target = entry({ worktree_path: "/wt/messy", branch_name: "messy", branch: "messy" })
     seed([target], {
       deleteWorktreeTarget: { projectId: "p1", entry: target },

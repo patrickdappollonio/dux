@@ -2,11 +2,10 @@
 //! warning goes away again.
 //!
 //! Two pollers ask the same question: the terminal UI's own changed-files
-//! refresh and the web's changes service. They used to answer differently, the
-//! web raising a warning through its own side door and the terminal UI saying
-//! nothing at all, so the same failing repository produced two different
-//! screens. The streak, the threshold, the key and the sentence live here, and
-//! the engine owns the one instance both pollers feed.
+//! refresh and the web's changes service. They must answer the same way: a
+//! warning raised by only one of them would make the same failing repository
+//! produce two different screens. The streak, the threshold, the key and the
+//! sentence live here, and the engine owns the one instance both pollers feed.
 //!
 //! Feeding one tracker from two pollers is deliberately harmless: the streak
 //! simply climbs faster, the warning is emitted on the one crossing, and it is

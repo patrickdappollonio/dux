@@ -1,5 +1,6 @@
-//! Fourth adversarial review of the worktree-removal races branch. Each test
-//! reproduces a defect against the branch's own stated rules.
+//! A removal finished at the next start never ends a standalone agent's job,
+//! and a session registered after the delete stays current in the pending
+//! row.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -168,11 +169,9 @@ fn resume_at_next_start(repo: &Path, row: &PendingWorktreeRemoval) {
 /// owner kind is kept for life. A standalone agent ran in a folder inside a
 /// managed agent's worktree; the user deleted both (the managed one with its
 /// worktree). The standalone agent's leader exits while the managed agent's
-/// removal is still waiting, and what it left running is written into that
-/// removal's pending row as ordinary evidence: the row carries no owner kind.
-/// dux then quits uncleanly. The next start finishes the removal from the row
-/// with an empty registry, kills the standalone agent's job, and removes the
-/// worktree around it.
+/// removal is still waiting, and dux then quits uncleanly. The next start
+/// finishes the removal from its pending row with an empty registry and still
+/// leaves the standalone agent's job running.
 #[test]
 fn a_removal_finished_at_the_next_start_never_ends_a_standalone_agents_job() {
     let (mut first, tmp) = test_engine();
@@ -229,13 +228,12 @@ fn a_removal_finished_at_the_next_start_never_ends_a_standalone_agents_job() {
     );
 }
 
-/// "Everything it would end persisted and kept current": a session registered
-/// in the folder after the delete recorded its removal (a startup-command
-/// rerun claimed just before the delete spawns its command just after it) is
-/// ended by the live dispatch, which reads the in-memory registry, but is never
-/// written into the pending row while its leader runs. After an unclean quit
-/// the next start finishes the removal from the row alone and removes the
-/// worktree out from under the still-running command.
+/// Everything a removal would end is persisted and kept current: a session
+/// registered in the folder after the delete recorded its removal (a
+/// startup-command rerun claimed just before the delete spawns its command
+/// just after it) is written into the pending row while its leader runs, so
+/// after an unclean quit the next start, which has only the row, does not
+/// remove the worktree under the still-running command.
 #[test]
 fn a_session_registered_after_the_delete_is_kept_current_in_the_pending_row() {
     let (mut first, tmp) = test_engine();
@@ -296,13 +294,12 @@ fn a_session_registered_after_the_delete_is_kept_current_in_the_pending_row() {
     );
 }
 
-/// "The manager checks the path before it claims anything; it refuses anything
-/// that isn't a managed worktree, claiming nothing." A request for a folder
-/// INSIDE a live agent's managed worktree passes the path-only pre-check
-/// (it lies under the project's managed root) and is announced as a removal
-/// before git's listing is consulted, so until the worker gets round to
-/// refusing it as not managed, work in that folder of a live agent is refused
-/// with "dux is removing the worktree ... The agent that owned it was deleted".
+/// The manager checks the path before it claims anything and refuses anything
+/// that is not a managed worktree, claiming nothing. A request for a folder
+/// INSIDE a live agent's managed worktree passes the path-only pre-check (it
+/// lies under the project's managed root), so it must not be announced as a
+/// removal before git's listing is consulted, or work in that folder of a live
+/// agent would be refused in the meantime.
 #[test]
 fn the_manager_claims_nothing_for_a_folder_inside_a_live_agents_worktree() {
     let (mut engine, tmp) = test_engine();

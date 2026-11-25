@@ -18,7 +18,7 @@
 //!   key the surface handles WITHOUT a binding (a text-input context's literal
 //!   Enter, Tab or Escape, a mouse gesture), which is therefore named as it is;
 //!   [`Hint::plain`] is prose with no badge, for Space acting on the focused
-//!   control (the accessibility tenet).
+//!   control.
 //! * **A badge sits on the surface it is painted over.** It carries no
 //!   background of its own, so the same line reads right on a dialog, a pane
 //!   and the footer bar in every theme.

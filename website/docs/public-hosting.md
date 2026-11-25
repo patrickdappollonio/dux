@@ -27,7 +27,7 @@ There are two gates to choose from, and you can stack them:
 > [!TIP]
 > If you do not actually need the public internet, you do not need any of this.
 > [Tailscale](/docs/tailscale) puts the same workspace on a private network with
-> nothing to publish and nothing to configure, and it is what the maintainer uses.
+> nothing to publish and nothing to configure.
 
 ## The simple version: Caddy and the dux password
 
@@ -545,6 +545,6 @@ Use the proxy's logs to know who did something.
   its default, the startup banner, and graceful shutdown.
 - [The web password](/docs/web-login): `require`, bans, the cookie, and the honest limits.
 - [Reaching dux over Tailscale](/docs/tailscale): the private-network answer, which
-  needs none of this page and is what the maintainer actually uses.
+  needs none of this page.
 - [The workspace in the browser](/docs/web-workspace): what you get once you are in,
   including the phone shell.

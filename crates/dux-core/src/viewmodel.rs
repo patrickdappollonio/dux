@@ -1454,9 +1454,8 @@ impl MacroView {
 impl Engine {
     /// Project the projects/sessions/sidebar spine served via
     /// `GET /api/v1/workspace`, pushed on `/ws/events`, and read by the thin
-    /// per-resource endpoints. This is the exact projection logic the
-    /// [`Engine::view_model`] used to inline for those three fields; it was factored
-    /// out so the REST read and the change-detection that emits
+    /// per-resource endpoints. It is the one projection of those three fields,
+    /// so the REST read and the change-detection that emits
     /// `projects.changed`/`sessions.changed` share one source of truth.
     pub fn spine(&self) -> SpineView {
         // Group extra tabs by session id in ONE pass (O(total tabs)) so each

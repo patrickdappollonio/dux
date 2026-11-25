@@ -148,8 +148,8 @@ expect "empty checksum file warns" 1 "WARNING: no published checksum" \
   "$ARCHIVE" "$WORK/empty.sha256"
 
 # 3c. A checksum that could not be FETCHED is a different outcome from one that
-#     was never published, and must not be reported as the latter. Every failure
-#     mode used to collapse into "this release predates checksums", which is an
+#     was never published, and must not be reported as the latter. Collapsing every
+#     failure mode into "this release predates checksums" would be an
 #     assertion about the RELEASE made on the strength of a local network error:
 #     wrong, and it points the user away from the actual cause. It also blocks the
 #     documented path to making checksums mandatory, since a transient DNS blip

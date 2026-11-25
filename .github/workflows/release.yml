@@ -185,9 +185,9 @@ jobs:
   # THE PUBLISH GATE. Every release asset becomes publicly reachable here and
   # nowhere else.
   #
-  # The build matrix used to upload its own archive, which meant a platform whose
-  # smoke test failed left the other three downloadable against a tag that already
-  # existed. The tag is created before this workflow starts, so there is no
+  # The build matrix does not upload its own archive: a platform whose smoke
+  # test failed would leave the other three downloadable against a tag that
+  # already existed. The tag is created before this workflow starts, so there is no
   # "abort the release" to fall back on: the only lever is to publish nothing
   # until every platform has passed. `needs: [build]` gives exactly that, because
   # a needs edge requires ALL matrix legs to succeed. The smoke test still gates

@@ -80,10 +80,10 @@ describe("OfflineOverlay", () => {
   })
 })
 
-// THREE FACES, AND THE BUTTON IS IN ALL OF THEM. The overlay used to say dux
-// "keeps trying for as long as this page is open" over an indeterminate spinner,
-// which on a remote network was indistinguishable from being stuck: an
-// unreachable host does not refuse a connection, it hangs. Each face now says a
+// THREE FACES, AND THE BUTTON IS IN ALL OF THEM. The overlay does not say dux
+// "keeps trying for as long as this page is open" over an indeterminate
+// spinner, which on a remote network is indistinguishable from being stuck: an
+// unreachable host does not refuse a connection, it hangs. Each face says a
 // number.
 describe("the waiting face", () => {
   it("names the attempt that failed, the budget, and the countdown", () => {
@@ -127,11 +127,10 @@ describe("the waiting face", () => {
     expect(screen.getByText("Attempt 2 of 8 failed. Retrying in 2 s.")).toBeTruthy()
   })
 
-  // MEASURED, AND WRONG BEFORE THE FIX. The clock behind the countdown only
-  // ticked while a countdown was on screen, so after ten seconds of the
-  // connecting face it was ten seconds stale: the first frame of the next
-  // waiting face read "Retrying in 11 s" and only snapped to 1 s at the next
-  // sample. Every cycle, on the face the user looks at longest.
+  // The clock behind the countdown ticks while the connecting face is on
+  // screen too, so after ten seconds of it the first frame of the next waiting
+  // face reads the right number ("Retrying in 1 s"), not a stale one
+  // ("Retrying in 11 s"). Every cycle, on the face the user looks at longest.
   it("is right on its FIRST frame, after a long connecting face", () => {
     vi.useFakeTimers()
     seed({

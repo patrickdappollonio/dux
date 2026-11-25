@@ -674,9 +674,9 @@ mod tests {
         }
     }
 
-    /// A regression guard, NOT a target: these floors exist so a refactor
-    /// cannot quietly strip the web renderings back off the shared tips. Adding
-    /// tips is welcome; dropping below what already shipped is the bug.
+    /// A floor, NOT a target: these counts exist so a refactor cannot quietly
+    /// strip the web renderings back off the shared tips. Adding tips is
+    /// welcome; dropping below the floor is the bug.
     #[test]
     fn the_surfaces_keep_the_tips_they_have() {
         let web = web_tips().len();

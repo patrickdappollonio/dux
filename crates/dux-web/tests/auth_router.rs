@@ -1834,8 +1834,7 @@ async fn https_paths_dux_knows_of_are_not_warned_about_plain_http() {
     assert_eq!(forwarded["transport_encrypted"], json!(true), "{forwarded}");
 }
 
-// ── First adversarial review: relays, posing proxies, abandoned checks and
-//    addresses a client chooses ─────────────────────────────────────────────
+// ── Relays, posing proxies, abandoned checks and addresses a client chooses ──
 
 /// A relay on this machine aimed at dux's own Tailscale address (socat, `ssh
 /// -L`, a reverse proxy, `tailscale funnel --tcp`) connects FROM that address,
@@ -3581,10 +3580,10 @@ async fn a_banned_tailnet_device_must_stay_banned_through_tailscale_serve() {
 }
 
 /// Cookies are not isolated by port, so any other web app on the same host
-/// (or a page planting one, the case review 6 was about) can put a cookie
-/// whose value carries UTF-8 into the one Cookie header the browser sends.
-/// dux then reads no cookie at all and the owner's real session is ignored:
-/// every request is 401 and signing in again changes nothing.
+/// (or a page planting one) can put a cookie whose value carries UTF-8 into
+/// the one Cookie header the browser sends. dux must still read the owner's
+/// real session from that header, or every request would be 401 and signing
+/// in again would change nothing.
 #[tokio::test]
 async fn a_utf8_cookie_from_another_app_must_not_hide_the_session() {
     let dux = Dux::with_password("require = \"everywhere\"");

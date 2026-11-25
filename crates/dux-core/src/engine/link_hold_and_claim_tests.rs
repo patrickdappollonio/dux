@@ -1,4 +1,5 @@
-//! Review 13: reproductions.
+//! Holds and claims taken through a link: a removal of the target sees them,
+//! and new work through the link is refused.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,13 +49,12 @@ fn free_worktree(engine: &mut Engine, root: &Path) -> PathBuf {
     worktree
 }
 
-/// The registry keys every hold and claim on its LEXICAL spelling and
-/// compares keys by plain prefix, so a hold taken through a link whose target
-/// is a folder being removed is invisible to that removal, and the removal is
-/// invisible to the hold. The containment rule (any spelling of the occupant
-/// under any spelling of the folder) is not what the registry asks.
+/// The registry answers containment for any spelling of the occupant under
+/// any spelling of the folder, so a hold taken through a link to a folder is
+/// among that folder's holders even though a lexical prefix comparison of
+/// the two paths would not match.
 #[test]
-fn review13_a_hold_through_a_link_is_seen_by_a_removal_of_its_target() {
+fn a_hold_through_a_link_is_seen_by_a_removal_of_its_target() {
     let tmp = tempfile::tempdir().unwrap();
     let worktree = tmp.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -77,7 +77,7 @@ fn review13_a_hold_through_a_link_is_seen_by_a_removal_of_its_target() {
 }
 
 #[test]
-fn review13_a_removal_of_a_folder_refuses_new_work_through_a_link_to_it() {
+fn a_removal_of_a_folder_refuses_new_work_through_a_link_to_it() {
     let tmp = tempfile::tempdir().unwrap();
     let worktree = tmp.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -98,12 +98,12 @@ fn review13_a_removal_of_a_folder_refuses_new_work_through_a_link_to_it() {
 }
 
 /// The last look a removal takes (and the destructive clearance) asks
-/// `stored_occupant`, whose "being created" rung asks the registry's
-/// holders: a standalone agent being created at a link that resolves to the
-/// worktree is not found, so the worktree is cleared for git while the create
-/// is still on its way into it.
+/// `stored_occupant`, whose "being created" rung asks the registry's holders:
+/// it finds a standalone agent being created at a link that resolves to the
+/// worktree, so the worktree is not cleared for git while the create is on
+/// its way into it.
 #[test]
-fn review13_the_last_look_sees_an_agent_being_created_at_a_link_to_the_folder() {
+fn the_last_look_sees_an_agent_being_created_at_a_link_to_the_folder() {
     let (engine, tmp) = test_engine();
     let worktree = tmp.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -131,11 +131,10 @@ fn review13_the_last_look_sees_an_agent_being_created_at_a_link_to_the_folder() 
 }
 
 /// A manager removal requested at a link to a worktree resolves to the
-/// worktree (git removes the real folder) but claims and waits on the LINK:
-/// a push running in the worktree is not waited for, and git removes the
-/// folder under it.
+/// worktree, which is what git removes, so it must also claim and wait on the
+/// worktree rather than the link: a push running in the worktree keeps it.
 #[test]
-fn review13_a_manager_removal_requested_through_a_link_waits_for_work_in_the_worktree() {
+fn a_manager_removal_requested_through_a_link_waits_for_work_in_the_worktree() {
     let (mut engine, tmp) = test_engine();
     let worktree = free_worktree(&mut engine, tmp.path());
     let link = engine
@@ -165,8 +164,6 @@ fn review13_a_manager_removal_requested_through_a_link_waits_for_work_in_the_wor
         "the worktree was removed while a push held it (outcome {early:?})"
     );
 }
-
-// Tests added with the fixes for the thirteenth review.
 
 /// A background worker that never starts is answered for, so the busy the
 /// surface showed for it gets its final.

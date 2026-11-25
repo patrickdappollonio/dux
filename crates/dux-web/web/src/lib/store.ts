@@ -7140,8 +7140,8 @@ export function reconnectSession(
       selectedTarget: reconnectTarget,
       selectedSessionId: sessionId,
       // This IS a selection commit, so it restores the pane's remembered mode
-      // like every other one. Skipping it left the flag saying whatever the
-      // previously focused pane said, and the URL was written from that.
+      // like every other one. Skipping it would leave the flag saying whatever the
+      // previously focused pane said, and the URL would be written from that.
       ...theaterPatch(reconnectTarget),
     }),
   )

@@ -1,4 +1,4 @@
-# Where dux's memory goes: a measured baseline (2026-09-17)
+# Where dux's memory goes: a measured baseline
 
 Every figure below was read off `/proc/<pid>/smaps_rollup` and `/proc/<pid>/status`
 inside the preview container while dux was in the stated condition. Numbers marked
@@ -15,6 +15,7 @@ about 2 MiB is heap.
 
 | | |
 | --- | --- |
+| Measured on | 2026-09-17 |
 | Host kernel | 7.2.5-1-cachyos |
 | Container base | `archlinux:latest`, glibc 2.44 |
 | dux build | `cargo build --release --bin dux`, rustc 1.98.1 |

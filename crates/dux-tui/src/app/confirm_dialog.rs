@@ -8,9 +8,9 @@
 //!
 //! - **Sized from its content, clamped to the screen.** The dialog is
 //!   [`CONFIRM_DIALOG_WIDTH`] wide (or the screen's width, if that is less) and
-//!   exactly as tall as its wrapped prose plus its controls and buttons. A
-//!   fixed percentage of the screen used to leave room for one row of prose on
-//!   an 80x24 terminal and drop the rest with nothing to say it had.
+//!   exactly as tall as its wrapped prose plus its controls and buttons, never
+//!   a fixed percentage of the screen: on an 80x24 terminal a percentage can
+//!   leave room for one row of prose and drop the rest with nothing to say so.
 //! - **A body too tall for the screen scrolls; it is never cut.** The controls
 //!   and buttons keep their rows and the prose gets what is left, scrolled the
 //!   way the welcome and "What's new" screens scroll theirs (the shared
@@ -814,7 +814,7 @@ mod tests {
     /// Every Confirm dialog, painted on an 80x24 terminal, says every word it
     /// says on a roomy one, and shows both of its buttons whole. A body too
     /// tall for the screen may scroll, and then scrolling it must reach every
-    /// word. A dialog sized by a percentage of the screen used to leave room for
+    /// word. A dialog sized by a percentage of the screen would leave room for
     /// one row of prose at this size and drop the rest without a word.
     #[test]
     fn every_confirm_dialog_fits_an_80x24_terminal_uncut() {

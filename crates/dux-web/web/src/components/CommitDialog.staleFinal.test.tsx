@@ -2,9 +2,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
-// Review 26: "a commit's final clears the message box only if the box still
-// holds the committed text". The web's commit dialog clears and closes on the
-// commit's answer unconditionally, whatever the box holds by then.
+// A commit's final clears the message box only if the box still holds the
+// committed text, so a message typed for another agent while an earlier commit
+// lands is kept.
 
 let resolveCommit: (() => void) | null = null
 const commit = vi.hoisted(() =>
@@ -55,7 +55,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("review 26: the web commit box", () => {
+describe("the web commit box", () => {
   it("keeps a message typed for another agent while an earlier commit lands", async () => {
     act(() => openCommit("agent-a"))
     render(<CommitDialog />)

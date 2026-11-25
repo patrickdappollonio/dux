@@ -199,8 +199,8 @@ mod tests {
     fn provider_names_do_not_match() {
         // Provider names ("claude", "codex", ...) are too generic as search
         // terms, so an agent named nothing like the query must NOT surface
-        // just because it runs that provider. (Providers were once a searched
-        // field; this pins the removal.)
+        // just because it runs that provider (providers are not a searched
+        // field).
         assert!(!matches_session(
             Some("api"),
             Some("main"),

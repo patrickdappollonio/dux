@@ -208,10 +208,9 @@ describe("seeding the verdict from the connected handshake", () => {
     expect(view.result.current.ownerPresent).toBe(true)
   })
 
-  // THE MERE-ATTACH NAME, the user-reported regression. A watcher that simply
-  // attaches hears no `pty.owner` broadcast (attaching never steals and a
-  // refused claim emits nothing), so the handshake's `owner_device` is its only
-  // source of a specific card title.
+  // THE MERE-ATTACH NAME. A watcher that simply attaches hears no `pty.owner`
+  // broadcast (attaching never steals and a refused claim emits nothing), so
+  // the handshake's `owner_device` is its only source of a specific card title.
   it("names the driving device from the handshake alone, with no pty.owner event", () => {
     const { view } = setup()
     act(() =>
@@ -342,9 +341,9 @@ describe("taking over", () => {
     expect(await lost).toMatch(/did not go through/)
   })
 
-  // FLIPPED. The press used to focus the typing surface at once, which on a
-  // phone raises the soft keyboard over a pane that is a whole reconnect and one
-  // replay parse away from having anything to type into. Focus is the pane's now,
+  // The press does not focus the typing surface at once, which on a phone
+  // would raise the soft keyboard over a pane that is a whole reconnect and one
+  // replay parse away from having anything to type into. Focus is the pane's,
   // and it waits for the handshake AND the replay.
   it("arms the intent, flips the verdict and bounces the socket, WITHOUT focusing", () => {
     const { view, pty, reconnecting } = setup()
@@ -398,7 +397,7 @@ describe("taking over", () => {
     act(() => view.result.current.takeOver())
     expect(view.result.current.takeoverIntent.read()).toBe(true)
     // Somebody else's claim landed first; this client lost the race. Re-arming
-    // is the user's decision, not a retry loop's.
+    // is a user act, not a retry loop's.
     act(() => notifyPtyOwner("p1", "theirs", 2, undefined))
     expect(view.result.current.takeoverIntent.read()).toBe(false)
     expect(view.result.current.isOwner).toBe(false)
@@ -446,10 +445,9 @@ describe("a freed pty", () => {
     expect(view.result.current.ownerPresent).toBe(false)
   })
 
-  // FLIPPED. The freed exemption is gone. It used to park an armed intent
-  // through the old owner's disconnect so a mid-bounce take-over could still
-  // claim flagged; the bounce's own handshake finds the pty UNOWNED and seeds a
-  // PLAIN claim that reaches exactly the same outcome, and keeping a flag alive
+  // There is no freed exemption: an armed intent is not parked through the old
+  // owner's disconnect. The bounce's own handshake finds the pty UNOWNED and
+  // seeds a PLAIN claim that reaches the same outcome, and keeping a flag alive
   // past its socket is the whole class of bug the rule closes.
   it("DROPS an armed take-over intent, and the next unowned handshake claims plain", () => {
     const { view } = setup()
@@ -490,7 +488,7 @@ describe("a freed pty", () => {
     act(() => view.result.current.takeOver())
     expect(view.result.current.takeoverIntent.read()).toBe(true)
     // Somebody else's claim landed first. This is the demotion that retires
-    // the intent without sending it; re-arming is the user's decision.
+    // the intent without sending it; re-arming is a user act.
     act(() => notifyPtyOwner("p1", "conn-other", 2, undefined))
     expect(view.result.current.takeoverIntent.read()).toBe(false)
     expect(view.result.current.isOwner).toBe(false)
@@ -655,12 +653,12 @@ describe("the LOST state", () => {
 })
 
 describe("the other device's NAME across an events-socket outage", () => {
-  // FLIPPED. Losing the events socket used to WIPE the name while
-  // `ownerPresent` stayed true, so a flapping spine downgraded a perfectly good
+  // Losing the events socket does not WIPE the name while `ownerPresent`
+  // stays true: a flapping spine would downgrade a perfectly good
   // "Active on Chrome on macOS" to the generic "Active on another device" and back
-  // again. The wipe was defending against a name going stale with no correction
-  // coming; the correction now exists (the spine's own `input_owner`), so the
-  // name is kept and only ever replaced by a newer fact.
+  // again. A name can go stale only with no correction coming, and the
+  // correction exists (the spine's own `input_owner`), so the name is kept and
+  // only ever replaced by a newer fact.
   it("is KEPT while the events socket is down, because the generic copy is worse, not safer", () => {
     const pty = new PtyFake()
     const view = renderHook(

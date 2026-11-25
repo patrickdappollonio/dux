@@ -444,7 +444,7 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
 ///
 /// Staging a folded untracked folder turns it into one staged entry per file,
 /// and git does not fold staged entries, so without this the staged half would
-/// be exactly as long as the unstaged one used to be. A folder folds when HEAD
+/// be exactly as long as the unstaged one was. A folder folds when HEAD
 /// does not have it and every staged entry inside it is a plain addition: the
 /// shallowest such ancestor of each added file is the fold. A rename or copy
 /// inside keeps the folder open, because the row a rename needs (where it came

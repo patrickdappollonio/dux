@@ -1,13 +1,9 @@
-//! Adversarial review (fifth pass): see the test.
-//! Derived from the second pass: an editor write holds its editor ROOT,
-//! never the path it writes. A terminal's editor is rooted at the folder the
-//! terminal started in, and that folder can contain an agent's worktree (a
-//! standalone terminal starts in the home folder, which holds dux's worktrees
-//! root by default; a project terminal starts at the repository root, which
-//! holds any worktree kept inside the repository, such as `.worktrees/`). A
-//! write through such an editor into a worktree whose removal has begun is
-//! neither refused nor waited for, and a folder created there after git
-//! removed the worktree brings the worktree's folder back.
+//! A terminal's editor is rooted at the folder the terminal started in, and
+//! that folder can contain an agent's worktree (a project terminal starts at
+//! the repository root, which holds any worktree kept inside the repository,
+//! such as `.worktrees/`). Such an editor refuses to delete or move a live
+//! agent's worktree, while ordinary writes and moves elsewhere in its root
+//! still work.
 
 use std::net::SocketAddr;
 
@@ -144,7 +140,7 @@ async fn a_terminal_editor_does_not_delete_a_live_agents_worktree() {
     // Nothing is being removed. The user deletes the folder `.worktrees/agent`
     // from the project terminal's file tree: that folder IS agent s1's
     // worktree, and the agent record is the first occupant the one occupancy
-    // question names. Nothing asks it.
+    // question names, so the delete is refused.
     let resp = client
         .post(format!("{prefix}/delete"))
         .json(&serde_json::json!({ "path": ".worktrees/agent" }))

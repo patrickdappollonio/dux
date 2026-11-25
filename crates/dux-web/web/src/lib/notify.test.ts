@@ -310,12 +310,11 @@ describe("the busy leak guard", () => {
     expect(text).toContain("may still be running")
   })
 
-  // A REGRESSION GUARD on the re-send contract rather than a failing-first
-  // test: re-arming on a replacing spinner already worked. It is pinned because
-  // the other half of the fix depends on it. While the engine still holds the
-  // operation it re-sends the busy on its key every 20s instead of calling it
-  // timed out, and every one of those frames lands here; the moment one stops
-  // re-arming the guard, the server's honesty is undone by this timer.
+  // A guard on the re-send contract: re-arming on a replacing spinner. While
+  // the engine still holds the operation it re-sends the busy on its key every
+  // 20s instead of calling it timed out, and every one of those frames lands
+  // here; the moment one stops re-arming the guard, the server's honesty is
+  // undone by this timer.
   it("stays armed for as long as the server keeps re-sending the busy", () => {
     notifyBusy("Pulling latest changes...", { id: "create-1" })
     // Five minutes of clone, with the engine's 20s refresh arriving throughout.

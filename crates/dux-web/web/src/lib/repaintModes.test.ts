@@ -21,13 +21,13 @@
 // so on a full-screen agent a lost mouse mode is not a degraded scroll, it is no
 // scroll at all: the handler returns before it touches the finger delta.
 //
-// Honest scope note: these assertions pass against the FIXED server and would
-// also pass against any other producer of the same bytes. They cannot fail for
-// the unfixed server, because the unfixed bytes are what the "without the
-// restore block" case below feeds in deliberately. The test that actually fails
-// without the fix is the Rust one, `reconnect_repaint_restores_private_modes_*`
-// in crates/dux-core/src/pty.rs; this file exists so a future change to the mode
-// block (or an xterm upgrade that renames a mode) is caught on this side too.
+// Honest scope note: these assertions pass against any producer of the same
+// bytes, and cannot fail for a server that omits the restore block, because
+// those bytes are what the "without the restore block" case below feeds in
+// deliberately. The test that fails without the restore block is the Rust one,
+// `reconnect_repaint_restores_private_modes_*` in crates/dux-core/src/pty.rs;
+// this file exists so a future change to the mode block (or an xterm upgrade
+// that renames a mode) is caught on this side too.
 import { afterEach, describe, expect, it } from "vitest"
 import { Terminal } from "@xterm/xterm"
 
@@ -71,7 +71,7 @@ const MAIN_MODE_RESTORE_TAIL_INSERT_ON = MAIN_MODE_RESTORE_TAIL.replace(
 
 // Mirrors `TerminalPane.onTouchMove`'s gate. A finger drag on the alt screen is
 // forwarded to the app as SGR wheel reports only when this returns "forward";
-// "ignore" is the dead gesture the user reported.
+// "ignore" is the dead gesture.
 function touchScrollTarget(term: Terminal, isOwner: boolean) {
   const altScreen = term.buffer.active.type !== "normal"
   const forwardWheel =

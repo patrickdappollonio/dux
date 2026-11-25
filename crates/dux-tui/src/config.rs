@@ -167,8 +167,8 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
 // ---------------------------------------------------------------------------
 // Retired keybinding actions
 //
-// An action that once shipped and could be bound in `[keys]`, but is gone from
-// the app. `validate_keys` rejects any `[keys]` entry whose action is not in
+// An action that was once bindable in `[keys]` but is gone from the app.
+// `validate_keys` rejects any `[keys]` entry whose action is not in
 // `BINDING_DEFS`, so a binding for a retired action is pruned from the document
 // on load and the pruned config rewritten, exactly like a retired provider
 // block.
@@ -180,10 +180,10 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
 const RETIRED_KEY_ACTIONS: &[&str] = &[
     // Removed together with the AI-generated commit-message feature.
     "generate_commit_message",
-    // The three per-mode sort actions v0.6.0 shipped. They are retired rather
-    // than folded into the `sort_agents` cycling action that replaced them:
-    // three names collapsing onto one would bind the same action three times,
-    // which is a conflict rather than a migration.
+    // The three per-mode sort actions are retired rather than folded into the
+    // `sort_agents` cycling action that replaced them: three names collapsing
+    // onto one would bind the same action three times, which is a conflict
+    // rather than a migration.
     "sort_agents_by_updated",
     "sort_agents_by_created",
     "sort_agents_by_name",
@@ -2897,7 +2897,8 @@ pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 /// its own for. Each is named by its actions and never by the user's key.
 /// Also every newer default that starts unbound because the file already
 /// binds its key elsewhere, which names that default key, dux's own. These
-/// warn rather than refuse, because a file holding one used to load.
+/// warn rather than refuse, because a file holding one is a config an older
+/// dux loads, and refusing it would break a working config on upgrade.
 ///
 /// The interactive warning is worded by `extended_keys`: the config is read
 /// before dux knows what the host terminal sends, so with extended keys
@@ -3709,9 +3710,9 @@ mod tests {
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         let rendered = render_config(&config, &bindings);
 
-        // Derived rather than hardcoded: the population of shipped-unbound
-        // actions changes (the minimize alias used to be one of them), and the
-        // rule is about all of them, not about a list kept in step by hand.
+        // Derived rather than hardcoded: the population of default-unbound
+        // actions changes, and the rule is about all of them, not about a list
+        // kept in step by hand.
         let unbound: Vec<&str> = keybindings::BINDING_DEFS
             .iter()
             .filter(|d| d.default_keys.is_empty() && !d.scopes.is_empty())
@@ -5719,8 +5720,8 @@ mod legacy_exit_interactive_tests {
 mod web_dragdrop_paste_render_tests {
     use super::*;
 
-    /// The generated config must SHOW the setting with its shipped value and
-    /// explain itself in place, per the "config file is the documentation" tenet.
+    /// The generated config must SHOW the setting with its default value and
+    /// explain itself in place.
     /// Rendered and parsed back rather than asserted from the format string, so a
     /// broken escape shows up as a failing test instead of an unparseable config.
     #[test]

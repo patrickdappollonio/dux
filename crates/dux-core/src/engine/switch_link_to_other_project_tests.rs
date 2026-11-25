@@ -1,4 +1,5 @@
-//! Review 24: reproductions.
+//! A switch that deletes a tracked link to another project goes ahead and
+//! leaves the other project's repository where it is.
 
 use std::path::Path;
 
@@ -19,11 +20,10 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// A project checkout tracks a link `work` pointing at ANOTHER project's
 /// repository. A branch deletes the link. Removing the link leaves the other
-/// project's repository where it is, so the switch must go through; the move
-/// check judges the link's target instead (the containment test's canonical
-/// spelling follows the link) and refuses the switch.
+/// project's repository where it is, so the move check judges the link at its
+/// own path, not at its canonical target, and the switch goes through.
 #[test]
-fn review24_switch_deleting_a_tracked_link_to_another_project_is_refused() {
+fn switch_deleting_a_tracked_link_to_another_project_goes_ahead() {
     let (mut engine, tmp) = test_engine();
     let tmp = tmp.path();
     let shared = tmp.join("shared");

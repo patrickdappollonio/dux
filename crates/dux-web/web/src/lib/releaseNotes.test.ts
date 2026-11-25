@@ -99,9 +99,9 @@ describe("entryIsRenderable", () => {
 })
 
 describe("the invisible-character set", () => {
-  // Regression for a real divergence: `String.prototype.trim` does not trim
-  // U+0085, and Rust's `str::trim` does not trim U+FEFF, so relying on either
-  // language's trim made the two surfaces disagree about the same release body.
+  // `String.prototype.trim` does not trim U+0085, and Rust's `str::trim` does
+  // not trim U+FEFF, so relying on either language's trim would make the two
+  // surfaces disagree about the same release body.
   it("covers what each language's own trim would miss", () => {
     expect("".trim()).not.toBe("") // JS trim misses it...
     expect(stripInvisibleMarkup("")).toBe("") // ...this does not.

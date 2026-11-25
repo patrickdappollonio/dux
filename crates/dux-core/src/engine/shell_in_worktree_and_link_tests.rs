@@ -1,4 +1,5 @@
-//! Review 11: reproductions.
+//! A shell entering a worktree while its removal waits, links judged at their
+//! own path, and a rename the plan accepts.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -100,13 +101,12 @@ fn spawn_shell(cwd: &Path, script: &str) -> (Shell, std::process::Child) {
     (Shell(child.id()), child)
 }
 
-/// The removal's last look at where dux's processes stand (the cwd rule:
-/// a tracked process standing in the folder keeps it) runs BEFORE it waits
-/// for an older overlapping claim. A terminal shell `cd`'d into the
-/// worktree during that wait is never seen, and git deletes the folder
-/// from under it.
+/// The removal's last look at where dux's processes stand (the cwd rule: a
+/// tracked process standing in the folder keeps it) runs AFTER it has waited
+/// for an older overlapping claim, so a terminal shell `cd`'d into the
+/// worktree during that wait is seen and keeps the folder.
 #[test]
-fn review11_a_shell_that_enters_the_worktree_while_the_removal_waits_for_an_overlap_keeps_it() {
+fn a_shell_that_enters_the_worktree_while_the_removal_waits_for_an_overlap_keeps_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -159,7 +159,7 @@ fn review11_a_shell_that_enters_the_worktree_while_the_removal_waits_for_an_over
 
 /// Control: the same shell standing in the worktree BEFORE the delete keeps it.
 #[test]
-fn review11_control_a_shell_already_in_the_worktree_keeps_it() {
+fn control_a_shell_already_in_the_worktree_keeps_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -184,15 +184,14 @@ fn review11_control_a_shell_already_in_the_worktree_keeps_it() {
     assert!(worktree.exists(), "control: removed ({outcome:?})");
 }
 
-/// A branch rename checks `is_being_removed` and then takes its hold with
-/// `let _ =`, on the comment's word that the check on the same thread means
-/// it "cannot be refused". A destructive claim is taken off the engine thread
-/// (the editor and changes-pane routes), so one landing in between refuses
-/// the hold, the refusal is dropped, and the rename is dispatched holding
-/// nothing: a removal of the worktree then neither waits for it nor follows
-/// its new name.
+/// A rename the plan accepts for dispatch always holds its worktree. A
+/// destructive claim is taken off the engine thread (the editor and
+/// changes-pane routes), so one can land between the rename's
+/// `is_being_removed` check and its hold; a rename dispatched holding nothing
+/// would be neither waited for nor followed to its new name by a removal of
+/// the worktree.
 #[test]
-fn review11_a_rename_the_plan_accepts_always_holds_its_worktree() {
+fn a_rename_the_plan_accepts_always_holds_its_worktree() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -252,8 +251,6 @@ fn review11_a_rename_the_plan_accepts_always_holds_its_worktree() {
         "rename {unheld:?} was accepted for dispatch without a hold on its worktree"
     );
 }
-
-// Tests added with the fixes for the eleventh review.
 
 /// A link is judged at its own path: one that IS an agent's recorded folder
 /// is refused, one that merely points at an agent's folder is not (deleting

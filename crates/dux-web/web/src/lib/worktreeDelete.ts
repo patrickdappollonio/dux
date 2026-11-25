@@ -23,9 +23,9 @@ export interface WorktreeDeleteReport {
   tone: FinalTone
   /// Every name (the path, the branch, the command to run) is a chip.
   message: Prose
-  /// See the toast tenet: sticky only when the user must act OUTSIDE the toast
-  /// to recover, or something was left half-done. A refused branch is both, so
-  /// it is the one rung here that pins.
+  /// Sticky only when the user must act OUTSIDE the toast to recover, or
+  /// something was left half-done. A refused branch is both, so it is the one
+  /// rung here that pins.
   sticky: boolean
 }
 
@@ -73,8 +73,8 @@ export function worktreeDeleteReport(
 /// every refusal is a warning, and so is a branch that moved, refused or could
 /// not be checked, while a folder that was already gone is not removed by this
 /// request and is no warning by itself. No outcome is sticky, a warning
-/// included (the user's decision): each one leaves on its tone's normal
-/// window. A left-over record lives as long as its folder or a kept branch
+/// included: each one leaves on its tone's normal window. A left-over record
+/// lives as long as its folder or a kept branch
 /// remains, so a delete that leaves either one, a branch it kept included,
 /// leaves the worktree manager's row in place showing it.
 export function leftoverDeleteReport(

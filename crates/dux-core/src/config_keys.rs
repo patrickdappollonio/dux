@@ -4017,8 +4017,8 @@ port = 3890
     /// in use.
     #[test]
     fn duplicate_project_ids_are_a_start_problem() {
-        let body = "[[projects]]\nid = \"same\"\npath = \"/tmp/review19-a\"\n\n\
-                    [[projects]]\nid = \"same\"\npath = \"/tmp/review19-b\"\n";
+        let body = "[[projects]]\nid = \"same\"\npath = \"/tmp/same-id-a\"\n\n\
+                    [[projects]]\nid = \"same\"\npath = \"/tmp/same-id-b\"\n";
         let config = crate::config::effective_config_from_text(body).expect("loads");
         crate::config_sync::validate_project_records("config.toml", &config.projects)
             .expect_err("dux refuses to start with duplicate project ids");

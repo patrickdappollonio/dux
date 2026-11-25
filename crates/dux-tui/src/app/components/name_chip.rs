@@ -6,10 +6,11 @@
 //! padded by one cell on each side, with no bold and no quotes: the chip is the
 //! delimiter. Swapping the body's pair means a chip reads exactly as well as
 //! the sentence around it, in every theme, with nothing to configure. A padded
-//! chip is exactly as wide as the quoted text it replaces, so a sentence that
-//! used to quote its names keeps its width. It is the terminal counterpart of
-//! the web's inline code chip. The prose around a chip is painted in `text_fg`
-//! on the modal surface, never the host terminal's default foreground.
+//! chip is exactly as wide as the quoted text it replaces, so a sentence keeps
+//! the width of its plain-text spelling, which quotes its names. It is the
+//! terminal counterpart of the web's inline code chip. The prose around a chip
+//! is painted in `text_fg` on the modal surface, never the host terminal's
+//! default foreground.
 //!
 //! Sentences are built as [`Prose`] (constant words and names), including the
 //! ones dux-core shares with the web, and turned into spans only here. A call

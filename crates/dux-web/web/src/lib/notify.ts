@@ -218,7 +218,7 @@ function remeasure(id: string | number, remainingMs: number | null): void {
 }
 
 // sonner restarts a replaced toast's timer from its remaining time, which it only
-// resets when the duration changes: a toast that was once paused and is then
+// resets when the duration changes: a toast that was paused and is then
 // replaced with the same duration would finish early while its bar started
 // over. One millisecond less makes sonner start over too.
 function restartingDuration(id: string | undefined, duration: number): number {

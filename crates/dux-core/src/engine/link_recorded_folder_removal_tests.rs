@@ -1,4 +1,5 @@
-//! Review 12: reproductions.
+//! A standalone agent recorded at a link inside a worktree, and a link's
+//! delete claiming the link, not its target.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -72,11 +73,11 @@ fn pump_until_removed(engine: &mut Engine) -> Result<(), String> {
 }
 
 /// A standalone agent recorded at a symbolic link INSIDE a worktree (the
-/// link points outside it). The containment rule resolves the link before
-/// comparing, so the agent is judged to live outside the worktree; the
-/// worktree's removal then deletes the very path the agent is recorded at.
+/// link points outside it) occupies the worktree: removing the worktree keeps
+/// the path the agent is recorded at, even though resolving the link would
+/// place the agent outside it.
 #[test]
-fn review12_a_worktree_removal_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
+fn a_worktree_removal_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -110,7 +111,7 @@ fn review12_a_worktree_removal_keeps_a_standalone_agent_recorded_at_a_link_insid
 /// The same, for the changes pane deleting an untracked folder that holds
 /// the link a standalone agent is recorded at.
 #[test]
-fn review12_a_changes_pane_folder_delete_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
+fn a_changes_pane_folder_delete_keeps_a_standalone_agent_recorded_at_a_link_inside_it() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -143,14 +144,13 @@ fn review12_a_changes_pane_folder_delete_keeps_a_standalone_agent_recorded_at_a_
 }
 
 /// The TUI discards a file through `Engine::apply(Command::DiscardFile)` on
-/// its UI thread. For an untracked symbolic link that discard now clears the
-/// delete right there: `DestructiveCheck::clear` opens the session database
-/// (whose `open` runs the migration, which begins an IMMEDIATE transaction)
-/// and reads the process table, all on the engine thread. While another
-/// connection holds the database's write lock (the registry's writer, a web
-/// worker), the UI thread sits in SQLite's busy wait.
+/// its UI thread, so discarding an untracked symbolic link must not clear the
+/// delete there: `DestructiveCheck::clear` opens the session database (whose
+/// `open` runs the migration, which begins an IMMEDIATE transaction), and
+/// while another connection holds the write lock (the registry's writer, a
+/// web worker) that would leave the UI thread in SQLite's busy wait.
 #[test]
-fn review12_discarding_an_untracked_link_never_waits_on_the_database_on_the_engine_thread() {
+fn discarding_an_untracked_link_never_waits_on_the_database_on_the_engine_thread() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -183,12 +183,11 @@ fn review12_discarding_an_untracked_link_never_waits_on_the_database_on_the_engi
 }
 
 /// Deleting a symbolic link is judged at the link's own path, never followed:
-/// it leaves its target where it is. But the claim a link's delete takes is
-/// keyed by `path_key`, which canonicalizes the link, so the claim lands on
-/// the TARGET: an operation running in the target refuses the link's delete,
-/// and while the claim lives, the target itself reads as being removed.
+/// it leaves its target where it is, and its claim lands on the link rather
+/// than the canonicalized target, so an operation running in the target does
+/// not refuse the link's delete.
 #[test]
-fn review12_a_links_delete_claims_the_link_not_its_target() {
+fn a_links_delete_claims_the_link_not_its_target() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -220,9 +219,9 @@ fn review12_a_links_delete_claims_the_link_not_its_target() {
 }
 
 /// The other half: while a link's delete holds its claim, the link's target
-/// (another agent's worktree) refuses new work as if it were being removed.
+/// (another agent's worktree) still takes new work.
 #[test]
-fn review12_a_links_claim_does_not_mark_its_target_as_being_removed() {
+fn a_links_claim_does_not_mark_its_target_as_being_removed() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -243,11 +242,10 @@ fn review12_a_links_claim_does_not_mark_its_target_as_being_removed() {
 }
 
 /// The editor's delete holds its own root, then claims the target. A link
-/// pointing at a folder AROUND the root (`up -> ..`) is claimed at its
-/// target, whose holders include the editor's own root hold, so deleting
-/// such a link is refused every time, by the delete itself.
+/// pointing at a folder AROUND the root (`up -> ..`) is claimed at the link,
+/// not at its target, so the editor's own root hold does not refuse it.
 #[test]
-fn review12_the_editor_can_delete_a_link_to_a_folder_around_its_root() {
+fn the_editor_can_delete_a_link_to_a_folder_around_its_root() {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init_repo(&repo);
@@ -269,8 +267,6 @@ fn review12_the_editor_can_delete_a_link_to_a_folder_around_its_root() {
         claim.err()
     );
 }
-
-// Tests added with the fixes for the twelfth review.
 
 /// The engine thread never reads the session database or the process table
 /// for a destructive command: every changes-pane delete (a link, a folder, a

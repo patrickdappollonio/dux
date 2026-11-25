@@ -250,7 +250,7 @@ fn an_old_database_opens_and_every_session_row_survives_intact() {
 
 #[test]
 fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_sessions() {
-    // The genuinely shipped shape nothing used to cover: `agent_sessions` alone.
+    // The first-release shape: `agent_sessions` alone.
     // Every other table in the current schema has to be CREATED, not merely
     // migrated, and the sessions have to come through with their project ids
     // intact even though there are no project rows to point at.
@@ -816,9 +816,9 @@ fn a_migrated_title_is_not_re_frozen_when_a_later_agent_leaves_it_null() {
 fn every_column_added_since_is_nullable_or_defaulted_so_an_older_binary_can_still_insert() {
     // The downgrade property that IS testable in one checkout. An older binary's
     // INSERT names only the columns it knows about, so every column added after
-    // it shipped must be satisfiable without being named. A `not null` column
-    // with no default would make that INSERT fail, which is how an upgrade
-    // becomes a one-way door.
+    // it must be satisfiable without being named. A `not null` column with no
+    // default would make that INSERT fail, which is how an upgrade becomes a
+    // one-way door.
     let (_tmp, path) = old_database();
     let store = SessionStore::open(&path).expect("open");
     drop(store);

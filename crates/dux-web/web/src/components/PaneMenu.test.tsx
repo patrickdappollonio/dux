@@ -245,9 +245,9 @@ describe("the phone's one pane menu", () => {
 })
 
 // A COMPANION TERMINAL'S PANE wears its agent's menu, because the header, the
-// count and the PR chip around it are that agent's. What it must not lose in
-// the bargain is its own verbs: the sidebar row that used to be their only
-// other home is exactly what a narrow window and theater take away.
+// count and the PR chip around it are that agent's. It must keep its own
+// verbs too: the sidebar row is exactly what a narrow window and theater take
+// away.
 describe("an agent's menu over one of its companion terminals", () => {
   const terminalPane = {
     kind: "terminal" as const,

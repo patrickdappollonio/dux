@@ -527,7 +527,8 @@ pub struct AgentLaunchRequest {
 impl AgentLaunchRequest {
     /// Withhold this launch's completion message from the named surfaces
     /// (builder form). Every builder constructs a launch loud, so a site that
-    /// quiets one says which tenet case it fails.
+    /// quiets one says at the site why the quieted message needs no
+    /// confirmation.
     #[must_use]
     pub fn quiet_status_on(mut self, quiet_on: crate::statusline::QuietSurfaces) -> Self {
         self.status_quiet = quiet_on;

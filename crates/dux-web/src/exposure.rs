@@ -2,9 +2,8 @@
 //! Tailscale Funnel, a raw TCP forward onto its port, and the `tailscale serve`
 //! routes that end at it.
 //!
-//! dux used to refuse every request while it saw (or could not rule out) a
-//! Funnel to its port, because it had no login. With the optional password,
-//! that knowledge feeds request classification instead
+//! Whether dux sees (or cannot rule out) a Funnel to its port does not decide
+//! whether it serves; that knowledge feeds request classification
 //! (`crate::auth::provenance`):
 //!
 //! - While anything might hand dux a bare stream from loopback that nobody on
@@ -15,8 +14,7 @@
 //!   confirmed, non-Funnel `tailscale serve` route to dux whose name and port
 //!   its `Host` matches.
 //! - With no password, dux serves whatever it sees and says loudly what that
-//!   exposes (`crate::auth::warnings`): a risky configuration is the owner's
-//!   call.
+//!   exposes (`crate::auth::warnings`).
 //!
 //! The serve loop is the only writer of an [`ExposureCell`]; the Host guard,
 //! the auth layer and every open socket read it. It is a watch channel so a

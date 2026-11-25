@@ -8,7 +8,7 @@ import type { DuxState, SelectedTarget } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
 // THE DOCKED FLAP, the phone's action cluster while theater is off. What is
-// pinned here is what the mock is a spec about: which four controls it carries,
+// pinned here is what the design is a spec about: which four controls it carries,
 // that its silhouette is generated from its own measured box rather than drawn
 // at a fixed width, and that its body takes the color of whichever band it is
 // hanging from.

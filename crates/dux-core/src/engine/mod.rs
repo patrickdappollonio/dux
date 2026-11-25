@@ -36,49 +36,49 @@ pub mod status_op;
 #[cfg(test)]
 mod classic_keys_tests;
 #[cfg(test)]
+mod clean_quit_removal_tests;
+#[cfg(test)]
+mod discard_deleted_tracked_file_tests;
+#[cfg(test)]
+mod dormant_worktree_removal_tests;
+#[cfg(test)]
 mod folder_removal_tests;
 #[cfg(test)]
-mod races_review2_tests;
+mod guarded_switch_link_tests;
 #[cfg(test)]
-mod races_review3_tests;
+mod leaderless_job_removal_tests;
 #[cfg(test)]
-mod races_review4_tests;
+mod link_hold_and_claim_tests;
 #[cfg(test)]
-mod races_review5_tests;
+mod link_recorded_folder_removal_tests;
 #[cfg(test)]
-mod races_review6_tests;
+mod nested_folder_removal_tests;
 #[cfg(test)]
-mod removal_review_tests;
+mod project_added_during_delete_tests;
 #[cfg(test)]
-mod review10_tests;
+mod pull_guard_tests;
 #[cfg(test)]
-mod review11_tests;
+mod recursing_switch_tests;
 #[cfg(test)]
-mod review12_tests;
+mod removal_coordination_tests;
 #[cfg(test)]
-mod review13_tests;
+mod removal_project_and_registry_tests;
 #[cfg(test)]
-mod review14_tests;
+mod restore_file_over_held_path_tests;
 #[cfg(test)]
-mod review15_tests;
+mod resumed_removal_session_tests;
 #[cfg(test)]
-mod review17_tests;
+mod shell_in_worktree_and_link_tests;
 #[cfg(test)]
-mod review19_tests;
+mod switch_link_to_other_project_tests;
 #[cfg(test)]
-mod review20_tests;
+mod switch_overwrite_tests;
 #[cfg(test)]
-mod review21_tests;
+mod switch_removal_tests;
 #[cfg(test)]
-mod review22_tests;
+mod switch_tracked_link_tests;
 #[cfg(test)]
-mod review23_tests;
-#[cfg(test)]
-mod review24_tests;
-#[cfg(test)]
-mod review8_tests;
-#[cfg(test)]
-mod review_nested_folder_tests;
+mod terminal_in_worktree_removal_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -196,7 +196,7 @@ pub struct GhProbeState {
     /// When the most recent probe was SPAWNED, which is what the periodic
     /// re-check counts from. Stamped at spawn rather than at completion so a
     /// probe that is still running cannot be joined by a second one every tick,
-    /// and it is wall-clock elapsed time per the animation/refresh tenet.
+    /// and it is wall-clock elapsed time.
     /// `None` until the first probe, which the surfaces spawn at startup.
     pub(crate) last_probe_at: Option<Instant>,
     /// Set when the probe now in flight was asked for BY THE USER, so its
@@ -915,7 +915,7 @@ pub struct Engine {
     pub pty_used: HashSet<String>,
     /// Tabs (keyed by tab id) that have raised a "needs attention" signal that
     /// has not yet been looked at. Memory-only runtime state, never persisted.
-    /// Like `working`/`has_output`, it does not survive a restart, by tenet.
+    /// Like `working`/`has_output`, it does not survive a restart.
     /// Populated by [`Engine::poll_agent_signals`] (which suppresses a signal on
     /// a tab the user is engaged with) and cleared when the user looks at or
     /// tears down the tab. The sidebar rolls this up across an agent's tabs.
@@ -962,7 +962,7 @@ pub struct Engine {
     /// [`Engine::refresh_terminal_foregrounds`] throttles itself against this so
     /// callers can invoke it every tick while the actual `tcgetpgrp` probe runs
     /// at most once per [`FOREGROUND_REFRESH_INTERVAL`]. `None` until the first
-    /// refresh runs. Wall-clock (not tick counts) per the design tenet.
+    /// refresh runs. Wall-clock, not tick counts.
     pub last_foreground_refresh: Option<Instant>,
 
     /// Web-side `HandlerStatusOp`s awaiting completion, keyed by the op's opaque
@@ -2010,18 +2010,17 @@ pub(crate) const POINTER_REPAINT_WINDOW: Duration = Duration::from_millis(1250);
 /// a user who clicks and then watches for the Working cue should see it appear
 /// promptly rather than after more than a second of a blank row. Half a second
 /// covers the repaint a click provokes with room to spare while keeping that
-/// wait short. Wall-clock, per the design tenet.
+/// wait short. Wall-clock.
 pub(crate) const POINTER_CLICK_REPAINT_WINDOW: Duration = Duration::from_millis(500);
 
 /// How long a forwarded pointer report suppresses the output-activity
 /// heuristic, or `None` if it suppresses nothing at all.
 ///
-/// MOTION suppresses nothing, and that is a deliberate choice rather than a
-/// user instruction, so it should be easy to reverse if it proves wrong: a move
-/// is not a discrete user action, an app using any-event tracking (DECSET 1003)
-/// emits one for every cell the pointer crosses, and arming a window on each of
-/// them would keep a genuinely busy agent reading idle for as long as somebody
-/// drifted the mouse across its pane. Nobody asked for that.
+/// MOTION suppresses nothing: a move is not a discrete user action, an app
+/// using any-event tracking (DECSET 1003) emits one for every cell the pointer
+/// crosses, and arming a window on each of them would keep a genuinely busy
+/// agent reading idle for as long as somebody drifted the mouse across its
+/// pane. It is easy to reverse if it proves wrong.
 ///
 /// Pure, so both surfaces and the tests agree without an engine.
 pub fn pointer_suppression_window(report: crate::pty::PointerReport) -> Option<Duration> {
@@ -2057,14 +2056,14 @@ impl PointerStamp {
 /// stream it many times a second while busy, so any real gap this long means the
 /// report channel has gone quiet and the heuristic should take over. This also
 /// bounds how long a crashed agent's last "working" report can linger before the
-/// spinner settles. Wall-clock, per the design tenet.
+/// spinner settles. Wall-clock.
 pub(crate) const PROGRESS_AUTHORITY_WINDOW: Duration = Duration::from_secs(10);
 
 /// How long after the user last looked at a tab (TUI focus, web PTY subscribe)
 /// an attention signal on that tab stays suppressed/cleared. Must comfortably
 /// exceed a surface's tick cadence so continuously viewing a tab keeps its
 /// attention flag from ever rising. Typing suppression is separate
-/// ([`AGENT_INPUT_SUPPRESSION_WINDOW`]). Wall-clock, per the design tenet.
+/// ([`AGENT_INPUT_SUPPRESSION_WINDOW`]). Wall-clock.
 pub(crate) const ATTENTION_ENGAGED_WINDOW: Duration = Duration::from_secs(3);
 
 /// Whether the user is currently "engaged" with a tab and so should not be
@@ -2164,8 +2163,7 @@ enum GhReprobe {
 /// How often [`Engine::refresh_terminal_foregrounds`] actually probes companion
 /// terminals for their foreground command. Calls more frequent than this are
 /// no-ops, so every surface can invoke the refresh once per (sub-second) tick
-/// and still get the same ~2s cadence. Wall-clock, not tick counts, per the
-/// "periodic refreshes use wall-clock time" design tenet.
+/// and still get the same ~2s cadence. Wall-clock, not tick counts.
 pub(crate) const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long an entry in [`Engine::created_session_by_op`] stays addressable by a
@@ -2475,8 +2473,8 @@ fn branch_sync_should_poll(interval_secs: u64) -> bool {
 }
 
 /// Rewrite an absolute path under the user's home directory to the portable
-/// `$HOME/...` form so config.toml stays machine-independent (the tenet:
-/// "Project config is portable desired state"). Paths outside `$HOME`, or when
+/// `$HOME/...` form so config.toml stays machine-independent (project
+/// config is portable desired state). Paths outside `$HOME`, or when
 /// the home directory cannot be resolved, are returned unchanged. `expand_path`
 /// is the inverse applied on load. Mirrors the TUI's `portable_project_path` so
 /// both surfaces write identical config regardless of which one added the project.
@@ -4391,9 +4389,8 @@ impl Engine {
     /// That flag is what [`Self::spawn_changed_files_poller`] reads to pick its
     /// cadence (2s while something runs, 10s while nothing does), so whichever
     /// surface owns the loop has to call this once per iteration, AFTER the work
-    /// that starts and ends processes. Only the TUI used to do it; `dux server`
-    /// never stored to the flag at all and so polled on the idle cadence with
-    /// every agent in the workspace running.
+    /// that starts and ends processes. Without it `dux server` would poll on
+    /// the idle cadence with every agent in the workspace running.
     pub fn sync_has_active_processes(&self) {
         self.has_active_processes
             .store(self.running_process_count() > 0, Ordering::Relaxed);
@@ -8468,8 +8465,8 @@ mod tests {
     }
 
     /// "Nobody has looked yet" reads as a wait, not as a fault on the user's
-    /// machine. A freshly created agent in a healthy repository spends a moment
-    /// in this state, and it used to be told to check that git was installed.
+    /// machine: a freshly created agent in a healthy repository spends a moment
+    /// in this state, and it must not be told to check that git is installed.
     #[test]
     fn an_unprobed_folder_is_not_reported_as_a_broken_git() {
         let (mut engine, _tmp) = test_engine();
@@ -8549,11 +8546,11 @@ mod tests {
 
     /// A probe whose THREAD never started must give the in-flight key back.
     ///
-    /// `spawn_loop_worker` does not clear keys on a spawn failure, and only the
-    /// `FolderRepoStatusReady` handler clears this one, so a single failed spawn
-    /// used to pin the key for the rest of the run: the folder answered
-    /// `Unprobed` forever, its changes panel stayed quiet, its mutations were
-    /// refused, and nothing short of a restart healed it.
+    /// `spawn_loop_worker` does not clear keys on a spawn failure, and the
+    /// `FolderRepoStatusReady` handler never runs for a thread that never
+    /// started, so a key not given back would stay pinned for the rest of the
+    /// run: the folder would answer `Unprobed` forever, its changes panel stay
+    /// quiet, its mutations be refused, and nothing short of a restart heal it.
     #[test]
     fn a_folder_repo_probe_that_cannot_spawn_re_arms_the_next_ask() {
         let (mut engine, tmp) = test_engine();
@@ -9114,7 +9111,7 @@ mod tests {
 
     #[test]
     fn validate_project_add_path_still_accepts_a_bare_repo_root() {
-        // Regression guard for shipped bare-repo support.
+        // Bare-repo roots stay accepted.
         let (engine, _tmp) = test_engine();
         let bare = tempfile::tempdir().unwrap();
         let out = crate::git::test_support::git_command()
@@ -10260,8 +10257,8 @@ mod tests {
     #[test]
     fn persist_projects_to_config_writes_portable_home_path() {
         // A project under $HOME must be written to config.toml in the portable
-        // `$HOME/...` form, not a machine-specific absolute path (the "portable
-        // desired state" tenet). The inline-Add handler is now the single config
+        // `$HOME/...` form, not a machine-specific absolute path (project config is
+        // portable desired state). The inline-Add handler is the single config
         // writer, so this guards against it pinning an absolute path.
         let Some(home) = home::home_dir() else {
             return; // no resolvable home in this environment; nothing to assert.
@@ -10913,11 +10910,9 @@ mod tests {
 
     #[test]
     fn project_add_config_failure_does_not_resurrect_phantom_on_next_save() {
-        // Prove that a rolled-back add does NOT pollute self.config.projects so
-        // the phantom project cannot be written to disk by the next unrelated
-        // eager save. Without the fix, persist_projects_to_config() rewrote
-        // self.config.projects before failing, and the next eager save (e.g.
-        // PersistGlobalEnv) would clone that mutated config and write the ghost.
+        // A rolled-back add must NOT pollute self.config.projects, so the
+        // phantom project cannot be written to disk by the next unrelated eager
+        // save (e.g. PersistGlobalEnv clones the config and writes it).
         let (mut engine, tmp) = test_engine();
 
         // Point the writer at a nonexistent path to force the initial add to fail.
@@ -11247,11 +11242,10 @@ mod tests {
             "the surface still sees the config from before the reload"
         );
 
-        // The deferred env change survives IN MEMORY after the reload; this is
-        // the regression guard. Simulate the surface re-applying the reaction it
-        // was handed: under the bug this pins, the reaction carried the BARE
-        // reloaded config (no env), so re-applying would wipe the env back out
-        // of memory.
+        // The deferred env change survives IN MEMORY after the reload.
+        // Simulate the surface re-applying the reaction it was handed: the
+        // reaction must carry the env, not the BARE reloaded config, or
+        // re-applying would wipe the env back out of memory.
         let EventReaction::Multi(reactions) = reaction else {
             panic!("expected Multi");
         };
@@ -14476,10 +14470,10 @@ mod tab_ops_tests {
 
     #[test]
     fn close_tab_detaches_the_agent_when_it_was_the_last_live_tab() {
-        // G-T5: the last-tab-detach branch of `close_tab` had no test asserting
-        // the resulting session status. Seed a real live PTY for the extra tab
-        // (and none for the session-slot tab) so the session starts Active, then
-        // assert closing that tab flips it to Detached.
+        // The last-tab-detach branch of `close_tab` sets the resulting session
+        // status. Seed a real live PTY for the extra tab (and none for the
+        // session-slot tab) so the session starts Active, then assert closing
+        // that tab flips it to Detached.
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         let mut session = sample_session("s1", "p1", "feat");
@@ -14515,7 +14509,7 @@ mod tab_ops_tests {
 
     #[test]
     fn close_tab_with_a_live_sibling_stays_active() {
-        // G-T5 companion case: closing a tab while another tab of the SAME
+        // Companion case: closing a tab while another tab of the SAME
         // agent is still live must leave the session Active, not detach it.
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -15461,9 +15455,9 @@ mod tab_ops_tests {
     #[test]
     fn reconnect_after_a_promotion_launches_the_promoted_slot_tab() {
         // The reconnect path builds its request from the session's POINTER, not
-        // from the session id and not from whichever provider used to be in the
-        // slot: after a promotion it must launch the promoted tab, running the
-        // provider that tab was already configured for.
+        // from the session id and not from the provider the slot first held:
+        // after a promotion it must launch the promoted tab, running the
+        // provider that tab was configured for.
         let (mut engine, tmp) = test_engine();
         agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
 

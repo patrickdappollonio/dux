@@ -2,7 +2,7 @@
 
 A suite of scripted checks that drive the web UI in a real browser against the
 preview container and say, one line per check, whether a behaviour still holds.
-They are the checks that used to be re-scripted by hand after most web UI
+They are the checks that would otherwise be re-scripted by hand after most web UI
 changes: dialog shapes and focus, the discard question, the New agent create
 and its wait, toasts on a phone, the Delete agent pill, the macro picker, the
 phone editor, Preferences and the browser's Back, and one driver at a time.

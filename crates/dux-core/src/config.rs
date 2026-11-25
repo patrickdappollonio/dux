@@ -16,8 +16,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The `effective_*` functions that used to live here, under the module path
-/// their callers already reach them by.
+/// The `effective_*` functions live in `config_effective`, re-exported under
+/// the module path their callers reach them by.
 pub use crate::config_effective::{
     effective_agent_tabs_max, effective_log_keep, effective_log_viewer_lines,
     effective_pr_history_branches_per_cycle, effective_pr_poll_inactive_interval_seconds,
@@ -1019,8 +1019,7 @@ pub struct ServerConfig {
     /// string. An unrecognized value degrades to `"auto"` with one warning at
     /// load ([`tailscale_load_warning`]), the `ui.compose_bar` precedent.
     ///
-    /// The BOOLEAN this setting used to be (`tailscale_enabled`) keeps working:
-    /// it is rewritten to this key on load by
+    /// The boolean form (`tailscale_enabled`) is rewritten to this key on load by
     /// [`crate::config_migrate::apply_load_migrations`] (`true` to `"yes"`,
     /// `false` to `"no"`), and this field also accepts a bare boolean of its own
     /// so `tailscale = true` parses (see [`deserialize_tailscale`]).
@@ -1475,10 +1474,10 @@ pub struct ProviderCommandConfig {
 /// The receiving end is an agent CLI, not a shell, and the CLIs do not agree on
 /// how they read a pasted path: each takes the whole pasted string and normalizes
 /// it its own way before deciding whether it names a file. The right form is
-/// therefore a property of the CLI, which is why this is a per-provider setting a
-/// maintainer can extend rather than a rule baked in here. Every row below was
-/// produced by running the CLI's own normalizer over the exact bytes dux sends, so
-/// a new row belongs here only once someone has run the new CLI the same way.
+/// therefore a property of the CLI, which is why this is a per-provider setting
+/// rather than a rule baked in here. Every row below was produced by running the
+/// CLI's own normalizer over the exact bytes dux sends, so a new row is added, by
+/// pull request, only once someone has run the new CLI the same way.
 ///
 /// | CLI                 | What it does to a pasted path                                           | Form it needs   |
 /// |---------------------|-------------------------------------------------------------------------|-----------------|
@@ -1693,8 +1692,8 @@ impl ComposeBarMode {
     }
 }
 
-/// Accept BOTH the current `ui.compose_bar` string and the BOOLEAN this setting
-/// used to be, so upgrading dux never fails to parse a config a user already
+/// Accept BOTH the current `ui.compose_bar` string and the BOOLEAN form of this
+/// setting, so upgrading dux never fails to parse a config a user already
 /// has on disk.
 ///
 /// The migration is the meaning-preserving one: `true` was "show the bar on the
@@ -2058,8 +2057,8 @@ pub struct UiConfig {
     /// shared preference, not a per-session override.
     pub always_show_tab_strip: bool,
     /// Hand `Tab` and `Shift-Tab` to a live agent in the typeable center pane
-    /// instead of cycling panes with them. Default false, because Tab has moved
-    /// between panes since dux's first version. The pane chords bound to
+    /// instead of cycling panes with them. Default false, because Tab moves
+    /// between panes by default. The pane chords bound to
     /// `focus_next`/`focus_prev` move panes whatever this is set to.
     pub tab_reaches_agent: bool,
     /// Whether the terminal UI asks its host terminal for extended keys (the
@@ -5770,7 +5769,7 @@ fn prune_invalid_fields(section: &str, tbl: &toml::Table) -> Option<(toml::Table
 }
 
 /// True if a document containing only `section = value` deserializes into a
-/// `Config` (every other section defaulted). Used to test one section at a time.
+/// `Config` (every other section defaulted). Tests one section at a time.
 fn section_solo_ok(section: &str, value: toml::Value) -> bool {
     let mut t = toml::Table::new();
     t.insert(section.to_string(), value);
@@ -6340,9 +6339,8 @@ fn is_executable_file(path: &Path) -> bool {
 /// merely BEST-EFFORT.
 ///
 /// - `required: true`: a deliberate listener (the configured `host:port` or an
-///   explicit `--bind`). A bind failure here is FATAL per the explicit-failure
-///   tenet: the operator asked for this address, so refusing to serve it silently
-///   would hide their intent.
+///   explicit `--bind`). A bind failure here is FATAL: the operator asked for
+///   this address, so refusing to serve it silently would hide their intent.
 /// - `required: false`: an opportunistic add-on. Today this is ONLY the
 ///   Tailscale leg of LOCAL MODE: it is auto-added when a Tailscale address is
 ///   detected, mirroring how tailscale-NOT-detected already degrades to loopback
@@ -7159,12 +7157,10 @@ mod tests {
         //
         // The last three are a different kind of unusable: they name a shape
         // the filesystem itself will refuse. They are checked HERE, at load,
-        // because the alternative is what shipped: the value passes, the
-        // directory is even created for the control-character case, and then
-        // every single drop fails at the syscall with a message about the wrong
-        // thing entirely (`Invalid argument` for a NUL, `File name too long`
-        // for an over-long one). Catching them at load is the whole point of
-        // the warn-once-and-degrade design.
+        // because otherwise the value passes and every single drop fails at the
+        // syscall with a message about the wrong thing (`Invalid argument` for a
+        // NUL, `File name too long` for an over-long one). Catching them at load
+        // is the point of the warn-once-and-degrade design.
         let long_component = "a".repeat(crate::file_drop::FALLBACK_NAME_MAX_BYTES + 1);
         let long_path = "ab/".repeat(MAX_UPLOAD_DIRECTORY_BYTES / 3 + 1);
         let cases = [
@@ -7494,13 +7490,11 @@ mod tests {
     }
 
     /// The config file is what the shipped template comment promises is made
-    /// `0600` on EVERY start, and it was the one file nothing tightened.
-    /// `write_config_atomic` creates its temp at `0600` and renames over the
-    /// original, which is why a fresh install looks correct, but that only runs
-    /// on first creation or when a save actually changes the document, so a
-    /// `config.toml` chmod'd to `0644` by hand stayed `0644` forever while the
-    /// log and the database were corrected on every open. It holds `[env]`
-    /// tokens, so it is the file the promise mattered most for.
+    /// `0600` on EVERY start. `write_config_atomic` creates its temp at `0600`
+    /// and renames over the original, but that only runs on first creation or
+    /// when a save changes the document, so a `config.toml` chmod'd to `0644` by
+    /// hand must be tightened by the startup pass, as the log and the database
+    /// are. It holds `[env]` tokens, so the promise matters most here.
     #[test]
     fn ensure_dirs_tightens_a_config_file_left_world_readable() {
         use std::os::unix::fs::PermissionsExt;
@@ -7556,15 +7550,14 @@ mod tests {
     }
 
     /// The worktrees directory holds the user's own checkouts, which they open
-    /// in their own editor. dux does not tighten it; it sits inside the
-    /// now-`0700` root, which is where the protection belongs.
+    /// in their own editor. dux does not tighten it; it sits inside the `0700`
+    /// root, which is where the protection belongs.
     ///
-    /// The GROUP AND OTHER bits are what this test is actually about. It used
-    /// to assert `mode & 0o700 == 0o700`, which is equally true of `0755` and
-    /// `0700`, so tightening the worktrees directory left it passing and the
-    /// tenet it exists to defend was unprotected. The directory is pre-created
-    /// at a known `0755` so the assertion does not depend on the test runner's
-    /// umask.
+    /// The GROUP AND OTHER bits are what this test is about: an owner-bits
+    /// check (`mode & 0o700 == 0o700`) is equally true of `0755` and `0700`,
+    /// so it would pass with the directory tightened. The directory is
+    /// pre-created at a known `0755` so the assertion does not depend on the
+    /// test runner's umask.
     #[test]
     fn ensure_dirs_leaves_the_worktrees_directory_untightened() {
         use std::os::unix::fs::PermissionsExt;
@@ -8604,10 +8597,10 @@ auth = { minimum_password_score = 9 }
         }
     }
 
-    /// #30: the ONE server-host parser is trimming and shared, so a config with
+    /// The ONE server-host parser is trimming and shared, so a config with
     /// surrounding whitespace parses consistently at the early check and at
-    /// `resolve_server_plan` (which previously parsed untrimmed and failed a
-    /// value the TUI's trimming check had accepted).
+    /// `resolve_server_plan`, and never fails a value the TUI's trimming check
+    /// accepts.
     #[test]
     fn parse_server_host_trims_and_parses() {
         assert_eq!(
@@ -8647,14 +8640,14 @@ auth = { minimum_password_score = 9 }
         assert_eq!(config.server.port, 9000);
     }
 
-    /// #31: an untouched stock block for a retired provider (gemini) must be
+    /// An untouched stock block for a retired provider (gemini) must be
     /// pruned IN MEMORY by `load_config` so `dux serve`'s provider pickers stop
-    /// offering it (previously only the TUI's `ensure_config` pruned it).
+    /// offering it, not only the TUI's `ensure_config`.
     #[test]
     fn load_config_prunes_a_retired_stock_provider_in_memory() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_test_paths(dir.path());
-        // The exact stock gemini block dux shipped (as its renderer wrote it).
+        // The exact stock gemini block of an earlier template (as its renderer wrote it).
         std::fs::write(
             &paths.config_path,
             "[providers.gemini]\ncommand = \"gemini\"\nargs = []\nresume_args = [\"--resume\"]\nresume_wait_timeout_ms = 0\ninstall_hint = \"brew install gemini-cli\"\n",
@@ -8668,7 +8661,7 @@ auth = { minimum_password_score = 9 }
         );
     }
 
-    /// #31: a CUSTOMIZED block for a retired provider is preserved (config wins
+    /// A CUSTOMIZED block for a retired provider is preserved (config wins
     /// for explicit preferences).
     #[test]
     fn load_config_keeps_a_customized_retired_provider() {
@@ -9061,10 +9054,9 @@ github_integration = false
 
     #[test]
     fn the_legacy_boolean_form_of_the_tailscale_key_still_parses() {
-        // A user who writes the shape this setting used to have gets the
-        // meaning-preserving mode, not a failed parse. `true` is "bind it" (yes),
-        // `false` is "do not" (no); neither says "keep watching", so neither is
-        // auto.
+        // The boolean form of this setting gets the meaning-preserving mode, not
+        // a failed parse. `true` is "bind it" (yes), `false` is "do not" (no);
+        // neither says "keep watching", so neither is auto.
         let yes: Config = toml::from_str("[server]\ntailscale = true\n").expect("bool parses");
         assert_eq!(yes.server.tailscale_mode(), TailscaleMode::Yes);
         let no: Config = toml::from_str("[server]\ntailscale = false\n").expect("bool parses");
@@ -10046,11 +10038,10 @@ mod agent_tabs_cap_tests {
 
     #[test]
     fn a_provider_is_identified_by_its_command_file_name_not_its_block_name() {
-        // The two are independent, and the per-CLI paste-length table used to be
-        // keyed by the BLOCK NAME, which is free text. Both directions were
-        // wrong: a real Codex under any other name escaped its limit and was
-        // handed oversized paths it silently ignores, and an unrelated CLI
-        // merely NAMED codex had valid long paths withheld from it.
+        // The two are independent, and the per-CLI paste-length table is keyed
+        // by the command, never the BLOCK NAME, which is free text: a real Codex
+        // under any other name keeps its limit, and an unrelated CLI merely
+        // NAMED codex gets no limit.
         let config: Config = toml::from_str(
             "[providers.myagent]\ncommand = \"codex\"\n\
              [providers.codex]\ncommand = \"something-else\"\n",
@@ -10184,8 +10175,8 @@ mod agent_tabs_cap_tests {
         assert!(warning.contains("never"), "{warning}");
     }
 
-    /// The BOOLEAN this setting used to be still deserializes, meaning
-    /// preserved, so an upgrade never fails to parse a config already on disk.
+    /// The boolean form of this setting still deserializes, meaning preserved,
+    /// so an upgrade never fails to parse a config already on disk.
     /// (`tests/upgrade_config.rs` covers the same thing through `load_config`;
     /// this pins the deserializer itself.)
     #[test]

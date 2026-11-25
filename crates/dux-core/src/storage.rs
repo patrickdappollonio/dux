@@ -3490,7 +3490,7 @@ impl SessionStore {
     /// `0..n` over every session. A shared value is therefore the fingerprint
     /// of a fresh (all-zero) column whose backfill a crash stranded between the
     /// autocommitted ALTER and the backfill, or of a legacy per-project
-    /// numbering that must be globalized. Used to make the one-time backfill
+    /// numbering that must be globalized. It makes the one-time backfill
     /// retryable; once positions are globally distinct it never re-runs.
     fn session_sort_order_needs_backfill(conn: &Connection) -> Result<bool> {
         let has_duplicates: bool = conn.query_row(
@@ -6751,7 +6751,7 @@ mod tests {
 
     #[test]
     fn second_migrate_does_not_freeze_a_null_title_inserted_after_upgrade() {
-        // Regression: the title/initial_branch backfills must run EXACTLY ONCE
+        // The title/initial_branch backfills must run EXACTLY ONCE
         // (when the initial_branch column is first added), not on every open().
         // A store built by legacy_store_with_sessions has already migrated once,
         // so the initial_branch column now exists. Insert a fresh auto-named

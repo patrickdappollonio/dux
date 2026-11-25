@@ -328,8 +328,8 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 // the dialog: a spinner while git is asked, a check once it answered that
 // nothing would be lost, and an alert in the warning tone when commits would
 // be lost or git could not answer. Quiet grey and a soft yellow rather than
-// green and strong tints, by the user's decision of 2026-11-23: the pill
-// informs, the boxes and the loss warning under them are what ask for care.
+// green and strong tints: the pill informs, the boxes and the loss warning
+// under them are what ask for care.
 // Every state has an icon of its own, so the tone is never the only signal.
 // The icon sits on the first line however many the text wraps to, and a pill
 // that wraps becomes a rounded rectangle, since a capsule that tall has

@@ -319,8 +319,8 @@ describe("the app menu the pill carries", () => {
   })
 
   it("keeps the way out inside the one menu as well", async () => {
-    // The tenet's own reason: whatever else the mode hides, the way back is
-    // inside the `⋯` a user can always find.
+    // Whatever else the mode hides, the way back is inside the `⋯` a user can
+    // always find.
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
     const item = screen
@@ -334,10 +334,9 @@ describe("the app menu the pill carries", () => {
 
 describe("the floating theater pill", () => {
   it("always carries the way out, as the cluster's own theater toggle", () => {
-    // ONE CONTROL, NOT TWO. The computer's pill used to carry a dedicated exit
-    // button beside the toggle-less cluster it did not have; the unified pill
-    // has the toggle at its head, and because the pill only exists while the
-    // mode is on, that toggle IS the exit and says so.
+    // ONE CONTROL, NOT TWO. The computer's pill has no dedicated exit button
+    // beside the toggle; the toggle is at its head, and because the pill only
+    // exists while the mode is on, that toggle IS the exit and says so.
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     const exit = screen.getByTestId("pane-theater-toggle")
     expect(exit.getAttribute("aria-label")).toBe("Leave theater mode")

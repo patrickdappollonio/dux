@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
-// Pins the shipped viewport meta in index.html. Every directive on it is
-// deliberate and was measured on real devices before it shipped; this test is
+// Pins the viewport meta in index.html. Every directive on it is
+// deliberate and was measured on real devices; this test is
 // where the reasoning lives, so editing the meta means reading this first.
 //
 //  - interactive-widget=resizes-content: the soft keyboard shrinks the LAYOUT

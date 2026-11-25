@@ -1,12 +1,10 @@
-//! Adversarial review (second pass): an editor write holds its editor ROOT,
-//! never the path it writes. A terminal's editor is rooted at the folder the
-//! terminal started in, and that folder can contain an agent's worktree (a
-//! standalone terminal starts in the home folder, which holds dux's worktrees
-//! root by default; a project terminal starts at the repository root, which
-//! holds any worktree kept inside the repository, such as `.worktrees/`). A
-//! write through such an editor into a worktree whose removal has begun is
-//! neither refused nor waited for, and a folder created there after git
-//! removed the worktree brings the worktree's folder back.
+//! A terminal's editor is rooted at the folder the terminal started in, and
+//! that folder can contain an agent's worktree (a standalone terminal starts
+//! in the home folder, which holds dux's worktrees root by default; a project
+//! terminal starts at the repository root, which holds any worktree kept
+//! inside the repository, such as `.worktrees/`). A write through such an
+//! editor into a worktree whose removal has begun is refused, so a folder
+//! created there cannot bring the removed worktree's folder back.
 
 use std::net::SocketAddr;
 
@@ -114,7 +112,7 @@ async fn a_terminal_editor_cannot_write_into_a_worktree_being_removed() {
     let _removal = ops.announce_removal(&worktree);
     assert!(ops.is_being_removed(&worktree));
 
-    // The agent's own editor is refused, as the branch intends...
+    // The agent's own editor is refused...
     let resp = client
         .post(format!("http://{addr}/api/v1/sessions/s1/files/write"))
         .json(&serde_json::json!({ "path": "own.txt", "content": "x" }))
@@ -123,7 +121,7 @@ async fn a_terminal_editor_cannot_write_into_a_worktree_being_removed() {
         .unwrap();
     assert_eq!(resp.status(), 409, "the agent's own editor is refused");
 
-    // ...but the same write through the project terminal's editor lands.
+    // ...and so is the same write through the project terminal's editor.
     let resp = client
         .post(format!("{prefix}/write"))
         .json(&serde_json::json!({ "path": ".worktrees/agent/new.txt", "content": "x" }))
@@ -133,7 +131,7 @@ async fn a_terminal_editor_cannot_write_into_a_worktree_being_removed() {
     let status = resp.status();
     let landed = worktree.join("new.txt").exists();
     // And once git has removed the folder, a folder created through the same
-    // editor brings the worktree's folder back.
+    // editor must not bring the worktree's folder back.
     std::fs::remove_dir_all(&worktree).unwrap();
     let resp = client
         .post(format!("{prefix}/create-dir"))

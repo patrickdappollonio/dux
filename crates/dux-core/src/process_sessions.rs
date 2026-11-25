@@ -3032,14 +3032,13 @@ mod tests {
         assert!(registry.recordings_settled_within(Duration::ZERO).is_ok());
     }
 
-    /// Review 26: a factory reset promises it "never kills a process whose
-    /// folder it can't read; it keeps that folder instead". It ends exactly
-    /// `session_processes_where(..).inside`, judged one process at a time,
-    /// and a process whose OWN folder cannot be read lands in `inside` (not
-    /// `unknown`) whenever its shell stands in the folder: so the reset
-    /// signals a process whose working directory it never read.
+    /// A factory reset never kills a process whose folder it can't read; it
+    /// keeps that folder instead. It ends exactly
+    /// `session_processes_where(..).inside`, judged one process at a time, so
+    /// a process whose OWN folder cannot be read is never put in `inside`, even
+    /// when its shell stands in the folder.
     #[test]
-    fn review26_a_process_whose_folder_cannot_be_read_is_never_counted_inside() {
+    fn a_process_whose_folder_cannot_be_read_is_never_counted_inside() {
         let folder = crate::worktree_ops::path_key(std::path::Path::new("/work/wt"));
         let shell = row(100, 1, 100);
         let job = row(101, 100, 100);
@@ -3529,14 +3528,14 @@ mod tests {
         );
     }
 
-    /// review9: a removal must keep the worktree when the registry's record
-    /// could not be saved before git runs (`record_not_saved`, whose sentence
-    /// names "the session database may be busy"). A busy database makes the
-    /// writer's write FAIL after SQLite's busy timeout, and the writer then
-    /// counts the change as done, so `flush` answers "saved" and git runs
-    /// with nothing written.
+    /// A removal must keep the worktree when the registry's record could not
+    /// be saved before git runs (`record_not_saved`, whose sentence names "the
+    /// session database may be busy"). A busy database makes the writer's
+    /// write FAIL after SQLite's busy timeout, and the writer must not count
+    /// that change as done: `flush` answers "saved" only when the record
+    /// reached the database.
     #[test]
-    fn review9_flush_does_not_report_saved_when_the_database_was_busy() {
+    fn flush_does_not_report_saved_when_the_database_was_busy() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("sessions.sqlite3");
         drop(crate::storage::SessionStore::open(&db).unwrap());
@@ -3669,12 +3668,12 @@ mod tests {
         );
     }
 
-    /// review9: the persisted registry entry carries the session's label, so a
+    /// The persisted registry entry carries the session's label, so a
     /// refusal after a restart still names WHAT is standing in the folder
     /// (here a project terminal), not "a process dux started".
     #[cfg(target_os = "linux")]
     #[test]
-    fn review9_a_restart_keeps_what_each_session_is_called() {
+    fn a_restart_keeps_what_each_session_is_called() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("sessions.sqlite3");

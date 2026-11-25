@@ -811,10 +811,10 @@ describe("the snapshot and the mode are one decision", () => {
   }
 
   it("holds when the editor opens onto a pane that remembers the mode", async () => {
-    // The order this used to get wrong: the editor's suspend is decided
-    // against the pane being left, and the selection's entry against the pane
-    // being arrived at. Read separately they disagree, and the commit kept the
-    // suspend's flag with the entry's snapshot.
+    // The editor's suspend is decided against the pane being left, and the
+    // selection's entry against the pane being arrived at. Read separately they
+    // disagree, and the commit would keep the suspend's flag with the entry's
+    // snapshot.
     const mod = await loadStore("", [
       { id: "s1", project_id: "p1" },
       { id: "s2", project_id: "p1" },

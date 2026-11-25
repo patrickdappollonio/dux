@@ -1,4 +1,5 @@
-//! Review 19: reproductions.
+//! A guarded switch or pull keeps a linked standalone folder, even when
+//! `.gitmodules` says `ignore = all` for its path.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -62,7 +63,7 @@ fn pull(engine: &mut Engine, checkout: &Path) -> Result<crate::worker::PullOutco
 /// Upstream's `.gitmodules` declares `alone` with `ignore = all` (a common
 /// setting for a submodule whose dirty state should not show). The checkout
 /// has an ignored link `alone` pointing at a standalone agent's folder, and
-/// the agent is recorded at the link's path, exactly the review-18 layout.
+/// the agent is recorded at the link's path.
 fn checkout(tmp: &Path, engine: &mut Engine) -> (PathBuf, PathBuf) {
     let upstream = tmp.join("upstream");
     init(&upstream);
@@ -170,20 +171,20 @@ fn switch_over_link(ignore: SubmoduleIgnore) -> (Result<(), String>, std::fs::Fi
     (result, kind)
 }
 
-/// Control: the guard refuses the switch and the link stays (review 18's fix).
+/// Control: the guard refuses the switch and the link stays.
 #[test]
-fn review19_control_a_guarded_switch_keeps_a_linked_standalone_folder() {
+fn control_a_guarded_switch_keeps_a_linked_standalone_folder() {
     let (result, kind) = switch_over_link(SubmoduleIgnore::Unset);
     assert!(result.is_err(), "{result:?}");
     assert!(kind.is_symlink());
 }
 
 /// With `ignore = all` for that path in the checkout's `.gitmodules`,
-/// `git diff-tree` leaves the gitlink out, the move check asks about nothing,
-/// and `git switch` replaces the standalone agent's folder link with an
-/// empty directory.
+/// `git diff-tree` leaves the gitlink out, so the move check must find it
+/// another way: the switch still keeps the standalone agent's folder link
+/// rather than letting `git switch` replace it with an empty directory.
 #[test]
-fn review19_ignore_all_hides_a_submodule_over_a_linked_standalone_folder() {
+fn ignore_all_hides_nothing_from_a_guarded_switch_over_a_linked_standalone_folder() {
     let (result, kind) = switch_over_link(SubmoduleIgnore::All);
     assert!(
         kind.is_symlink(),

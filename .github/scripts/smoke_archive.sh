@@ -200,12 +200,12 @@ fi
 # distinct relative ones, which is exactly why a page-level check is blind to the
 # terminal emulator and the editor.
 #
-# The DELIMITER matters as much as the path, and getting it wrong is what made
-# this walk nearly blind. It used to require a double quote, and the bundler emits
-# 85 of those 90 names as BACKTICK template literals, so the walk reached 10 of the
-# 98 files in assets/: deleting the other 88, every Monaco language chunk and the
-# editor's web worker included, left this check reporting nothing missing. All
-# three JavaScript string delimiters therefore count, and the leading `./` is
+# The DELIMITER matters as much as the path: the bundler emits 85 of those 90
+# names as BACKTICK template literals, so a walk that required a double quote
+# would reach 10 of the 98 files in assets/, and deleting the other 88, every
+# Monaco language chunk and the editor's web worker included, would leave this
+# check reporting nothing missing. All three JavaScript string delimiters
+# therefore count, and the leading `./` is
 # optional, because the worker is built from
 # `new Worker(""+new URL(`editor.worker-<hash>.js`,import.meta.url))` with no
 # prefix. ERE has no backreference, so the closing delimiter is the same class

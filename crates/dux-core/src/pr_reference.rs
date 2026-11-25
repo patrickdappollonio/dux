@@ -1468,7 +1468,7 @@ mod tests {
 
     #[test]
     fn a_scheme_dux_does_not_speak_is_refused_rather_than_reinterpreted() {
-        // `ftp://github.com/acme/widget` used to fall through to the scp-like
+        // `ftp://github.com/acme/widget` must not fall through to the scp-like
         // rule, whose colon comes before its slash, and answer with the host
         // `ftp` and the repository `github.com/acme`.
         for input in [

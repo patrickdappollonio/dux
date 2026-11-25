@@ -293,10 +293,10 @@ has a PNG, and every PNG is shown by a docs page.
 ### Every scene says what its picture must show
 
 A journey that drove itself into the wrong state still produces a perfectly
-valid PNG, and the tool used to report success for one: a pane stuck on
-"Attaching…", a sidebar that came back blank and a menu that had closed itself
-under a take-over card all shipped in one run. So a scene states its own
-caption's promise immediately before the shutter:
+valid PNG: a pane stuck on "Attaching…", a sidebar that came back blank and a
+menu that had closed itself under a take-over card all look like success to the
+tool. So a scene states its own caption's promise immediately before the
+shutter:
 
 - A browser scene calls the guards in `screens/lib.js` (`expectNoCover`,
   `expectPanePainted`, `expectRows`, `expectStateWord`, `expectMenuOpen`,

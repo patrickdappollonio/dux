@@ -4,18 +4,17 @@
 //!
 //! The staging is not tidiness. `web/dist` is a directory this script GENERATES,
 //! and a generated directory cannot be watched with `cargo:rerun-if-changed`
-//! (see the KNOWN GAP comment in `main`), so as long as rust-embed read from it
-//! the embedded bytes depended on the state of a directory nothing was allowed to
-//! notice. Reading from a copy this script writes on every path it takes moves
-//! that dependency onto `$OUT_DIR`, which nothing edits by hand.
+//! (see the KNOWN GAP comment in `main`), so if rust-embed read from it the
+//! embedded bytes would depend on the state of a directory nothing was allowed
+//! to notice. Reading from a copy this script writes on every path it takes
+//! moves that dependency onto `$OUT_DIR`, which nothing edits by hand.
 //!
 //! ## Failure policy
 //!
 //! A frontend build that is ATTEMPTED and fails is FATAL: this script panics and
-//! `cargo build` fails. It used to write a placeholder page, print a
-//! `cargo:warning` and succeed, which meant a release could ship four platform
-//! binaries containing "web assets not built" with every check green. That path
-//! is gone: nothing here turns a FAILURE into a successful build.
+//! `cargo build` fails. Nothing here turns a FAILURE into a successful build,
+//! because a release could otherwise ship platform binaries containing "web
+//! assets not built" with every check green.
 //!
 //! ## Escape hatch
 //!
@@ -32,13 +31,9 @@
 //! * **No previously built `dist/`.** This script writes a plain notice page (see
 //!   `NOT_BUILT_PAGE`) and sets `cargo:rustc-env=DUX_UI_BUILD_STATE=not_built`.
 //! * **A previously built `dist/` is present.** It is left alone and embedded as
-//!   it is, and this script sets `DUX_UI_BUILD_STATE=stale`.
-//!
-//! The second case used to set nothing at all. The result was a binary serving an
-//! arbitrarily old interface, with real hashed assets, that passed every test
-//! including the real-build ones, showed no banner row and wrote nothing to the
-//! log. A single build-time `cargo:warning` was the only trace, and nobody reads
-//! build output from last week.
+//!   it is, and this script sets `DUX_UI_BUILD_STATE=stale`. Without the marker
+//!   the binary would serve an arbitrarily old interface, with real hashed
+//!   assets, that passes every test including the real-build ones.
 //!
 //! The state is spelled out rather than collapsed into one flag because the
 //! operator-facing message differs and the difference matters: the notice-page
@@ -52,14 +47,12 @@
 //! ## Why the SUCCESS path emits a marker too
 //!
 //! It has nothing to say, and it says it anyway, because `option_env!` reads the
-//! AMBIENT rustc environment and not only what this script emits. The earlier
-//! scheme used two markers and emitted NEITHER on success, so an ambient
-//! `DUX_UI_BUILD_SKIPPED=1` (a workflow-level `env:`, say) was never overridden
-//! and made every real-build test print SKIPPED on a genuine build, with the CI
-//! guard, which only ever looked at `DUX_DISABLE_UI_BUILD`, green throughout. A
-//! `cargo:rustc-env` always beats an ambient value of the same name (measured
-//! with a throwaway crate, not assumed), so writing the marker on EVERY path is
-//! what makes it unspoofable.
+//! AMBIENT rustc environment and not only what this script emits. An ambient
+//! `DUX_UI_BUILD_SKIPPED=1` (a workflow-level `env:`, say) would otherwise never
+//! be overridden and would make every real-build test print SKIPPED on a genuine
+//! build. A `cargo:rustc-env` always beats an ambient value of the same name
+//! (measured with a throwaway crate, not assumed), so writing the marker on
+//! EVERY path is what makes it unspoofable.
 
 use std::path::Path;
 use std::process::Command;
@@ -86,12 +79,11 @@ fn mark_state(state: &str) {
 ///
 /// Without it, the second consecutive hatch build finds the `index.html` the
 /// first one wrote, concludes a real dist is present, and stops setting
-/// `DUX_UI_BUILD_SKIPPED`. The tests then ran against the notice page and FAILED
-/// instead of skipping. That is not a hypothetical: the first implementation of
-/// this file used no sentinel, and a second `DUX_DISABLE_UI_BUILD=1 cargo test`
-/// proved it. A sentinel inside the page is preferable to a marker file, which
-/// `rust_embed` would either serve as a stray asset or require its
-/// `include-exclude` feature (and a `globset` dependency) to filter out.
+/// `DUX_UI_BUILD_SKIPPED`, so the tests would run against the notice page and
+/// FAIL instead of skipping. A sentinel inside the page is preferable to a
+/// marker file, which `rust_embed` would either serve as a stray asset or
+/// require its `include-exclude` feature (and a `globset` dependency) to filter
+/// out.
 const NOT_BUILT_SENTINEL: &str = "dux-ui-not-built-notice";
 
 /// The page embedded when the frontend build was deliberately skipped and there
@@ -100,15 +92,8 @@ const NOT_BUILT_SENTINEL: &str = "dux-ui-not-built-notice";
 /// blank page.
 ///
 /// Deliberately NOT the SPA shell: it carries no `id="root"` and no hashed asset
-/// reference. Be precise about what that does and does not buy, because an
-/// earlier version of this comment claimed the page carries nothing a test could
-/// mistake for a build, and two tests in `tests/static_serving.rs` were at that
-/// moment asserting only `<!doctype html> OR id="root"`, which this page
-/// satisfies, since it is a real HTML document with a doctype. What the missing
-/// root element and missing hashed reference defeat is a test that checks for
-/// THOSE; they cannot defeat a test that checks for a doctype. The tests were
-/// corrected rather than the page, and the sentence is now scoped to what it can
-/// actually support.
+/// reference. That defeats a test that checks for THOSE; it cannot defeat a
+/// test that checks only for a doctype, since this is a real HTML document.
 const NOT_BUILT_PAGE: &str = r#"<!doctype html>
 <!-- dux-ui-not-built-notice -->
 <html lang="en">
@@ -383,15 +368,12 @@ fn deps_stale(web: &Path) -> bool {
 /// Whether `index.html` is a notice page this script wrote earlier, rather than a
 /// real build.
 ///
-/// The sentinel is looked for in the INFLATED bytes as well as the raw ones, and
-/// that branch is not dead code even though this script no longer compresses
-/// anything inside `web/dist`. A checkout built by the PREVIOUS version of this
-/// file has a `dist/index.html` that was gzipped in place, and the escape hatch
-/// must still recognise its own notice page there. Deleting the branch
-/// reintroduces exactly the bug the sentinel comment above documents: the second
-/// consecutive hatch build mistakes the notice page for a real dist, stops
-/// marking the binary, and the tests assert against the notice instead of
-/// skipping.
+/// The sentinel is looked for in the INFLATED bytes as well as the raw ones: a
+/// checkout built by an older version of this file has a `dist/index.html` that
+/// was gzipped in place, and the escape hatch must still recognise its own
+/// notice page there. Without that branch the second consecutive hatch build
+/// mistakes the notice page for a real dist, stops marking the binary, and the
+/// tests assert against the notice instead of skipping.
 fn is_not_built_notice(dist_index: &Path) -> bool {
     let Ok(bytes) = std::fs::read(dist_index) else {
         return false;

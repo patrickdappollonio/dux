@@ -2712,10 +2712,10 @@ mod tests {
 
     #[test]
     fn an_error_raised_with_nobody_watching_waits_for_the_first_page_to_open() {
-        // The failing case behind the report: while the terminal UI serves in
+        // While the terminal UI serves in
         // its background, an engine error can be raised with no browser open.
         // The terminal shows it until something replaces it; the replay window
-        // lapses, and a browser opened afterwards used to learn nothing at all.
+        // lapses, and a browser opened afterwards must still learn of it.
         let t0 = Instant::now();
         let mut c = KeyedStatusController::emitting_finals();
         set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");

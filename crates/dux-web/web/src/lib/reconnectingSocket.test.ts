@@ -445,12 +445,12 @@ describe("the four wake signals", () => {
     expect(FakeWS.instances.length).toBe(1)
   })
 
-  // A LIFECYCLE CLOSE KEEPS ITS LISTENERS, and this test used to say the
-  // opposite. `pagehide` routes to `close()`, and a return is not always a
-  // `pageshow`: a phone unlocking, a tab being switched back to, or a network
-  // coming back can announce themselves through visibility, focus or online
-  // alone. With the listeners detached by the close, those returns found nobody
-  // home and both sockets stayed dead until the user pressed Reconnect.
+  // A LIFECYCLE CLOSE KEEPS ITS LISTENERS. `pagehide` routes to `close()`, and a
+  // return is not always a `pageshow`: a phone unlocking, a tab being switched
+  // back to, or a network coming back can announce themselves through
+  // visibility, focus or online alone. With the listeners detached by the
+  // close, those returns would find nobody home and both sockets would stay
+  // dead until the user pressed Reconnect.
   it("reopens on a wake signal after a lifecycle close", () => {
     vi.useFakeTimers()
     setVisibility("visible")
@@ -709,14 +709,14 @@ describe("the canRetry gate", () => {
 })
 
 
-// AN OPEN IS A PROMISE, NOT A PROOF. The backoff used to reset on `onopen`
-// alone, which is the one thing a socket that opens and closes again in the
-// same breath is very good at doing. Measured against a server that accepted
-// the handshake and dropped the connection immediately, the client retried at a
-// flat ~551ms forever: every attempt "succeeded", every attempt refilled the
-// schedule, and the growth the backoff exists for never happened. An open now
-// counts as healthy once it has LASTED (`HEALTHY_SETTLE_MS`) or once a frame has
-// actually crossed it, whichever comes first.
+// AN OPEN IS A PROMISE, NOT A PROOF. A socket that opens and closes again in
+// the same breath is very good at opening, so the backoff does not reset on
+// `onopen` alone: measured against a server that accepted the handshake and
+// dropped the connection immediately, that would retry at a flat ~551ms
+// forever, every attempt "succeeding" and refilling the schedule, and the
+// growth the backoff exists for would never happen. An open counts as healthy
+// once it has LASTED (`HEALTHY_SETTLE_MS`) or once a frame has actually
+// crossed it, whichever comes first.
 describe("the health settle window", () => {
   it("keeps growing the backoff across opens that close immediately", () => {
     vi.useFakeTimers()

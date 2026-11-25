@@ -1264,8 +1264,8 @@ describe("DeleteSessionDialog", () => {
   })
 })
 
-// Every name the dialog shows is the shared chip, and the chip replaces the
-// quotes the sentences used to wrap names in.
+// Every name the dialog shows is the shared chip, and the chip stands in for
+// quotes around a name.
 describe("DeleteSessionDialog names", () => {
   it("chips the agent's name in the opening sentence", () => {
     seed("s1", [session1])

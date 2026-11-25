@@ -1774,8 +1774,8 @@ fn remove_session_worktree(
     if let Some(project_path) = managed.project_path.as_deref() {
         // The same no-dialog plan the engine's unasked delete runs: only the
         // branch dux made for the agent goes, pinned and only while git can
-        // prove it is still that branch. A reset that deleted the user's
-        // `develop` because an agent was once on it would be data loss.
+        // prove it is still that branch. A reset must not delete the user's
+        // `develop` because an agent was once on it.
         let remove = || {
             dux_core::branch_history::remove_worktree_with_plan(
                 Path::new(project_path),
@@ -2175,7 +2175,7 @@ mod tests {
     /// then removes everything, so nothing is left running in a folder that
     /// is gone.
     #[test]
-    fn review21_factory_reset_removes_a_worktree_a_recorded_dux_job_still_runs_in() {
+    fn factory_reset_ends_a_recorded_dux_job_before_removing_its_worktree() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {
@@ -2408,13 +2408,13 @@ mod tests {
         );
     }
 
-    /// Review 22: a project terminal's session (recorded under the unowned
-    /// key, started at the project's repository, OUTSIDE the worktrees root)
-    /// left a job running whose working directory is agent m1's worktree.
-    /// The reset only looks at sessions started under the worktrees root, so
-    /// it neither ends this job nor keeps the folder it works in.
+    /// A project terminal's session (recorded under the unowned key, started
+    /// at the project's repository, OUTSIDE the worktrees root) left a job
+    /// running whose working directory is agent m1's worktree. The reset looks
+    /// at where each job works, not only at sessions started under the
+    /// worktrees root, so it ends this job or keeps the folder it works in.
     #[test]
-    fn review22_factory_reset_removes_a_worktree_a_recorded_terminal_job_works_in() {
+    fn factory_reset_never_removes_a_worktree_a_recorded_terminal_job_works_in() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {
@@ -4389,12 +4389,12 @@ mod tests {
         );
     }
 
-    /// Convergence regression: factory-reset worktree removal must prune the
-    /// repo's worktree registration and delete the branch, exactly as core
-    /// `git::remove_worktree` does. The old CLI copy ran `git worktree remove`
-    /// WITHOUT `-C <repo>` (so it hit the wrong repo, failed, and fell back to a
-    /// bare `fs::remove_dir_all`) and never pruned, leaving a stale worktree ref
-    /// that made the branch undeletable. This proves the branch is gone.
+    /// Factory-reset worktree removal must prune the repo's worktree
+    /// registration and delete the branch, exactly as core
+    /// `git::remove_worktree` does: `git worktree remove` needs `-C <repo>`
+    /// (else it hits the wrong repo, fails, and a bare `fs::remove_dir_all`
+    /// leaves a stale worktree ref that makes the branch undeletable). This
+    /// proves the branch is gone.
     #[test]
     #[expect(
         clippy::too_many_lines,

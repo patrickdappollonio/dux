@@ -13,9 +13,9 @@ describe("ALWAYS_REVEALED_ON_TOUCH", () => {
     )
   })
 
-  // The whole point of the fix: this is a question about the POINTER, and
-  // answering it with the viewport-width breakpoint is what left a landscape
-  // tablet (desktop layout, finger for a pointer) unable to reach the menu.
+  // This is a question about the POINTER: answering it with the viewport-width
+  // breakpoint would leave a landscape tablet (desktop layout, finger for a
+  // pointer) unable to reach the menu.
   it("asks about the pointer rather than the viewport width", () => {
     expect(ALWAYS_REVEALED_ON_TOUCH).not.toMatch(/\bmd:|max-md:/)
   })

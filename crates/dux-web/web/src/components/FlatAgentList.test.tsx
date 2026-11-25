@@ -816,7 +816,7 @@ describe("FlatAgentList PR chip", () => {
 // (b) the agent menu's editor entries: the in-app item is renamed to
 // distinguish surfaces and hidden on phones (where the overlay cannot open,
 // so it was a dead no-op), and a new-tab item opens the standalone editor
-// address. Every item keeps a leading icon per the menu tenet.
+// address. Every item keeps a leading icon.
 describe("FlatAgentList editor menu entries", () => {
   async function openFirstAgentMenu() {
     render(<FlatAgentList handlers={handlers} />)
@@ -1645,12 +1645,11 @@ describe("FlatAgentList line two alignment", () => {
 })
 
 // The row ⋯ trigger is hover-revealed, and a finger has no hover. Its escape
-// hatch used to be the viewport-width breakpoint, which is the wrong question:
-// a landscape tablet gets the desktop layout with a finger for a pointer, and
-// the only way to any row's menu simply was not on screen. The classes below
+// hatch is the coarse pointer, not the viewport-width breakpoint: a landscape
+// tablet gets the desktop layout with a finger for a pointer. The classes below
 // are asserted rather than measured because jsdom evaluates no media query;
 // what a class assertion CAN pin is that the coarse-pointer override is
-// present and that the mouse's own rules were not touched on the way in.
+// present and that the mouse's own rules are untouched.
 describe("FlatAgentList row actions on a coarse pointer", () => {
   function wrapperOf(label: string): HTMLElement {
     const trigger = screen.getAllByLabelText(label)[0]

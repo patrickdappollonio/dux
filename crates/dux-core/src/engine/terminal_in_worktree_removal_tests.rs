@@ -1,4 +1,5 @@
-//! Sixth adversarial review of the worktree-removal races branch.
+//! A project terminal standing in a worktree keeps it, and the messages that
+//! name what stands there.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -50,12 +51,12 @@ fn cwd_of(pid: u32) -> Option<PathBuf> {
     crate::file_drop::process_cwds(&[pid]).found.remove(&pid)
 }
 
-/// "dux must never remove ... a folder that something it started is still
-/// using, whether in that folder or anywhere inside it." A project terminal is
-/// a PTY dux started; its shell stands in an agent's worktree (the user `cd`'d
-/// there to run the tests). Deleting the agent with its worktree removes the
-/// folder from under that live terminal: every occupancy question asks only
-/// where a PTY was SPAWNED (the project root), never where its processes are.
+/// dux never removes a folder that something it started is still using,
+/// whether in that folder or anywhere inside it. A project terminal is a PTY
+/// dux started; its shell stands in an agent's worktree (the user `cd`'d there
+/// to run the tests). Deleting the agent with its worktree keeps the folder,
+/// because the occupancy question asks where a PTY's processes are, not only
+/// where it was SPAWNED (the project root).
 #[test]
 fn a_project_terminal_standing_in_a_worktree_keeps_it() {
     let (mut engine, tmp) = test_engine();
@@ -111,13 +112,11 @@ fn alive(pid: i32) -> bool {
     u32::try_from(pid).is_ok_and(crate::file_drop::process_can_answer)
 }
 
-/// The registry keeps only the newest `SESSIONS_PER_AGENT` (256) sessions per
-/// agent and drops the oldest, whether or not anything still runs in it; its
-/// comment says "the purge still follows every live process's own session",
-/// but the purge only follows the sessions listed. An agent whose first
+/// The registry keeps at most `SESSIONS_PER_AGENT` (256) sessions per agent,
+/// but never forgets an old one something still runs in. An agent whose first
 /// terminal left a server running, and which has since started 256 more
 /// sessions (relaunches, terminals) in the same run, is deleted with its
-/// worktree: the server is never ended and git removes the folder under it.
+/// worktree: the server is ended first, or the folder is kept.
 #[test]
 fn an_old_session_with_a_live_job_is_not_forgotten_by_the_per_agent_cap() {
     let (mut engine, tmp) = test_engine();
@@ -205,8 +204,6 @@ fn an_old_session_with_a_live_job_is_not_forgotten_by_the_per_agent_cap() {
         outcome.is_ok()
     );
 }
-
-// Tests added with the fixes for the sixth review.
 
 /// The refusal names the terminal standing in the worktree and says how to
 /// get it out of the way; nothing is ended to make way for the removal.

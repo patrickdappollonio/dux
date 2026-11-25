@@ -558,9 +558,9 @@ describe("the resize coordinator's gesture hold", () => {
 
 describe("the resize coordinator's debounce hold", () => {
   it("performs NO refit during an observer burst, then exactly one fit+send at the settle", () => {
-    // A divider drag. The refit used to run per animation frame while the send
-    // waited out the debounce, so the local grid ran ahead of the child's for
-    // the whole drag and the child's repaints duplicated rows into scrollback.
+    // A divider drag. The refit must not run per animation frame while the send
+    // waits out the debounce, or the local grid runs ahead of the child's for
+    // the whole drag and the child's repaints duplicate rows into scrollback.
     const { fit, coord, sent } = setup()
     coord.start(document.createElement("div"))
     settleFirstFrame(coord, sent)

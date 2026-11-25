@@ -518,10 +518,10 @@ impl Admission {
                     strike = Strike::Block(Ban::of(ip));
                 }
                 // The /64's combined count reached the limit with no single
-                // address of it there on its own (decided by the owner: one
-                // range rather than a long list of addresses): the whole /64
-                // is banned as one entry. One address that did reach it alone
-                // was banned just above, as itself, and that stands.
+                // address of it there on its own: one range rather than a long
+                // list of addresses, so the whole /64 is banned as one entry.
+                // One address that did reach it alone was banned just above, as
+                // itself, and that stands.
                 TrackKey::Prefix(prefix) if !matches!(strike, Strike::Block(_)) => {
                     if let Some(ip) = c.verified_ip {
                         inner.tracked.remove(&key);

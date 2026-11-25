@@ -36,8 +36,8 @@ distinction matters the moment you go looking for why the binary is serving
 something you did not expect, so it has a section of its own:
 [Where the embedded assets actually live](#where-the-embedded-assets-actually-live).
 
-**A failed frontend build fails the Rust build.** It used to print a
-`cargo:warning`, embed a placeholder page and succeed, which meant a release could
+**A failed frontend build fails the Rust build.** There is no placeholder page
+and no `cargo:warning`-and-succeed path, because with either a release could
 ship binaries with no web UI and every check green. If you see the build abort with
 a tsc or Vite error, that is working as intended. To see the underlying error:
 
@@ -114,34 +114,32 @@ build through quietly is not, and that distinction is the whole point of the fla
 
 `crates/dux-web/web/dist` is raw Vite output, and everything above still describes
 it correctly: the build script READS it to decide between the notice page and the
-reuse path. What it no longer does is embed it. rust-embed reads
-`$OUT_DIR/ui`, a Brotli-compressed mirror the build script stages from `dist` on every path
-it can take.
+reuse path. It does not embed it: rust-embed reads `$OUT_DIR/ui`, a
+Brotli-compressed mirror the build script stages from `dist` on every path it can
+take.
 
 The reason is written out in full in the long comment in `crates/dux-web/build.rs`,
-including the two things the change does not fix. The short version: `dist` is a
-directory the build script generates, cargo cannot watch a generated directory
-without re-running the script forever, and so emptying `dist` used to leave the
+including the two things the design does not fix. The short version: `dist` is a
+directory the build script generates, and cargo cannot watch a generated directory
+without re-running the script forever, so an emptied `dist` would leave the
 script un-run and bake zero assets into the binary with nothing said anywhere.
 
 Two practical consequences:
 
-- **A hand-run `npm run build` no longer reaches the binary on its own.** It used
-  to, because rust-embed's file dependencies forced a recompile. Now the staged
-  copy is what gets embedded and nothing notices that `dist` moved on. Run
-  `touch crates/dux-web/web/index.html` and rebuild.
-- **Fault injection moved too.** The `dist.real/`, `dist.bak/` and `dist.orig/`
-  entries in `.gitignore` exist so you can park a real build aside and see what
-  the binary does without one:
+- **A hand-run `npm run build` does not reach the binary on its own.** The
+  staged copy is what gets embedded and nothing notices that `dist` moved on.
+  Run `touch crates/dux-web/web/index.html` and rebuild.
+- **Moving `dist` aside does not change what is embedded.** The `dist.real/`,
+  `dist.bak/` and `dist.orig/` entries in `.gitignore` exist so you can park a
+  real build aside:
 
   ```bash
   mv crates/dux-web/web/dist crates/dux-web/web/dist.orig
   mkdir crates/dux-web/web/dist
   ```
 
-  That alone no longer changes what is embedded, which is the whole point of the
-  change: the binary keeps serving the staged copy. To make a binary with no web
-  UI, set `DUX_DISABLE_UI_BUILD=1` on top of it, which stages the notice page.
+  That alone leaves the binary serving the staged copy. To make a binary with no
+  web UI, set `DUX_DISABLE_UI_BUILD=1` on top of it, which stages the notice page.
 
   Deleting the staged copy by hand (`rm -rf target/debug/build/dux-web-*/out/ui`)
   does not produce an empty embed either. Measured: it is a **compile error**,

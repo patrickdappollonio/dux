@@ -52,7 +52,7 @@ const ALLOWED: Array<{ file: string; contains: string; reason: string }> = [
     file: "components/EditorBody.tsx",
     contains: 'aria-label="Back"',
     reason:
-      "the phone's Up control: navigation, so quieter than the acting buttons beside it (ghost), by the tenet that navigation matches an action cluster on geometry and differs on weight",
+      "the phone's Up control: navigation, so quieter than the acting buttons beside it (ghost), since navigation matches an action cluster on geometry and differs on weight",
   },
   {
     file: "components/MacroPopover.tsx",

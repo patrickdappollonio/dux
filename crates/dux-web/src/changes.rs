@@ -1374,9 +1374,9 @@ mod tests {
         assert_eq!(again.rev, resp.rev, "rev must not advance without a change");
     }
 
-    /// One untracked dependency directory used to become one wire row PER
-    /// FILE: the user's `node_modules` was ~29k rows (3.9 MB of JSON in the
-    /// preview repro, 19.7 MB at 150k). The sweep now folds a wholly untracked
+    /// One untracked dependency directory must not become one wire row PER
+    /// FILE: a `node_modules` can be ~29k rows (3.9 MB of JSON measured in the
+    /// preview, 19.7 MB at 150k files). The sweep folds a wholly untracked
     /// folder into one row that carries its file count, the way `git status`
     /// itself reports it.
     #[tokio::test]

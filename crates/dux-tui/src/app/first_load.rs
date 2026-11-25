@@ -7,7 +7,7 @@
 //! module re-authors prose or re-parses a release body: it only lays the shared
 //! data out for a terminal.
 //!
-//! # The approved layout
+//! # The layout
 //!
 //! The braille duck sits in a left column, a ruled vertical divider separates it
 //! from scrollable prose on the right, and exactly two buttons sit at the bottom.
@@ -341,9 +341,8 @@ pub(crate) fn welcome_lines(
 ) -> Vec<Line<'static>> {
     let w = usize::from(width.saturating_sub(1));
     // The tagline WRAPS. The gallery renders it as one unwrapped span, which
-    // silently clips it at the prose column's edge (the tagline is 71 columns and
-    // the prose column at the 90-column target is 50). The approved intent is a
-    // headline the reader can actually read, so it is wrapped here.
+    // would clip it at the prose column's edge (the tagline is 71 columns and
+    // the prose column at the 90-column target is 50), so it is wrapped here.
     let mut lines: Vec<Line<'static>> = wrap(screen.tagline, w)
         .into_iter()
         .map(|l| {
@@ -478,7 +477,7 @@ pub(crate) fn content_lines(
 /// Where each of the two one-row pill buttons sits inside `row`.
 ///
 /// The pills are `" Label "`, laid out left to right with a two-column gap,
-/// exactly as the approved layout renders them. Returned so the renderer and the
+/// exactly as the layout renders them. Returned so the renderer and the
 /// mouse hit-test share one geometry.
 pub(crate) fn button_rects(row: Rect, labels: [&str; 2]) -> [Rect; 2] {
     let primary_w = u16::try_from(labels[0].chars().count() + 2).unwrap_or(u16::MAX);
@@ -1317,8 +1316,7 @@ mod tests {
             button_action(&welcome),
             FirstLoadAction::Dismiss,
             "the welcome screen's secondary must LEAVE, exactly as the what's-new \
-             screen's does; it used to open the website and the modal then had no \
-             visible way out at all"
+             screen's does, so the modal always has a visible way out"
         );
 
         let mut whats_new = FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Skip);
@@ -1582,11 +1580,9 @@ mod tests {
             .join("\n")
     }
 
-    /// REGRESSION. The approved mock rendered the tagline and the release
-    /// headline as one unwrapped span, and at the 90-column target the prose
-    /// column is only ~50 wide, so the 72-character tagline was silently cut off
-    /// mid-word at "...and a real term". Nobody noticed until the mock was
-    /// actually rendered rather than read.
+    /// Long prose must wrap, not clip. At the 90-column target the prose column
+    /// is only ~50 wide, so an unwrapped 72-character tagline or release
+    /// headline would be cut off mid-word.
     ///
     /// This asserts the END of each string survives, which is the part clipping
     /// eats, and that no produced line overflows the column it was given.
@@ -2157,9 +2153,9 @@ mod tests {
 
     #[test]
     fn an_overlong_unbreakable_word_keeps_every_column_it_is_given() {
-        // The regression the marker's old bottom-right-of-content position would
-        // cause: a word too long to wrap fills the pane's full width, and a marker
-        // drawn in that pane's last column would silently eat a character of it.
+        // A marker at the bottom-right of the content would collide with a word
+        // too long to wrap, which fills the pane's full width: a marker drawn in
+        // that pane's last column would silently eat a character of it.
         let mut notes = sample_notes();
         // One 140-column unbreakable token, which `wrap` cannot split, so it is
         // emitted as a single line WIDER than the wrap width and the `Paragraph`

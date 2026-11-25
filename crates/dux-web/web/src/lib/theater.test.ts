@@ -202,7 +202,7 @@ describe("theaterOwnershipStep", () => {
   it("says nothing about the foreground guess a mount starts from", () => {
     // `isOwner` is optimistic before the handshake answers, so the very first
     // honest verdict is not a transition. A watcher opening a shared theater
-    // link used to enter, exit and clear its memory in one breath.
+    // link must not enter, exit and clear its memory in one breath.
     const first = theaterOwnershipStep(theaterOwnershipWatchStart, {
       handshakeSeen: false,
       isOwner: true,
