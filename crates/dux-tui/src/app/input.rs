@@ -6241,6 +6241,12 @@ impl App {
                 "Creating a standalone agent \"{name}\" in \"{}\"...",
                 dux_core::home_path::shorten_home(folder)
             ),
+            CreateAgentRequest::StandaloneInNewFolder { root, .. } => format!(
+                "Creating the folder \"{}\" and a standalone agent \"{name}\" in it...",
+                dux_core::home_path::shorten_home(&dux_core::agent_folders::folder_path_for(
+                    root, name
+                ))
+            ),
             CreateAgentRequest::ForkSession { source_label, .. } => format!(
                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
             ),
@@ -10433,7 +10439,8 @@ impl App {
             CreateAgentRequest::ForkSession { .. }
             | CreateAgentRequest::ExistingManagedWorktree { .. }
             | CreateAgentRequest::ForkExternalWorktree { .. }
-            | CreateAgentRequest::Standalone { .. } => unreachable!(),
+            | CreateAgentRequest::Standalone { .. }
+            | CreateAgentRequest::StandaloneInNewFolder { .. } => unreachable!(),
         };
         if let Err(e) = self.dispatch_create_agent_request(request, msg) {
             self.set_error(format!("{e:#}"));
@@ -13838,7 +13845,8 @@ fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: 
         // folder-browser flow does it), and the field is a plain non-optional
         // `title` rather than an optional custom name, precisely because a
         // standalone agent must always have one.
-        CreateAgentRequest::Standalone { title, .. } => {
+        CreateAgentRequest::Standalone { title, .. }
+        | CreateAgentRequest::StandaloneInNewFolder { title, .. } => {
             *title = name;
         }
     }

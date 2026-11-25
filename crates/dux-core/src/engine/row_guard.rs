@@ -210,6 +210,7 @@ pub fn row_change(command: &WireCommand) -> RowChange {
         // with another: creation refuses a folder an agent already has.
         | WireCommand::CreateAgent { .. }
         | WireCommand::CreateStandaloneAgent { .. }
+        | WireCommand::CreateStandaloneAgentInNewFolder { .. }
         | WireCommand::CreateAgentFromWorktree { .. }
         | WireCommand::CreateAgentFromPr { .. }
         // Projects: their settings, and adding them.

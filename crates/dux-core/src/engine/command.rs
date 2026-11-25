@@ -1030,6 +1030,9 @@ impl Engine {
                 worktree_path, ..
             } => Some(worktree_path.clone()),
             crate::worker::CreateAgentRequest::Standalone { folder, .. } => Some(folder.clone()),
+            // The folder does not exist yet; the job creates it and refuses one
+            // that is already there.
+            crate::worker::CreateAgentRequest::StandaloneInNewFolder { .. } => None,
             _ => None,
         };
         // A pull request create tells a branch an agent holds from one

@@ -1224,7 +1224,8 @@ impl App {
             | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => custom_name.clone(),
             // A standalone create already has its title (resolved from the
             // folder), so the prompt opens pre-filled with it.
-            CreateAgentRequest::Standalone { title, .. } => Some(title.clone()),
+            CreateAgentRequest::Standalone { title, .. }
+            | CreateAgentRequest::StandaloneInNewFolder { title, .. } => Some(title.clone()),
             CreateAgentRequest::PullRequest {
                 custom_name,
                 head_branch,

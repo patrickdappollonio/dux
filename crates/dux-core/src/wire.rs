@@ -568,6 +568,18 @@ pub enum WireCommand {
         #[serde(default)]
         provider: Option<String>,
     },
+    /// Create a STANDALONE agent in a new folder dux creates for it, named
+    /// after the agent, in the standalone agents folder
+    /// (`[defaults] standalone_agents_directory`). A name whose folder is
+    /// already there is refused and nothing is created.
+    CreateStandaloneAgentInNewFolder {
+        /// The agent's name, which also names its folder. Required, and held
+        /// to the agent-name rules.
+        name: String,
+        /// Which provider to launch. `None` uses the global default.
+        #[serde(default)]
+        provider: Option<String>,
+    },
     /// Fork an existing agent session into a fresh worktree branched from the
     /// source session's branch. `name` follows the same rules as `CreateAgent`:
     /// empty auto-generates a branch name (server pet-name path), a non-empty
@@ -5750,6 +5762,15 @@ impl Engine {
                     term_size: (80, 24),
                 }
             }
+            WireCommand::CreateStandaloneAgentInNewFolder { name, provider } => {
+                let (request, busy_message) =
+                    self.plan_standalone_agent_in_new_folder(&name, provider.as_deref())?;
+                Command::DispatchCreateAgentRequest {
+                    request: Box::new(request),
+                    busy_message,
+                    term_size: (80, 24),
+                }
+            }
             WireCommand::CreateAgent {
                 project_id,
                 name,
@@ -5934,6 +5955,7 @@ impl Engine {
             | WireCommand::RemoveProject { .. }
             | WireCommand::DeleteProject { .. }
             | WireCommand::CreateStandaloneAgent { .. }
+            | WireCommand::CreateStandaloneAgentInNewFolder { .. }
             | WireCommand::CreateAgent { .. }
             | WireCommand::ForkSession { .. }
             | WireCommand::CreateAgentFromWorktree { .. }
@@ -6118,6 +6140,27 @@ mod tests {
     use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
     use std::path::Path;
+
+    /// A standalone agent in a new folder needs a name, because the name is
+    /// what the folder is called, and the name follows the agent-name rules.
+    #[test]
+    fn a_standalone_agent_in_a_new_folder_needs_a_valid_name() {
+        let (mut engine, _tmp) = test_engine();
+        let refusal = |engine: &mut Engine, name: &str| {
+            engine
+                .apply_wire(WireCommand::CreateStandaloneAgentInNewFolder {
+                    name: name.to_string(),
+                    provider: None,
+                })
+                .err()
+                .map(|err| err.to_string())
+        };
+        let empty = refusal(&mut engine, "  ").expect("an empty name is refused");
+        assert!(empty.contains("needs a name"), "{empty}");
+        let invalid = refusal(&mut engine, "has space").expect("an invalid name is refused");
+        assert!(invalid.contains("Invalid agent name"), "{invalid}");
+        assert_eq!(refusal(&mut engine, "brave-otter"), None);
+    }
 
     /// The folder is accepted whatever it contains: a plain directory with no
     /// repository anywhere near it is the ordinary case, and the add-project

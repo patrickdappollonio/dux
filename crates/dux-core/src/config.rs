@@ -175,6 +175,10 @@ pub struct Defaults {
     pub provider: String,
     /// The directory the project browser opens in.
     pub start_directory: Option<String>,
+    /// The folder dux creates new standalone agents' folders in. Unset or
+    /// empty means the `agents` folder inside dux's own folder.
+    #[serde(default, deserialize_with = "deserialize_blank_as_none")]
+    pub standalone_agents_directory: Option<String>,
     /// Whether the new-agent name prompt starts with a random two-word pet name.
     pub enable_randomized_pet_name_by_default: bool,
     /// Whether dux fast-forward pulls a project's source checkout before creating an agent
@@ -1704,6 +1708,15 @@ impl ComposeBarMode {
 /// settings: the warn-once-and-degrade happens at load
 /// ([`compose_bar_load_warning`]) and at use ([`ComposeBarMode::from_config_str`]),
 /// so one typo does not take the whole config file down with it.
+/// An optional text setting where an empty or blank value means unset.
+fn deserialize_blank_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(value.filter(|text| !text.trim().is_empty()))
+}
+
 fn deserialize_compose_bar<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -2359,6 +2372,7 @@ impl Default for Defaults {
         Self {
             provider: "claude".to_string(),
             start_directory,
+            standalone_agents_directory: None,
             enable_randomized_pet_name_by_default: false,
             pull_before_creating_agent_by_default: true,
             copy_uncommitted_changes_by_default: true,
@@ -2805,6 +2819,33 @@ impl DuxPaths {
             .with_context(|| format!("failed to create {}", self.worktrees_root.display()))?;
         Ok(())
     }
+}
+
+/// The folder new standalone agents' folders are created in:
+/// `[defaults] standalone_agents_directory` when it names one, with a leading
+/// `~/` read as the home directory, else `agents` inside dux's own folder.
+pub fn standalone_agents_root(config: &Config, paths: &DuxPaths) -> PathBuf {
+    let configured = config
+        .defaults
+        .standalone_agents_directory
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match configured {
+        Some(value) => match value.strip_prefix("~/") {
+            Some(rest) => {
+                home::home_dir().map_or_else(|| PathBuf::from(value), |home| home.join(rest))
+            }
+            None if value == "~" => home::home_dir().unwrap_or_else(|| PathBuf::from(value)),
+            None => PathBuf::from(value),
+        },
+        None => default_standalone_agents_root(paths),
+    }
+}
+
+/// `agents` inside dux's own folder, beside `worktrees`.
+pub fn default_standalone_agents_root(paths: &DuxPaths) -> PathBuf {
+    paths.root.join("agents")
 }
 
 /// `[server] control_socket` as a path: relative to the config folder, or

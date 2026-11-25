@@ -6415,21 +6415,7 @@ impl Engine {
         let title = crate::git::standalone_agent_title(typed, &folder);
         // The GLOBAL default provider, the same source the config's own default
         // uses, unless the caller overrode it.
-        //
-        // An override is validated against the configured provider list, the
-        // same rule `change_agent_provider_wire` applies, because this plan is
-        // reachable from an HTTP body: an unconfigured name falls back to being
-        // used AS THE COMMAND (`Config::provider_command`), so accepting one
-        // spawns whatever the caller named.
-        let provider = match provider.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(value) => {
-                if !self.config.providers.commands.contains_key(value) {
-                    anyhow::bail!("{}", crate::provider::provider_not_configured(value));
-                }
-                crate::model::ProviderKind::new(value)
-            }
-            None => self.config.default_provider(),
-        };
+        let provider = self.standalone_provider(provider)?;
         let busy_message = crate::status_text![
             "Creating a standalone agent in ",
             q(crate::home_path::shorten_home(&folder)),
@@ -6443,6 +6429,77 @@ impl Engine {
             },
             busy_message,
         ))
+    }
+
+    /// The folder new standalone agents' folders are created in.
+    pub fn standalone_agents_root(&self) -> PathBuf {
+        crate::config::standalone_agents_root(&self.config, &self.paths)
+    }
+
+    /// Plan a standalone-agent create in a new folder dux creates for it,
+    /// named after the agent, in [`Self::standalone_agents_root`].
+    ///
+    /// The name is required, because it names the folder, and follows the
+    /// agent-name rules every agent's does. Whether a folder of that name is
+    /// already there is answered by the create itself, which refuses one
+    /// atomically on its worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal for an empty or invalid name, or a provider that is
+    /// not configured.
+    pub fn plan_standalone_agent_in_new_folder(
+        &self,
+        name: &str,
+        provider: Option<&str>,
+    ) -> anyhow::Result<(crate::worker::CreateAgentRequest, StatusText)> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!(
+                "A standalone agent in a new folder needs a name, because the name is what dux \
+                 calls the folder it creates. Give the agent a name and try again."
+            );
+        }
+        if !crate::git::is_valid_agent_name(name) {
+            anyhow::bail!("{}", crate::git::invalid_agent_name_refusal(name));
+        }
+        let provider = self.standalone_provider(provider)?;
+        let root = self.standalone_agents_root();
+        let folder = crate::agent_folders::folder_path_for(&root, name);
+        let busy_message = crate::status_text![
+            "Creating the folder ",
+            q(crate::home_path::shorten_home(&folder)),
+            " and a standalone agent in it\u{2026}"
+        ];
+        Ok((
+            crate::worker::CreateAgentRequest::StandaloneInNewFolder {
+                root,
+                title: name.to_string(),
+                provider,
+            },
+            busy_message,
+        ))
+    }
+
+    /// The provider a standalone create runs: `provider` when it names a
+    /// configured one, the global default when it is absent.
+    fn standalone_provider(&self, provider: Option<&str>) -> anyhow::Result<ProviderKind> {
+        // An override is validated against the configured provider list, the
+        // same rule `change_agent_provider_wire` applies, because this plan is
+        // reachable from an HTTP body: an unconfigured name falls back to being
+        // used AS THE COMMAND (`Config::provider_command`), so accepting one
+        // spawns whatever the caller named.
+        Ok(
+            match provider.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(value) => {
+                    if !self.config.providers.commands.contains_key(value) {
+                        anyhow::bail!("{}", crate::provider::provider_not_configured(value));
+                    }
+                    crate::model::ProviderKind::new(value)
+                }
+                None => self.config.default_provider(),
+            },
+        )
     }
 
     /// The instant snapshot the standalone picker's project shortcuts are
