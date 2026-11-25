@@ -10535,10 +10535,9 @@ mod tests {
     fn test_standalone_session(id: &str, folder: &str) -> AgentSession {
         let mut session = test_session(id, "p1", 0);
         session.title = Some(format!("{id}-title"));
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.to_string()),
+        );
         session
     }
 
@@ -13042,9 +13041,9 @@ mod pinned_warning_tests {
             let mut standalone = app.engine.sessions[0].clone();
             standalone.id = "standalone-1".to_string();
             standalone.workspace =
-                dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                    folder_path: app.engine.paths.root.to_string_lossy().to_string(),
-                });
+                dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace::chosen(
+                    app.engine.paths.root.to_string_lossy().to_string(),
+                ));
             app.engine.sessions.push(standalone);
         }
         app.rebuild_left_items();

@@ -47,9 +47,9 @@ fn session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
 fn standalone(id: &str, folder: &str) -> dux_core::model::AgentSession {
     let mut s = session(id, "");
     s.title = Some("mine".to_string());
-    s.workspace = dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-        folder_path: folder.to_string(),
-    });
+    s.workspace = dux_core::model::AgentWorkspace::Folder(
+        dux_core::model::FolderWorkspace::chosen(folder.to_string()),
+    );
     s
 }
 

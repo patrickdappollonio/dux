@@ -15829,10 +15829,9 @@ mod tests {
             .push(sample_project("p1", tmp.path().to_str().unwrap()));
         let listed = tmp.path().join("the-worktree");
         let mut standalone = sample_session("s9", "", "notes");
-        standalone.workspace =
-            crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-                folder_path: listed.to_string_lossy().into_owned(),
-            });
+        standalone.workspace = crate::model::AgentWorkspace::Folder(
+            crate::model::FolderWorkspace::chosen(listed.to_string_lossy().into_owned()),
+        );
         engine.sessions.push(standalone);
 
         let refused = engine

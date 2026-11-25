@@ -3003,9 +3003,9 @@ fn run_create_standalone_agent_job(
     }
     let session = new_agent_session(
         provider.clone(),
-        AgentWorkspace::Folder(FolderWorkspace {
-            folder_path: folder.to_string_lossy().to_string(),
-        }),
+        AgentWorkspace::Folder(FolderWorkspace::chosen(
+            folder.to_string_lossy().to_string(),
+        )),
         // Always set. Every row label falls back through the branch name when
         // there is no title, and this agent has no branch, so a title-less
         // standalone agent would render as a nameless row.

@@ -17059,10 +17059,9 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/work/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/work/notes".to_string()),
+        );
         // No project selected, which is the real shape: a standalone agent's row
         // belongs to no project group.
         app.engine.projects.clear();
@@ -17205,10 +17204,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         let id = app.engine.sessions[0].id.clone();
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/notes".to_string()),
+        );
         app.engine
             .folder_repo_statuses
             .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
@@ -17721,10 +17719,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         app.engine.sessions[0].title = Some("My-Notes".to_string());
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/My Notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/My Notes".to_string()),
+        );
         app.open_rename_session();
 
         let PromptState::RenameSession {
@@ -17789,10 +17786,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         app.engine.sessions[0].title = None;
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/My Notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/My Notes".to_string()),
+        );
         app.open_rename_session();
         let rows = rename_modal_rows(&mut app);
         assert!(
@@ -17865,10 +17861,9 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         let id = app.engine.sessions[0].id.clone();
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/notes".to_string()),
+        );
         app.engine
             .folder_repo_statuses
             .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
@@ -17952,10 +17947,9 @@ mod tests {
         let app = test_app(default_bindings());
         let mut session = app.engine.sessions[0].clone();
         session.title = Some("notes".to_string());
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.to_string()),
+        );
         session
     }
 
@@ -17989,10 +17983,9 @@ mod tests {
         let mut standalone = app.engine.sessions[0].clone();
         standalone.id = "session-2".to_string();
         standalone.title = Some("Notes".to_string());
-        standalone.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/srv/notes".to_string(),
-            });
+        standalone.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/srv/notes".to_string()),
+        );
         app.engine.sessions.push(standalone);
         app.focus = FocusPane::Left;
         app.rebuild_left_items();
@@ -18081,10 +18074,9 @@ mod tests {
         let mut standalone = app.engine.sessions[0].clone();
         standalone.id = "session-2".to_string();
         standalone.title = Some("Notes".to_string());
-        standalone.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/srv/notes".to_string(),
-            });
+        standalone.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/srv/notes".to_string()),
+        );
         app.engine.sessions.push(standalone);
         app.focus = FocusPane::Left;
         app.rebuild_left_items();
@@ -24593,10 +24585,9 @@ mod tests {
     #[test]
     fn a_standalone_agents_folder_label_shortens_the_same_way() {
         let mut app = narrow_row_app("demo-api");
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/srv/notes-archive".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/srv/notes-archive".to_string()),
+        );
         app.engine.projects.clear();
         let star = crate::theme::Glyphs::PLAIN.standalone;
         assert_eq!(

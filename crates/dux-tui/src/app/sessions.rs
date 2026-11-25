@@ -6222,10 +6222,9 @@ mod tests {
     fn forking_a_standalone_agent_refuses_in_the_shared_words() {
         let mut session = make_session("sa1", "claude", "/unused");
         session.title = Some("My Notes".to_string());
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/My Notes".to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/My Notes".to_string()),
+        );
         let mut app = test_app_with_sessions(vec![session], Vec::new());
         app.selected_left = 1;
 

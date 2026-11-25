@@ -16042,10 +16042,9 @@ not_a_real_action = ["x"]
             .get_mut(0)
             .expect("the fixture has an agent");
         session.title = Some("notes".to_string());
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.to_string_lossy().to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.to_string_lossy().to_string()),
+        );
     }
 
     /// The key-driven git actions go through the same workspace gate the HTTP
@@ -25705,10 +25704,9 @@ not_a_real_action = ["x"]
             !app.filtered_palette_commands("pull-requests").is_empty(),
             "offered without gh"
         );
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/tmp/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/tmp/notes".to_string()),
+        );
         assert!(
             app.filtered_palette_commands("pull-requests").is_empty(),
             "a standalone agent has no branch for pull requests"
@@ -29821,10 +29819,9 @@ cyan = "#00ffff"
     fn a_typed_standalone_path_goes_through_the_shared_refusals() {
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.path().to_string_lossy().to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.path().to_string_lossy().to_string()),
+        );
 
         app.open_standalone_agent_browser();
         type_path_and_confirm(&mut app, folder.path());
@@ -29971,10 +29968,9 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
         let occupied = folder.path().to_string_lossy().to_string();
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: occupied.clone(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(occupied.clone()),
+        );
 
         pick_standalone_folder(&mut app, folder.path());
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))

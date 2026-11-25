@@ -60,9 +60,7 @@
 //! #     id: "s1".to_string(),
 //! #     slot_tab_id: "slot-1".to_string(),
 //! #     provider: dux_core::model::ProviderKind::new("claude"),
-//! #     workspace: dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-//! #         folder_path: "/tmp".to_string(),
-//! #     }),
+//! #     workspace: dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace::chosen("/tmp")),
 //! #     title: None,
 //! #     started_providers: Vec::new(),
 //! #     desired_running: false,

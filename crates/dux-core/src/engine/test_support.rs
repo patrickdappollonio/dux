@@ -258,9 +258,9 @@ pub(crate) fn sample_standalone_session(id: &str, folder: &str) -> AgentSession 
         // every place still assuming the two are the same string.
         slot_tab_id: format!("{id}-slot"),
         provider: ProviderKind::new("claude"),
-        workspace: crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-            folder_path: folder.to_string(),
-        }),
+        workspace: crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace::chosen(
+            folder.to_string(),
+        )),
         title: Some(format!("{id}-title")),
         started_providers: Vec::new(),
         desired_running: true,

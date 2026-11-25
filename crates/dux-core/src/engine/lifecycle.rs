@@ -7005,10 +7005,9 @@ mod tests {
     fn a_standalone_agent_whose_folder_vanished_is_not_a_candidate() {
         let (mut engine, _tmp, folder) = standalone_auto_reopen_fixture();
         let gone = folder.path().join("no-such-directory");
-        engine.sessions[0].workspace =
-            crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-                folder_path: gone.to_string_lossy().to_string(),
-            });
+        engine.sessions[0].workspace = crate::model::AgentWorkspace::Folder(
+            crate::model::FolderWorkspace::chosen(gone.to_string_lossy().to_string()),
+        );
         assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 

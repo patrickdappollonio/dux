@@ -2448,9 +2448,9 @@ mod tests {
                 slot_tab_id: "sa1-slot".to_string(),
                 provider: ProviderKind::new("claude"),
                 workspace: dux_core::model::AgentWorkspace::Folder(
-                    dux_core::model::FolderWorkspace {
-                        folder_path: occupied.to_string_lossy().to_string(),
-                    },
+                    dux_core::model::FolderWorkspace::chosen(
+                        occupied.to_string_lossy().to_string(),
+                    ),
                 ),
                 title: Some("my-notes".to_string()),
                 started_providers: Vec::new(),
@@ -2543,9 +2543,9 @@ mod tests {
                 slot_tab_id: "sa1-slot".to_string(),
                 provider: ProviderKind::new("claude"),
                 workspace: dux_core::model::AgentWorkspace::Folder(
-                    dux_core::model::FolderWorkspace {
-                        folder_path: occupied.to_string_lossy().to_string(),
-                    },
+                    dux_core::model::FolderWorkspace::chosen(
+                        occupied.to_string_lossy().to_string(),
+                    ),
                 ),
                 title: Some("notes".to_string()),
                 started_providers: Vec::new(),
