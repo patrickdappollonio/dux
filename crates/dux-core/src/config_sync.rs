@@ -1,5 +1,5 @@
 //! Config-to-SQLite project reconciliation, the core-owned application of the
-//! "config wins for explicit project preferences" tenet. Runs at every
+//! rule that config wins for explicit project preferences. Runs at every
 //! entrypoint's startup (the TUI bootstrap AND the headless `dux serve`
 //! bootstrap) and on config reload, so config-only `[[projects]]`, config-edited
 //! preferences, and identity-conflict validation are honored regardless of
@@ -29,7 +29,7 @@ use crate::storage::SessionStore;
 
 /// Reconcile the config's `[[projects]]` with the SQLite store, in place.
 ///
-/// Applies the "config wins" tenet: for each project present in BOTH stores the
+/// Config wins: for each project present in BOTH stores the
 /// safe preference fields are merged (config value wins, else SQLite fills the
 /// gap); a config-only project is adopted into SQLite; a store-only project is
 /// written back into config in portable form. `persist(config)` is called to

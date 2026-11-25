@@ -202,11 +202,11 @@ fn assert_removed_cleanly(fx: &Fixture, result: &Result<RemovedBranches, String>
     );
 }
 
-/// The reported bug: the provider exits on SIGTERM, but a dev server it
-/// started in the worktree is still running and writing there. Like a CLI's
-/// background command, the server has its own process group and its own pipes,
-/// so neither the PTY's group signals nor the PTY closing reach it. The
-/// leader's exit is not the agent's exit.
+/// The provider exits on SIGTERM, but a dev server it started in the worktree
+/// is still running and writing there. Like a CLI's background command, the
+/// server has its own process group and its own pipes, so neither the PTY's
+/// group signals nor the PTY closing reach it. The leader's exit is not the
+/// agent's exit.
 #[test]
 fn removal_waits_for_a_child_the_provider_left_running() {
     let mut fx = fixture();
@@ -796,9 +796,9 @@ fn a_removal_is_recorded_until_it_has_run() {
     );
 }
 
-/// Quitting while the deleted agent's CLI is still in its grace used to lose
-/// the removal: the worktree and the branch stayed with no agent to delete
-/// them from. A clean quit now finishes it inside the shutdown wait.
+/// Quitting while the deleted agent's CLI is still in its grace must not lose
+/// the removal (the worktree and the branch would stay with no agent to delete
+/// them from): a clean quit finishes it inside the shutdown wait.
 #[test]
 fn a_clean_quit_finishes_a_removal_still_waiting_on_the_agent() {
     let mut fx = fixture();
@@ -1147,7 +1147,7 @@ fn a_job_left_by_a_shell_that_exited_is_ended_through_what_was_recorded_at_its_e
     assert_removed_cleanly(&fx, &result);
 }
 
-/// Review 7: a startup command that backgrounds a job WITHOUT redirecting its
+/// A startup command that backgrounds a job WITHOUT redirecting its
 /// output (`npm run dev &`) exits at once, but the job keeps the command's
 /// stdout/stderr pipes open, so `wait_with_output` never reaps the command:
 /// the session's leader stays a zombie. `members` treats a zombie leader as

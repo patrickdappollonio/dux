@@ -415,7 +415,7 @@ fn migrate_tailscale_enabled(
 // preferences.
 // ---------------------------------------------------------------------------
 
-/// The retired providers and the exact stock block dux shipped for each (as its
+/// The retired providers and the exact stock block dux wrote for each (as its
 /// renderer WROTE it: an absent `resume_wait_timeout_ms` was materialized to `0`,
 /// and `forward_scroll` was left unset). Recognizes an untouched stock block so
 /// it can be pruned while a user-customized block of the same name is preserved.
@@ -433,14 +433,14 @@ fn retired_stock_gemini() -> ProviderCommandConfig {
         resume_wait_timeout_ms: Some(0),
         install_hint: Some("brew install gemini-cli".to_string()),
         forward_scroll: None,
-        // gemini was retired before `web_dragdrop_paste` existed, so the stock
-        // block dux shipped never carried the key.
+        // gemini was retired before `web_dragdrop_paste` existed, so its stock
+        // block never carried the key.
         web_dragdrop_paste: None,
     }
 }
 
 /// Remove `[providers.<name>]` tables for retired providers when they still
-/// match the stock block dux shipped. A customized block (or one a user adds
+/// match the stock block. A customized block (or one a user adds
 /// back later) does not match and is left untouched. Returns whether the
 /// document changed.
 fn prune_retired_providers(doc: &mut DocumentMut) -> bool {
@@ -476,7 +476,7 @@ fn provider_table_config(table: &Table) -> Option<ProviderCommandConfig> {
         .map(|wrapper| wrapper.provider)
 }
 
-/// Whether a config's provider table is the exact stock block dux shipped (so it
+/// Whether a config's provider table is the exact stock block (so it
 /// can be retired), as opposed to one the user customized (which is preserved).
 /// `resume_wait_timeout_ms` is compared through `unwrap_or(0)` so an absent value
 /// and an explicit `0` (semantically identical: no timeout) both match the stock.

@@ -2,8 +2,8 @@
 //! starts.
 //!
 //! A poller that dies and comes back, and one that could not be spawned at all,
-//! used to be log lines: the user saw a list that stopped updating and had
-//! nothing on screen to tell them why. Both are facts about the process rather
+//! must not be left as log lines: a list that stopped updating with nothing
+//! on screen to say why. Both are facts about the process rather
 //! than about a surface, so they travel the engine's worker lane and both
 //! surfaces say them in the same words.
 //!

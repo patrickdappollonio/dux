@@ -1127,8 +1127,7 @@ mod tests {
         // becomes the headline. The parse does NOT stop there (the `break` fires
         // on the SECOND top heading, not the first), so any `### ` inside the
         // machine-written tail is merged into the feature list as though the human
-        // had written it. That is measured, not inferred: an earlier version of
-        // this test asserted the tail was dropped and was wrong.
+        // had written it. That is measured, not inferred.
         let body = "\
 ### First feature
 Its description.
@@ -1311,8 +1310,8 @@ Its description.
             }
             .has_renderable_body()
         );
-        // Whitespace-only entries are not content. A release body that produced
-        // one empty section used to count as a body and render a lone blank
+        // Whitespace-only entries are not content: a release body that produced
+        // one empty section must not count as a body and render a lone blank
         // bullet with no explanation.
         assert!(
             !ReleaseNotes {
@@ -1350,9 +1349,9 @@ Its description.
         assert!(!n.has_renderable_body(), "{n:#?}");
     }
 
-    /// Bodies a human would call empty that used to count as renderable. Each one
-    /// put the screen back where it started: a title over something invisible or
-    /// meaningless, with no explanation and nothing to do.
+    /// Bodies a human would call empty must not count as renderable. Each one
+    /// would put the screen back where it started: a title over something
+    /// invisible or meaningless, with no explanation and nothing to do.
     #[test]
     fn bodies_that_look_empty_to_a_human_are_treated_as_empty() {
         let cases = [
@@ -1477,7 +1476,7 @@ Its description.
     /// The other half of the cross-language pin, and the half that catches a
     /// divergence the code-point comparison above cannot see: the two surfaces can
     /// hold the same invisible SET and still disagree, because each `<br>` matcher
-    /// used to ask its own language what whitespace is, and because the web ran
+    /// could ask its own language what whitespace is, and the web could run
     /// three sequential passes where this module runs one left-to-right.
     ///
     /// Both surfaces read the SAME fixture file, so a fixture case only passes when

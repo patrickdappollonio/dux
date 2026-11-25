@@ -3032,8 +3032,8 @@ mod tests {
         assert!(registry.recordings_settled_within(Duration::ZERO).is_ok());
     }
 
-    /// Review 26: a factory reset promises it "never kills a process whose
-    /// folder it can't read; it keeps that folder instead". It ends exactly
+    /// A factory reset never kills a process whose
+    /// folder it can't read; it keeps that folder instead. It ends exactly
     /// `session_processes_where(..).inside`, judged one process at a time,
     /// and a process whose OWN folder cannot be read lands in `inside` (not
     /// `unknown`) whenever its shell stands in the folder: so the reset
@@ -3529,7 +3529,7 @@ mod tests {
         );
     }
 
-    /// review9: a removal must keep the worktree when the registry's record
+    /// A removal must keep the worktree when the registry's record
     /// could not be saved before git runs (`record_not_saved`, whose sentence
     /// names "the session database may be busy"). A busy database makes the
     /// writer's write FAIL after SQLite's busy timeout, and the writer then
@@ -3669,7 +3669,7 @@ mod tests {
         );
     }
 
-    /// review9: the persisted registry entry carries the session's label, so a
+    /// The persisted registry entry carries the session's label, so a
     /// refusal after a restart still names WHAT is standing in the folder
     /// (here a project terminal), not "a process dux started".
     #[cfg(target_os = "linux")]

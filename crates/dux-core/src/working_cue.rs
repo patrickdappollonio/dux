@@ -6,8 +6,7 @@
 //! The web pulses its glyph on the same clock, and the glyph also
 //! bounces four times per period; the terminal UI keeps its spinner.
 //!
-//! Everything here is a function of wall-clock elapsed milliseconds, per the
-//! animation tenet, so the cadence does not depend on how often either surface
+//! Everything here is a function of wall-clock elapsed milliseconds, so the cadence does not depend on how often either surface
 //! ticks. It lives in core because both surfaces read the same period, the same
 //! step and the same floor, and a second copy of those numbers is exactly how
 //! the two cues drift apart.

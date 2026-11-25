@@ -1379,7 +1379,7 @@ mod tests {
         );
     }
 
-    /// review8: an agent deleted with its worktree KEPT while its startup
+    /// An agent deleted with its worktree KEPT while its startup
     /// command runs: nothing ends the command, it runs to completion (here it
     /// succeeds), and the result still tells the user dux stopped it.
     #[test]
@@ -1402,7 +1402,7 @@ mod tests {
         let _ = registry.forget_agent("session-1");
         let result = handle.join().expect("run thread");
         let err = result.status.expect_err("the run reports the deletion");
-        // Forgetting the agent now ends its startup command (review 10), so
+        // Forgetting the agent ends its startup command, so
         // the run is stopped; what matters is that the sentence says what
         // actually happened either way.
         if done.exists() {
@@ -1444,7 +1444,7 @@ mod tests {
         );
     }
 
-    /// review10: a rerun is claimed on the engine thread and its worker starts
+    /// A rerun is claimed on the engine thread and its worker starts
     /// a moment later. An agent deleted (worktree kept) in between has its
     /// logs deleted and its registration forgotten; `startup_session_of` is
     /// still `None`, so the delete ends nothing. The worker must not then

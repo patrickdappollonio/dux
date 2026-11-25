@@ -2604,11 +2604,11 @@ mod tests {
 
     #[test]
     fn push_and_pull_keep_their_spinners_while_their_workers_run() {
-        // Neither of these operations has an op registry of its own, so the
-        // first cut of liveness (which enumerated the registries) still called
-        // both of them timed out twenty seconds in, whatever the network was
-        // doing. Registration happens in the two spawn primitives instead, so
-        // both are covered without either dispatch site knowing about it.
+        // Neither of these operations has an op registry of its own, so liveness
+        // must not be derived by enumerating registries: both would be called
+        // timed out twenty seconds in, whatever the network was doing.
+        // Registration happens in the two spawn primitives instead, so both are
+        // covered without either dispatch site knowing about it.
         let (mut engine, tmp) = test_engine();
         let mut status = crate::statusline::KeyedStatusController::emitting_finals()
             .with_live_keys(engine.live_status_keys.clone());
@@ -4418,7 +4418,7 @@ mod tests {
             &["remote", "add", "origin", bare.path().to_str().unwrap()],
         );
         git_ok(repo.path(), &["push", "origin", "main"]);
-        // The dirt that used to abort the refresh.
+        // Dirt in the tracked files must not abort the refresh.
         std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
 
         let outcome = run_project_refresh(

@@ -385,10 +385,10 @@ mod tests {
         (stop, handle)
     }
 
-    /// The regression guard for the always-zero-CPU bug: `sysinfo` derives
-    /// per-process CPU from the delta between two refreshes, so a collector with
-    /// no baseline reports exactly 0.0 forever. A real load must read above zero
-    /// on the FIRST sample (the collector self-baselines) and on later ones.
+    /// `sysinfo` derives per-process CPU from the delta between two refreshes,
+    /// so a collector with no baseline reports exactly 0.0 forever. A real load
+    /// must read above zero on the FIRST sample (the collector self-baselines)
+    /// and on later ones.
     #[test]
     fn collector_reports_nonzero_cpu_under_load() {
         let (stop, handle) = burn_a_core();
@@ -726,11 +726,10 @@ mod tests {
 
     /// Threads share their process's address space, so on Linux `sysinfo`
     /// lists each userland thread in `sys.processes()` reporting the WHOLE
-    /// process's RSS. Without filtering `thread_kind().is_some()` entries,
-    /// `aggregate_tree` lists these threads as fake "children" and sums their
-    /// duplicated RSS into the parent total. This test proves the fix: no
-    /// child entry duplicates the root process's own RSS, and the real
-    /// `sleep` child process is still present.
+    /// process's RSS. `aggregate_tree` filters `thread_kind().is_some()`
+    /// entries, or it would list these threads as fake "children" and sum their
+    /// duplicated RSS into the parent total. No child entry duplicates the root
+    /// process's own RSS, and the real `sleep` child process is still present.
     #[test]
     fn aggregate_tree_excludes_threads_from_children() {
         let _guard = CHILD_PROCESS_TEST_LOCK
@@ -921,10 +920,9 @@ mod tests {
     // ---------------------------------------------------------------------
     // Ground-truth tests: these compare dux's numbers against what the OS
     // itself reports, not against our own reasoning about what sysinfo should
-    // be doing. Every bug this file has shipped (CPU pinned at exactly 0.0;
-    // threads counted as processes, inflating RSS ~3.5x) read as correct code
-    // and was only ever caught by measuring. These tests are that measurement,
-    // made permanent.
+    // be doing. A wrong CPU or RSS number (CPU pinned at exactly 0.0; threads
+    // counted as processes, inflating RSS) reads as correct code and is only
+    // caught by measuring.
     // ---------------------------------------------------------------------
 
     /// Read a process's resident set size straight from the kernel, in bytes.

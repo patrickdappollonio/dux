@@ -228,7 +228,7 @@ impl StatusUpdate {
 
     /// Withhold this message from the named surfaces (builder form). The
     /// surfaces decide separately, so the caller states both halves at once and
-    /// says which tenet case the quieted half fails.
+    /// says which always-confirm case the quieted half fails.
     #[must_use]
     pub fn quiet_on(mut self, quiet_on: QuietSurfaces) -> Self {
         self.quiet_on = quiet_on;
@@ -2205,7 +2205,7 @@ impl Engine {
         }
         // STATUS is an any-tab rollup, exactly like liveness and attention, so
         // any tab coming up makes the agent active. Adding a tab to a dormant
-        // agent launches it and used to leave the agent sitting under Inactive
+        // agent launches it, so it must not leave the agent sitting under Inactive
         // on both surfaces, with a live provider in it and nothing saying so.
         // The exit path already agrees: it detaches the agent only once its LAST
         // live tab is gone.
@@ -7532,7 +7532,7 @@ mod tests {
 
     #[test]
     fn branch_sync_skips_session_with_rename_in_flight() {
-        // F-D: a session whose own rename is mid-flight must not be treated as
+        // A session whose own rename is mid-flight must not be treated as
         // external drift by the branch-sync poller: no mutation, no warn.
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "server-mode");
@@ -8101,9 +8101,9 @@ mod tests {
         assert_eq!(engine.unstaged_files[0].path, "keep-unstaged.txt");
     }
 
-    /// The terminal UI's own poller used to go quiet on a standing git failure
-    /// while the browser raised a warning about the same repository. Both now
-    /// come from the one tracker, so they say the same sentence on the same key.
+    /// The terminal UI's own poller and the browser both report a standing git
+    /// failure from the one tracker, so they say the same sentence on the same
+    /// key.
     #[test]
     fn a_standing_changed_files_failure_reaches_the_status_line() {
         let (mut engine, _tmp) = test_engine();
@@ -10623,7 +10623,7 @@ mod tests {
             AgentLaunchFailedOutcome::Tab { tab_id, agent_label, message, .. }
                 if tab_id == "tab-1" && agent_label == "s1-title" && message == "boom"
         ));
-        // G-T1: a brand-new tab's very first spawn failure (`is_fresh: true`)
+        // A brand-new tab's very first spawn failure (`is_fresh: true`)
         // must delete the row so it doesn't linger as a permanently-broken
         // dormant tab, both in memory and in SQLite.
         assert!(
@@ -10643,7 +10643,7 @@ mod tests {
 
     #[test]
     fn process_agent_launch_failed_tab_keeps_row_when_not_fresh() {
-        // G-T1: the counterpart to the fresh-delete case above. An explicit
+        // The counterpart to the fresh-delete case above. An explicit
         // relaunch of an already-persisted dormant tab (`is_fresh: false`) must
         // KEEP its row on failure so the user can retry, surfacing the real
         // error instead of silently losing the tab.
@@ -11793,7 +11793,7 @@ mod tests {
     #[test]
     fn apply_pr_backoff_hard_failure_not_masked_by_healthy_rate() {
         // A host with a HEALTHY rate reading AND hard_failed=true must still back
-        // off (regression guard for the masking bug).
+        // off.
         let (tx, _rx) = std::sync::mpsc::channel();
         let shared = backoff_map();
         Engine::apply_pr_backoff(

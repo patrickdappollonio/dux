@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(lease.renamed("old"), "old");
     }
 
-    /// review9: nested ordering for a destructive claim. A worktree removal of
+    /// Nested ordering for a destructive claim. A worktree removal of
     /// `/p/x` is running (its agent's processes are gone; git is about to run
     /// or running). An editor delete or move of `/p`, which deletes or moves
     /// `/p/x` with it, must not be granted while that removal runs: two

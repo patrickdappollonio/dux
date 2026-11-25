@@ -1182,16 +1182,13 @@ fn entry_literal_path(worktree: &Path, rel_path: &str) -> anyhow::Result<PathBuf
         })
         // `Path::components()` normalizes away a non-leading `.` segment, so
         // `sub/.` does NOT surface a `Component::CurDir` above even though the
-        // raw string contains one. Check the raw, unnormalized string instead.
-        // The hole this closes: `delete_entry(worktree,
-        // "<symlink>/.")` let a trailing `.` make `symlink_metadata` dereference
-        // the preceding symlink (POSIX resolves `.` against the target
-        // directory, so it reports is_dir=true, is_symlink=false) AND made
+        // raw string contains one. Check the raw, unnormalized string instead:
+        // a trailing `.` makes `symlink_metadata` dereference the preceding
+        // symlink (POSIX resolves `.` against the target directory) AND makes
         // `Path::parent()` on the joined path strip the symlink component too,
-        // so the parent-containment check below ran against the always-safe
-        // worktree root while `remove_dir_all` acted on the symlink's external
-        // target's contents. See `delete_refuses_curdir_component` for the
-        // regression test.
+        // so the parent-containment check below would run against the
+        // always-safe worktree root while `remove_dir_all` acted on the
+        // symlink's external target. See `delete_refuses_curdir_component`.
         || rel_path.split('/').any(|seg| seg == ".")
     {
         anyhow::bail!("invalid worktree path: {rel_path}");
@@ -1953,9 +1950,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
     }
 
-    /// Previously named `symlink_escaping_worktree_is_rejected`. Under the new
-    /// read-permissive behavior, an outside-resolving symlink is readable
-    /// (`read_only: true`). The write path remains strict.
+    /// An outside-resolving symlink is readable (`read_only: true`). The write
+    /// path remains strict.
     #[test]
     fn symlink_escaping_worktree_is_returned_read_only() {
         let dir = worktree();
@@ -1978,7 +1974,6 @@ mod tests {
         );
     }
 
-    /// Previously named `dangling_symlink_is_rejected_before_its_target_can_appear`.
     /// Dangling symlinks (target does not exist) cannot be canonicalized, so
     /// `read_file` returns an error.
     #[test]
@@ -1995,9 +1990,8 @@ mod tests {
         assert!(!target.exists());
     }
 
-    /// Previously named `git_directory_is_refused`. Under the new behavior, reads
-    /// of `.git/` paths are allowed but return `read_only: true`. Writes remain
-    /// refused.
+    /// Reads of `.git/` paths are allowed but return `read_only: true`. Writes
+    /// are refused.
     #[test]
     fn git_directory_write_is_refused_read_is_allowed() {
         let dir = worktree();
@@ -2041,9 +2035,8 @@ mod tests {
         );
     }
 
-    /// Previously named `symlink_into_git_directory_is_refused`. Under the new
-    /// behavior, reads through a symlink into `.git/` are allowed but
-    /// `read_only: true`. Writes remain refused.
+    /// Reads through a symlink into `.git/` are allowed but `read_only: true`.
+    /// Writes are refused.
     #[test]
     fn symlink_into_git_directory_is_read_only_write_still_refused() {
         // A symlinked dir resolving into .git sidesteps the literal name check;
@@ -2065,18 +2058,16 @@ mod tests {
         assert!(!dir.path().join(".git/hooks/post-checkout").exists());
     }
 
-    /// Regression test for the intermediate-symlink containment bypass.
+    /// Containment is checked on the intermediate-symlink path, not only the
+    /// LEAF component.
     ///
-    /// Before the fix, `read_file` only checked whether the LEAF path component
-    /// was a symlink. An intermediate directory symlink (e.g. `evil/ -> /tmp/…`)
-    /// was not caught: the leaf `secret.txt` is a plain file, so the code took
-    /// the non-symlink branch and returned `read_only: false`, serving an
-    /// out-of-tree file as if it were an editable in-tree file.
-    ///
-    /// After the fix, `resolve_worktree_path_for_read` canonicalizes the FULL
-    /// joined path and checks containment against the canonical worktree. Any
-    /// path that resolves outside the worktree via ANY symlink (intermediate or
-    /// leaf) is returned with `read_only: true`.
+    /// An intermediate directory symlink (e.g. `evil/ -> /tmp/…`) leaves the
+    /// leaf `secret.txt` a plain file, so a leaf-only check would return
+    /// `read_only: false` and serve an out-of-tree file as if it were an
+    /// editable in-tree file. `resolve_worktree_path_for_read` canonicalizes the
+    /// FULL joined path and checks containment against the canonical worktree,
+    /// so any path that resolves outside the worktree via ANY symlink
+    /// (intermediate or leaf) is returned with `read_only: true`.
     #[test]
     fn intermediate_dir_symlink_escaping_worktree_is_read_only() {
         let worktree_dir = worktree();
@@ -2091,10 +2082,9 @@ mod tests {
         // rel_path = "evil/secret.txt"
         //   - The leaf "secret.txt" is a plain file (not a symlink).
         //   - The intermediate "evil/" is a symlink pointing outside the worktree.
-        //   - Before the fix: symlink_metadata on the leaf says "regular file",
-        //     so the code returned read_only: false, the bypass.
-        //   - After the fix: the full canonical path resolves outside the
-        //     worktree, so read_only must be true.
+        //   - symlink_metadata on the leaf alone says "regular file", so only the
+        //     full canonical path, which resolves outside the worktree, gives
+        //     read_only: true.
         let f = read_file(worktree_dir.path(), "evil/secret.txt").unwrap();
         assert_eq!(
             f.content, "classified\n",
@@ -2636,10 +2626,10 @@ mod tests {
             assert_eq!(info.git, GitStatusView::Clean);
         }
 
-        /// The lie this state exists to stop: an IGNORED file is listed by no
-        /// `git status`, so it used to report as tracked and unmodified. The
-        /// editor's tree is a plain filesystem browser with no ignore filter,
-        /// so `node_modules` is one right-click away from that answer.
+        /// An IGNORED file is listed by no `git status`, so it must not report as
+        /// tracked and unmodified. The editor's tree is a plain filesystem browser
+        /// with no ignore filter, so `node_modules` is one right-click away from
+        /// that answer.
         #[test]
         fn an_ignored_file_is_reported_as_ignored_not_unmodified() {
             let dir = repo_worktree();
@@ -2749,15 +2739,13 @@ mod tests {
         }
 
         /// Both assertions below exist because the RESULT of a no-replace
-        /// rename is not evidence of how it was reached: reverting the
-        /// `renameat_with` call to a stat followed by `std::fs::rename` leaves
-        /// every other rename test in this file green, since a stat in front
-        /// of `rename(2)` returns `DestinationExists` for exactly the inputs a
-        /// test can set up. So these assert the BRANCH instead. Both supported
-        /// targets implement the flag (Linux `RENAME_NOREPLACE`, macOS
-        /// `renameatx_np`/`RENAME_EXCL`), so the fallback must not run here,
-        /// and it running is the regression that matters: it is the shape the
-        /// TOCTOU window comes back in.
+        /// rename is not evidence of how it was reached: a stat followed by
+        /// `std::fs::rename` returns `DestinationExists` for exactly the inputs
+        /// a test can set up, so every other rename test would stay green. So
+        /// these assert the BRANCH instead. Both supported targets implement the
+        /// flag (Linux `RENAME_NOREPLACE`, macOS `renameatx_np`/`RENAME_EXCL`),
+        /// so the fallback must not run here: it is the shape the TOCTOU window
+        /// comes back in.
         #[test]
         fn a_successful_rename_goes_through_the_no_replace_syscall() {
             let dir = tempfile::tempdir().unwrap();

@@ -7538,11 +7538,11 @@ pub fn is_under(base: &Path, candidate: &Path) -> bool {
 /// concern.
 ///
 /// A DANGLING symlink is checked on its own branch: `exists()` FOLLOWS the link
-/// and so answers false for one, which used to skip the containment checks
-/// entirely and let an escaping link through purely because its target had been
-/// removed. Its destination is resolved through the link's canonicalized
-/// directory and normalized textually, and an escaping or `.git`-bound one is
-/// refused exactly as a live link's is.
+/// and so answers false for one, so it would skip the containment checks and
+/// let an escaping link through purely because its target is gone. Its
+/// destination is resolved through the link's canonicalized directory and
+/// normalized textually, and an escaping or `.git`-bound one is refused
+/// exactly as a live link's is.
 ///
 /// Used by every surface that reads or writes a file from a client path (the
 /// diff engine, the web editor endpoints) so the escape check lives in one
@@ -7668,7 +7668,7 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 /// True when `candidate`'s realpath lies inside a `.git` directory under the
 /// worktree: a literal nested `.git`, or one reached through a symlinked
 /// directory (which the literal component check can't see). Used to close the
-/// symlink-into-`.git` gap on both read/write and on file creation (where the
+/// symlink-into-`.git` gap on read/write and on file creation (where the
 /// parent dir is checked). Returns false if either path can't be canonicalized.
 pub(crate) fn resolves_into_git_dir(worktree: &Path, candidate: &Path) -> bool {
     match (worktree.canonicalize(), candidate.canonicalize()) {
@@ -7990,11 +7990,11 @@ pub(crate) mod test_support {
     /// remote resolve to a host nobody wrote down. `gh.rs` demonstrates the
     /// rewrite happening rather than asserting it from memory.
     ///
-    /// The isolation is PER COMMAND, set through the child's environment. It
-    /// used to be process-wide, via `std::env::set_var`, which is unsound in a
-    /// threaded test binary (which is why Rust marks it unsafe) and was also
-    /// incomplete: several fixtures never called the helper at all, and any of
-    /// them could run first or run alongside it.
+    /// The isolation is PER COMMAND, set through the child's environment, not
+    /// process-wide via `std::env::set_var`, which is unsound in a threaded test
+    /// binary (which is why Rust marks it unsafe) and would also be incomplete:
+    /// any fixture that never called the helper could run first or alongside
+    /// it.
     ///
     /// Per-command isolation cannot reach a git command spawned by PRODUCTION
     /// code, which inherits the test process's environment. That is deliberate
@@ -8320,14 +8320,13 @@ const PERCENT_MOVES_THE_BOUNDARY: [&str; 4] = ["ssh", "git+ssh", "ssh+git", "git
 /// see `github_host`.
 const SSH_TRANSPORT_SCHEMES: [&str; 3] = ["ssh", "git+ssh", "ssh+git"];
 
-/// [`parse_github_remote_with`] under the rule this function used to hardcode
-/// (`github.com` or `github.*`).
+/// [`parse_github_remote_with`] under the legacy name rule (`github.com` or
+/// `github.*`).
 ///
 /// It exists for the grammar tests below. WHICH SPELLINGS PARSE and WHICH HOSTS
-/// QUALIFY are two separate questions, and only the second one moved: pinning
-/// the tests to the legacy policy keeps every one of them meaning exactly what
-/// it meant when it was written, so this change cannot quietly widen or narrow
-/// the address grammar under them.
+/// QUALIFY are two separate questions: pinning the tests to the legacy policy
+/// keeps them about the grammar alone, so a change to the host policy cannot
+/// quietly widen or narrow the address grammar under them.
 #[cfg(test)]
 fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
     parse_github_remote_with(url, &crate::gh::GithubHostPolicy::LegacyNameRule)
@@ -8352,8 +8351,7 @@ fn parse_github_remote_with(
 /// two indistinguishable.
 pub(crate) fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
     // The input is consumed EXACTLY, with no trimming of any kind. Trimming
-    // used to happen here and then again inside the literal check, which
-    // MANUFACTURED matches out of values that are not GitHub remotes:
+    // would MANUFACTURE matches out of values that are not GitHub remotes:
     // `" ssh://github.com/o/r "` and a value with a trailing tab both became
     // `github.com` `o/r`. A git remote can hold edge whitespace, and what git
     // would then contact is a host with a space in it. Git's own record
@@ -8507,25 +8505,13 @@ pub(crate) fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
     //    and the scp-like one REQUIRES its colon before any slash. A value with
     //    neither a scheme nor such a colon is a RELATIVE LOCAL PATH.
     //
-    //    There used to be a branch here accepting the bare `github.com/owner/
-    //    repo` spelling, and it was the oldest line in this function. It was
-    //    wrong: git reads that as a directory. MEASURED, git 2.55.0, isolated
-    //    `HOME`, `GIT_CONFIG_NOSYSTEM=1`, a stub `GIT_SSH_COMMAND` printing its
-    //    argv, and a `.invalid` host so nothing could leave the machine. With
-    //    the remote set to `nonexistent-host.invalid/o/r`, `GIT_TRACE=1 git
-    //    ls-remote` runs `git-upload-pack 'nonexistent-host.invalid/o/r'`
-    //    LOCALLY and fails with "does not appear to be a git repository"; the
-    //    stub ssh is never called and no name is ever resolved. Create the
-    //    directory `nonexistent-host.invalid/o/r` as a bare repo and the same
-    //    command succeeds against it. The scp-like spelling of the same words,
-    //    `nonexistent-host.invalid:o/r`, instead reaches ssh as
-    //    `nonexistent-host.invalid git-upload-pack 'o/r'`.
-    //
-    //    So accepting the bare form meant reporting a folder on disk as a
-    //    GitHub repository and then asking GitHub about it. Removing the branch
-    //    also removes the last asymmetry in this function: it was the one place
-    //    that applied the web family's rules to something git does not run over
-    //    a web transport.
+    //    A bare `github.com/owner/repo` is therefore not accepted: git runs
+    //    `git-upload-pack 'github.com/owner/repo'` LOCALLY against a directory
+    //    of that name and never resolves the host (measured with git 2.55.0,
+    //    isolated `HOME`, `GIT_CONFIG_NOSYSTEM=1`, a stub `GIT_SSH_COMMAND` and
+    //    a `.invalid` host). The scp-like `host:o/r` instead reaches ssh as
+    //    `host git-upload-pack 'o/r'`. Accepting the bare form would report a
+    //    folder on disk as a GitHub repository.
     None
 }
 
@@ -8555,9 +8541,9 @@ pub(crate) fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
 /// hazard this parser exists to remove. No GitHub owner or repository name can
 /// contain one, so it is refused wherever it appears rather than reconciled.
 ///
-/// Edge whitespace is refused too. The value used to be trimmed before it got
-/// here, so `" ssh://github.com/o/r "` became a GitHub remote. It is not one:
-/// git would look up a host with a space in it.
+/// Edge whitespace is refused too: the value is not trimmed, so
+/// `" ssh://github.com/o/r "` is not a GitHub remote (git would look up a host
+/// with a space in it).
 fn remote_input_is_literal(url: &str) -> bool {
     if url.is_empty() {
         return false;
@@ -8629,10 +8615,10 @@ fn split_scp_like(url: &str) -> Option<(&str, &str)> {
     // 'remote-nonexistent-host.invalid' is not a git command" and "remote helper
     // 'nonexistent-host.invalid' aborted session", never touching ssh, while the
     // single-colon `nonexistent-host.invalid:o/r` reaches ssh as
-    // `nonexistent-host.invalid git-upload-pack 'o/r'`. dux used to read the
-    // first of those as an scp-like remote and answer host `github.com`,
-    // repository `:o/r`: a host git never contacts, and an owner carrying a
-    // stray colon.
+    // single-colon `nonexistent-host.invalid:o/r` reaches ssh as
+    // `nonexistent-host.invalid git-upload-pack 'o/r'`. So the first of those is
+    // not an scp-like remote: reading it as one would answer host `github.com`
+    // and repository `:o/r`, a host git never contacts.
     //
     // The `user@` spelling is refused here too, for a measurably different
     // reason worth writing down: git requires a helper name to be made of
@@ -8720,12 +8706,11 @@ fn decode_remote_path(raw_path: &str) -> Option<String> {
 /// EXACTLY two components, for every family of remote. To git the whole path is
 /// the repository path, so a third segment means git addresses a repository
 /// that is not `owner/repo`, and answering `owner/repo` would send `gh`
-/// somewhere git never goes. The http(s) and bare forms used to tolerate extra
-/// segments because they double as the URL a user copies out of a browser,
-/// where `/tree/main` is a web route layered on the repository path. That
-/// leniency is gone: this function's input comes only from
-/// `git remote get-url`, never from an address bar, so tolerating a browser
-/// route bought nothing and produced wrong answers.
+/// somewhere git never goes. No family tolerates extra segments, even though
+/// an http(s) URL doubles as the one a user copies out of a browser, where
+/// `/tree/main` is a web route layered on the repository path: this function's
+/// input comes only from `git remote get-url`, never from an address bar, so
+/// tolerating a browser route would only produce wrong answers.
 fn owner_repo_from_path(path: &str) -> Option<String> {
     let mut segments = path.split('/');
     let owner = segments.next()?;
@@ -8771,8 +8756,8 @@ enum RemoteTransport {
 ///
 /// This function answers "which host is this really" and nothing else. Whether
 /// dux may hand that host to `gh` is the policy's answer, asked once, by
-/// [`classify_github_remote`]; it used to be asked here too, which is what made
-/// a denied host indistinguishable from an unparseable address.
+/// [`classify_github_remote`]; asking it here too would make a denied host
+/// indistinguishable from an unparseable address.
 ///
 /// That normalisation is deliberately the ONLY widening here. It is not a
 /// general "any `ssh.` prefix" rule: it is one hostname GitHub documents, and
@@ -10814,7 +10799,7 @@ mod tests {
         assert_eq!(summary.deleted, 1);
     }
 
-    /// Replaces the mode/symlink coverage the mirror tests used to provide.
+    /// Mode and symlink coverage for the copy.
     #[test]
     fn copy_preserves_file_modes_and_symlinks() {
         let repo = init_test_repo();
@@ -12318,7 +12303,7 @@ mod tests {
     /// is not there: measured on git 2.53, a missing but registered worktree
     /// is removed cleanly, while one git no longer knows ("is not a working
     /// tree", the registration having gone with an earlier removal that
-    /// failed part-way) fails, and that failure used to prune everything.
+    /// failed part-way) fails, and that failure must not prune everything.
     #[test]
     fn removing_a_vanished_worktree_leaves_an_unreachable_sibling_registered() {
         let repo = init_test_repo();
@@ -13401,9 +13386,9 @@ mod tests {
         String::from_utf8_lossy(&listed.stdout).to_string()
     }
 
-    /// The reported bug: create an agent, let its branch drift, delete it, and
-    /// the BIRTH branch survives, so recreating the agent under its old name
-    /// fails with "branch already exists". Both branches must go.
+    /// Create an agent, let its branch drift, delete it: the BIRTH branch must
+    /// go too, or recreating the agent under its old name fails with "branch
+    /// already exists".
     #[test]
     fn remove_worktree_also_deletes_a_drifted_initial_branch() {
         let repo = init_test_repo();
@@ -13463,11 +13448,10 @@ mod tests {
         );
     }
 
-    /// The verified bug: `git branch -D` also fails when the branch is CHECKED
-    /// OUT in another worktree, and dux used to call every failure "already
-    /// gone". The branch is still there, so the message said the opposite of
-    /// the truth and the name collision it exists to warn about survived
-    /// silently.
+    /// `git branch -D` also fails when the branch is CHECKED OUT in another
+    /// worktree. That is not "already gone": the branch is still there, so
+    /// saying so would hide the name collision the message exists to warn
+    /// about.
     #[test]
     fn remove_worktree_reports_a_branch_git_refused_to_delete() {
         let repo = init_test_repo();
@@ -13645,7 +13629,7 @@ mod tests {
         assert_eq!(clean_git_reason("  "), "git gave no reason.");
     }
 
-    /// The refname tenet, applied to the SECOND deletion path: without `--` git
+    /// A dash-leading refname on the SECOND deletion path: without `--` git
     /// reads the birth branch's name as a flag and leaves the ref behind while
     /// still exiting 0, so dux would report a clean delete of something it never
     /// touched.
@@ -14994,14 +14978,11 @@ mod tests {
         );
     }
 
-    /// This test used to assert the opposite: that `/tree/main` was stripped and
-    /// the remote answered `octocat/Hello-World`. It was changed deliberately.
     /// The input to this parser comes only from `git remote get-url`, never from
     /// a browser address bar, and to git the whole path is the repository path,
     /// so `/octocat/Hello-World/tree/main` addresses a repository that is not
-    /// `octocat/Hello-World`. A remote is not a browser URL, and a wrong
-    /// repository name (handed to `gh` as `--repo`) is worse than no repository
-    /// name.
+    /// `octocat/Hello-World`. A wrong repository name (handed to `gh` as
+    /// `--repo`) is worse than no repository name.
     #[test]
     fn parse_github_url_rejects_extra_path_segments_on_every_family() {
         for url in [
@@ -15035,8 +15016,7 @@ mod tests {
         }
     }
 
-    /// The parser consumes its input EXACTLY. It used to trim leading and
-    /// trailing whitespace first, which MANUFACTURED a match: a remote really
+    /// The parser consumes its input EXACTLY, with no trimming: a remote really
     /// can hold edge whitespace, and `" ssh://github.com/o/r "` is not a GitHub
     /// remote, it is a remote whose host git would look up with a space in it.
     #[test]
@@ -15087,15 +15067,12 @@ mod tests {
             "ssh://github.com/octocat/Hello-World.git\n\n",
             "ssh://github.com/octocat/Hello-World.git\r\r\n",
             // A carriage return before the terminator is DATA, not part of the
-            // terminator. This used to be pinned the other way round, as a
-            // remote resolving to `octocat/Hello-World`, and it passed for an
-            // ambiguous reason: it read the `\r\n` as a CRLF line ending, which
-            // git does not write on macOS or Linux and which this project has
-            // no platform to receive. What really produces this output is a
-            // remote whose own path ends in a carriage return (an
-            // `url.*.insteadOf` replacement ending in one is enough), where git
-            // appended only the `\n`. Stripping the `\r` too would delete a
-            // byte of the remote and answer for an address nobody wrote, so
+            // terminator: git does not write CRLF line endings on macOS or Linux.
+            // What really produces this output is a remote whose own path ends in
+            // a carriage return (an `url.*.insteadOf` replacement ending in one
+            // is enough), where git appended only the `\n`. Stripping the `\r`
+            // too would delete a byte of the remote, so exactly one `\n` comes
+            // off and the surviving control character is refused like any other.
             // exactly one `\n` comes off and the surviving control character is
             // refused like any other.
             "ssh://github.com/octocat/Hello-World.git\r\n",
@@ -15138,12 +15115,11 @@ mod tests {
     }
 
     /// A decoded slash is refused wherever it appears, and the boundaries are
-    /// the place that took two goes to get right: the ONE syntactic leading
-    /// slash used to be removed by trimming EVERY slash, which erased a decoded
-    /// one sitting next to it, so `/%2Fo/r` answered `o/r`. The syntactic
-    /// slashes now come off BEFORE decoding, exactly one at each end, and each
-    /// remaining raw segment is decoded on its own, so a decoded slash cannot
-    /// be trimmed away and cannot pass as a separator either.
+    /// A decoded slash is refused wherever it appears, boundaries included: the
+    /// syntactic slashes come off BEFORE decoding, exactly one at each end, and
+    /// each remaining raw segment is decoded on its own, so a decoded slash
+    /// cannot be trimmed away and cannot pass as a separator either (`/%2Fo/r`
+    /// does not answer `o/r`).
     #[test]
     fn parse_github_remote_refuses_decoded_separators_at_the_path_boundaries() {
         for url in [
@@ -15154,7 +15130,7 @@ mod tests {
             // parser tolerates.
             "ssh://github.com/octocat/Hello-World%2F",
             "https://github.com/octocat/Hello-World.git%2F",
-            // And one in the middle, which used to be read as a separator.
+            // And one in the middle.
             "ssh://github.com/octocat/Hello-World%2Fextra",
             // An empty component is an empty component however it arrives.
             "ssh://github.com/octocat/Hello-World//",
@@ -15372,7 +15348,7 @@ mod tests {
             })
         };
         for url in [
-            // The regressed case: an escape inside the password.
+            // An escape inside the password.
             "https://user:p%40ss@github.com/o/r.git",
             "http://u:p%40ss@github.com/o/r",
             // An escaped slash in the user part does NOT move the boundary
@@ -15458,7 +15434,7 @@ mod tests {
     /// case: `ssh://NONEXISTENT-HOST.INVALID/o/r` reaches ssh as
     /// `NONEXISTENT-HOST.INVALID git-upload-pack '/o/r'`, and
     /// `git@NonExistent-Host.Invalid:o/r.git` reaches it too. Only the scheme is
-    /// case sensitive; making both insensitive was the regression this pins.
+    /// case sensitive.
     #[test]
     fn parse_github_remote_refuses_a_scheme_spelled_in_the_wrong_case() {
         for url in [
@@ -15488,12 +15464,9 @@ mod tests {
         ] {
             assert_eq!(parse_github_remote(url), github("o/r"), "{url}");
         }
-        // `GitHub.com/o/r` used to be the fifth row of that accept list, as the
-        // bare family's host-case coverage. Host case is not what is wrong with
-        // it: git reads a value with no scheme and no colon as a relative LOCAL
-        // PATH, so accepting it in any case meant asking GitHub about a
-        // directory. See `parse_github_remote_refuses_a_bare_host_and_path` for
-        // the measurement.
+        // `GitHub.com/o/r` is not in this accept list: git reads a value with no
+        // scheme and no colon as a relative LOCAL PATH, in any case. See
+        // `parse_github_remote_refuses_a_bare_host_and_path` for the measurement.
         assert_eq!(parse_github_remote("GitHub.com/o/r"), None);
     }
 
@@ -15514,8 +15487,9 @@ mod tests {
     /// SSH-INVOKED argv: nonexistent-host.invalid git-upload-pack 'o/r'
     /// ```
     ///
-    /// dux used to answer host `github.com`, repository `:o/r` for the first of
-    /// those: a host git never contacts, and an owner with a stray colon on it.
+    /// Reading the first of those as scp-like would answer host `github.com`,
+    /// repository `:o/r`: a host git never contacts, and an owner with a stray
+    /// colon on it.
     ///
     /// The `user@` spelling is refused too, but for a measurably DIFFERENT
     /// reason, and the difference is worth stating so nobody rediscovers it as a
@@ -15623,8 +15597,7 @@ mod tests {
             ("https://user%2Fx@github.com/o/r.git", github("o/r")),
             // No scheme and no colon before the first slash is not an address:
             // git reads it as a relative local path, so none of these name a
-            // repository on github.com. This row used to read
-            // `("github.com/o/r", github("o/r"))`.
+            // repository on github.com.
             ("github.com/o/r", None),
             ("github.com/o/r/x", None),
             ("GitHub.com/o/r", None),
@@ -15967,8 +15940,7 @@ mod tests {
 
     /// A trailing slash is not part of the repository name, and it has to come
     /// off before the `.git` suffix or the suffix no longer matches. Exactly ONE
-    /// comes off, though: `Hello-World//` used to be pinned here as `o/r` and is
-    /// now refused, because the second slash leaves an empty component and an
+    /// comes off, though: `Hello-World//` is refused, because the second slash leaves an empty component and an
     /// empty component is not a repository. That is the same rule that stops a
     /// decoded `%2F` at the boundary from impersonating the syntactic slash; see
     /// `parse_github_remote_refuses_decoded_separators_at_the_path_boundaries`.
@@ -16033,17 +16005,12 @@ mod tests {
     }
 
     /// Hostnames are case-insensitive, and the parsed host is handed to `gh`,
-    /// so it is compared and stored lowercased. A capitalised host used to fall
-    /// into the same silent no-pull-request-anywhere failure as the ssh one.
+    /// so it is compared and stored lowercased; a capitalised host must not fall
+    /// into the silent no-pull-request-anywhere failure of the ssh one.
     ///
-    /// This list used to carry `SSH://git@GitHub.com/octocat/Hello-World.git`
-    /// as an accepted row, and it passed for the wrong reason: the round that
-    /// made the HOST case insensitive checked the scheme after the `url` crate
-    /// had lowercased it, which made the SCHEME case insensitive too. Git's is
-    /// not (measured in
-    /// `parse_github_remote_refuses_a_scheme_spelled_in_the_wrong_case`), so
-    /// that row asserted dux answering for a remote git cannot connect with. It
-    /// has moved to that test, as a refusal.
+    /// The SCHEME stays case sensitive, because git's is (measured in
+    /// `parse_github_remote_refuses_a_scheme_spelled_in_the_wrong_case`), so an
+    /// uppercase-scheme row is a refusal in that test, not an accepted row here.
     #[test]
     fn parse_github_host_is_matched_and_stored_case_insensitively() {
         for url in [
@@ -16087,8 +16054,8 @@ mod tests {
             parse_github_remote("ftp://github.com/octocat/Hello-World"),
             None
         );
-        // `git+ssh://` used to be pinned as rejected here. It is a valid git
-        // scheme that invokes SSH, so it is now accepted; see
+        // `git+ssh://` is a valid git scheme that invokes SSH, so it is
+        // accepted; see
         // `parse_github_remote_accepts_the_ssh_scheme_aliases`.
         assert_eq!(
             parse_github_remote("git+ssh://github.com/octocat/Hello-World"),

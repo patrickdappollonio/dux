@@ -2335,9 +2335,8 @@ mod tests {
 
     #[test]
     fn a_failed_symlink_probe_fails_the_request_instead_of_renaming_around_it() {
-        // The probe used to swallow every error into `false`, so an I/O or
-        // permission failure became an ordinary collision and the loop advanced
-        // to the next name. That contradicts the promised rule outright: the one
+        // The probe must not swallow an error into `false`: an I/O or permission
+        // failure is not an ordinary collision to advance past, because the one
         // look that could have seen a symlink is exactly the one that failed.
         //
         // These branches cannot be built on a real filesystem unprivileged,
@@ -2690,11 +2689,10 @@ mod tests {
 
     #[test]
     fn a_process_dux_cannot_read_refuses_the_drop_instead_of_writing_elsewhere() {
-        // The bug, exactly as it behaved: every lookup error was discarded and
-        // the spawn directory was then opened unconditionally, so a terminal
-        // whose shell dux is not allowed to read wrote into the spawn directory
-        // and the toast confidently named it. Recorded before the fix: the chain
-        // "landed on" the spawn dir with no complaint.
+        // A lookup error must not be discarded and the spawn directory opened
+        // unconditionally: a terminal whose shell dux is not allowed to read
+        // would then write into the spawn directory and the toast would
+        // confidently name it.
         //
         // The seam is the probe, so the two failures are told apart by their
         // MEANING rather than by finding a real process of another user.
@@ -2781,8 +2779,6 @@ mod tests {
     fn a_surviving_group_member_answers_when_the_foreground_leader_has_exited() {
         // A pipeline whose first stage finished is ordinary: the group still owns
         // the terminal, so the shell's directory is NOT where the user is.
-        // Recorded before the fix: the chain landed on the shell's directory and
-        // said nothing.
         //
         // Constructed rather than raced for. The leader exits immediately; a
         // grandchild in the SAME process group stays alive in another directory,
@@ -2844,15 +2840,12 @@ mod tests {
     fn an_exited_but_unreaped_process_is_gone_rather_than_alive() {
         // A zombie: the process has exited and nobody has reaped it, so the pid
         // is still allocated (it is holding an exit status for its parent) but
-        // there is nothing behind it. Verified against this kernel before the
-        // fix: /proc/<pid>/cwd and /proc/<pid>/ns/mnt both answer ENOENT while
-        // kill(pid, 0) SUCCEEDS.
+        // there is nothing behind it. /proc/<pid>/cwd and /proc/<pid>/ns/mnt both
+        // answer ENOENT while kill(pid, 0) SUCCEEDS.
         //
-        // So asking signal 0 to tell "gone" from "alive but not ours" gets the
-        // wrong answer here, and the wrong answer was CwdProbe::Failed, which
-        // refuses the whole drop. Recorded before the fix: `process_exists`
-        // said true and `probe_process_cwd` classified a finished process as a
-        // failure.
+        // So signal 0 cannot tell "gone" from "alive but not ours" here, and a
+        // finished process must not be classified CwdProbe::Failed, which refuses
+        // the whole drop.
         //
         // The state is CONSTRUCTED, not raced for: the child is never waited
         // on, and the test does not continue until /proc says its state is Z.
@@ -2891,11 +2884,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_surviving_member_answers_for_a_leader_that_was_never_reaped() {
-        // The end-to-end shape of the same bug, and the reason the existing
-        // surviving-group test does not catch it: that one calls `wait` on the
+        // The end-to-end shape of the zombie case, which the existing
+        // surviving-group test does not cover: that one calls `wait` on the
         // leader, which is exactly what a terminal's shell does NOT do
-        // instantly. Recorded before the fix: the drop was REFUSED with an I/O
-        // error for the leader instead of landing in the live member's folder.
+        // instantly. The drop must land in the live member's folder, not be
+        // refused with an I/O error for the leader.
         use std::os::unix::process::CommandExt;
 
         let member_dir = tmp();
@@ -2962,11 +2955,9 @@ mod tests {
 
     #[test]
     fn a_group_scan_that_could_not_read_a_process_is_not_an_empty_group() {
-        // The scan used to discard every per-entry failure and return whatever
-        // it managed to collect, so a group it could not fully inspect came back
-        // as an EMPTY group, which the chain reads as "the whole job ended" and
-        // falls through to the shell. Recorded before the fix: the drop landed
-        // in the shell's directory and the toast named it.
+        // A scan that cannot fully inspect a group must not come back as an
+        // EMPTY group, which the chain reads as "the whole job ended" and falls
+        // through to the shell.
         //
         // The classification is a pure function because a real unreadable
         // /proc/<pid>/stat cannot be built here: the file is world-readable, and
@@ -3425,10 +3416,9 @@ mod tests {
                     }
                 },
                 // The real scan over the whole machine, narrowed to the one
-                // process this test owns: the group verdict it produces for the
-                // odd name is the regression, and every other program on the
-                // machine is noise that would make the drop refuse for reasons
-                // that have nothing to do with the name.
+                // process this test owns: every other program on the machine is
+                // noise that would make the drop refuse for reasons that have
+                // nothing to do with the name.
                 move |pgid| match scan_entry(odd_pid, pgid) {
                     ScanEntry::Member => ProcessGroup::Members(vec![odd_pid]),
                     ScanEntry::NotAMember => ProcessGroup::Members(Vec::new()),

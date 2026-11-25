@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn retry_uses_the_pinned_provider_not_the_tabs_own_row_provider() {
-        // G-T6: proves the capture-before-remove ordering (G24) is load-bearing.
+        // Proves the capture-before-remove ordering is load-bearing.
         // `retry_resume_fallback` captures `tab_running_provider` (which prefers
         // `running_provider_pins`) BEFORE it clears that pin. A retargeted-while-
         // live tab's pin differs from its persisted `agent_tabs` row provider; if

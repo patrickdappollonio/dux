@@ -331,8 +331,8 @@ impl Engine {
         let session = self.session_behind_pty(pty_id)?;
         // No destination at all when the agent's directory is gone: the upload
         // directory lives inside it, so creating one would put a hidden folder
-        // back where the working copy used to be and the paste would name a
-        // path that leads nowhere.
+        // back where the working copy was and the paste would name a path that
+        // leads nowhere.
         if self.missing_directory_reason(&session.id).is_some() {
             return None;
         }
@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(format!("{err:#}"), reason);
 
         // And a drop has nowhere to land, so no hidden upload directory is
-        // created where the working copy used to be.
+        // created where the working copy was.
         let tab = engine.slot_tab_id_of(crate::ids::SessionIdRef::new("s1"));
         assert!(engine.file_drop_destination(tab.as_str()).is_none());
     }

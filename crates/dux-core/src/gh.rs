@@ -797,8 +797,7 @@ pub enum GithubHostPolicy {
     /// because it is spelled `github.something`.
     Hosts(BTreeSet<String>),
     /// The installed `gh` is too old to report its hosts, so eligibility falls
-    /// back to the rule dux shipped before. Nobody on an older `gh` is worse off
-    /// than they were, and arbitrary enterprise hostnames need a newer one.
+    /// back to the name rule. Arbitrary enterprise hostnames need a newer `gh`.
     LegacyNameRule,
 }
 
@@ -1282,9 +1281,9 @@ pub(crate) fn decide_gh_probe(
         ));
     }
 
-    // Step 2, reached ONLY because the machine-readable form did not exist in
+    // Step 2, reached ONLY because the machine-readable form does not exist in
     // older `gh`. Its exit status decides availability and the name rule decides
-    // eligibility, which is exactly what dux shipped before.
+    // eligibility.
     match plain() {
         GhCallOutcome::TimedOut => GhProbe::Transient(format!(
             "gh auth status timed out after {}s",
@@ -2733,16 +2732,14 @@ mod host_policy_tests {
     /// A record dux cannot read IN FULL is not evidence of anything, so the
     /// answer containing it is not an answer.
     ///
-    /// This used to be asserted with `unwrap_or_default()`, which masked the
-    /// outcome it was supposed to be about: a missing or null `active` DID
-    /// parse, into an empty host set, and an empty host set is a DECISIVE "gh
-    /// serves nothing" that replaces the last known good policy and turns every
-    /// GitHub feature off. A wrongly typed one failed to parse and was
-    /// transient. The test could not tell those apart because it defaulted the
-    /// one into the other. They are now the same thing, and it asserts which.
+    /// The assertion must not default an unreadable record into an empty host
+    /// set: a missing or null `active` DOES parse, into an empty host set, and
+    /// an empty host set is a DECISIVE "gh serves nothing" that replaces the last
+    /// known good policy and turns every GitHub feature off. A wrongly typed one
+    /// fails to parse and is transient. The test asserts which of the two it is.
     ///
-    /// A missing or null `host` was worse: the record said nothing about which
-    /// host it describes, and the map KEY was taken as qualified on the
+    /// A missing or null `host` is worse: the record says nothing about which
+    /// host it describes, and the map KEY must not be taken as qualified on the
     /// strength of it.
     #[test]
     fn a_record_dux_cannot_read_in_full_is_not_an_answer() {
@@ -3089,9 +3086,8 @@ mod host_policy_tests {
         assert!(!policy.allows(""));
     }
 
-    /// The policy compares WHAT IT IS GIVEN. It used to trim first, which made
-    /// it answer for a host other than the one it was asked about: with the
-    /// parser preserving an interior space, `git@ git.company.example:o/r` was
+    /// The policy compares WHAT IT IS GIVEN and never trims: with the parser
+    /// preserving an interior space, `git@ git.company.example:o/r` must not be
     /// checked as `git.company.example`, allowed, and then handed onwards with
     /// the space still on it. Whitespace in a host is a defect in the caller or
     /// in the address, and the answer to a defect is no.
@@ -3142,7 +3138,7 @@ mod host_policy_tests {
     #[test]
     fn one_working_host_alongside_one_broken_host_reports_github_available() {
         // The behaviour change. Plain `gh auth status` exits non-zero when ANY
-        // known host has a problem, so one stale token used to disable every
+        // known host has a problem, so one stale token would disable every
         // GitHub feature on every host. The stand-in reproduces exactly that:
         // it answers the machine-readable call and exits non-zero on the plain
         // one, as a real `gh` in this state does.
@@ -3849,20 +3845,17 @@ mod tests {
 
     #[test]
     fn pr_view_targets_the_intended_host_even_with_gh_host_set() {
-        // Hermetic regression test for the `GH_HOST` override: a stand-in `gh`
+        // Hermetic test for the `GH_HOST` override: a stand-in `gh`
         // records its own argv, so this asserts what dux ASKED for rather than
         // depending on the network or on this machine's login. `GH_HOST` is set
         // on the child command only, never on the test process.
         //
-        // Built through the SHARED stand-in helper rather than hand-rolled. This
-        // test used to write and chmod its own script, which is the pattern
-        // `stand_in_gh` exists to replace: a freshly written executable can be
-        // refused with ETXTBSY in a multi-threaded process, because another test
-        // forking while the write handle is open inherits it and the kernel then
-        // sees an open write handle on the file. That is exactly how this test
-        // failed, once, in a full run, with an assertion that did not say why.
-        // The helper warms the script up until it runs, and the assertion below
-        // now names the outcome so a recurrence cannot be anonymous again.
+        // Built through the SHARED stand-in helper rather than hand-rolled: a
+        // freshly written executable can be refused with ETXTBSY in a
+        // multi-threaded process, because another test forking while the write
+        // handle is open inherits it and the kernel then sees an open write
+        // handle on the file. The helper warms the script up until it runs, and
+        // the assertion below names the outcome so a failure is not anonymous.
         let dir = tempfile::tempdir().expect("tempdir");
         let recorded = dir.path().join("argv.txt");
         let script = probe_test_support::stand_in_gh(
@@ -4082,8 +4075,8 @@ mod tests {
 
     #[test]
     fn parse_pull_request_lookup_reads_a_browser_route_as_the_repository_it_names() {
-        // `/issues/3` used to be refused as a malformed pull URL. A trailing
-        // browser route is now discarded, so the address names the repository
+        // `/issues/3` is not refused as a malformed pull URL. A trailing
+        // browser route is discarded, so the address names the repository
         // and the only thing missing is the pull request number. Saying so is
         // more use than calling the whole address malformed.
         let err = parse_pull_request_lookup(

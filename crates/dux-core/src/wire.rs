@@ -1264,7 +1264,7 @@ pub struct WireStatus {
     /// [`crate::engine::StatusUpdate`], which both surfaces read.
     ///
     /// Reserve it for an INFO whose outcome the user is already looking straight
-    /// at, and say at the site which tenet case the message fails: a pane that
+    /// at, and say at the site which always-confirm case the message fails: a pane that
     /// relaunches and streams, a whole list reordering, a whole screen
     /// recolouring, a full-screen view opening or closing. A destructive act, a
     /// change landing on a small indicator, an action that did nothing because
@@ -6377,7 +6377,7 @@ mod tests {
         );
     }
 
-    /// Every row label used to fall through the branch name, which does not
+    /// Every row label falls back through the branch name, which does not
     /// exist here, so a non-empty title is a hard invariant rather than an
     /// option. The rule is a pure function so both surfaces derive the same
     /// name from the same folder.
@@ -6645,9 +6645,8 @@ mod tests {
     }
 
     /// The web's delete line must account for BOTH branches the removal
-    /// targets. It used to say only "removed its worktree", which is true and
-    /// incomplete: the branch went too, and for a drifted agent so did a second
-    /// branch the message never mentioned.
+    /// targets: the agent's branch and, for a drifted agent, the second branch
+    /// it was born on.
     #[test]
     fn delete_message_names_the_branch_and_the_drifted_original() {
         fn message(branch: &str, initial: &str, branches: crate::git::RemoveResult) -> String {
@@ -8098,9 +8097,9 @@ mod tests {
     }
 
     /// A success followed by a decisive failure must leave ZERO pollers armed.
-    /// The handler used to change the status and leave the arm flag alone, so
-    /// work armed from the older, better answer went on polling `gh` while the
-    /// interface said GitHub was unavailable.
+    /// The handler must change the arm flag with the status, or work armed from
+    /// the older, better answer would go on polling `gh` while the interface
+    /// said GitHub was unavailable.
     #[test]
     fn a_success_followed_by_a_decisive_failure_leaves_zero_pollers_armed() {
         for outcome in [
@@ -10572,9 +10571,8 @@ mod tests {
 
     #[test]
     fn pr_lookup_failure_resolves_op_with_keyed_error() {
-        // Closes the previously-documented gap: a PR-lookup FAILURE used to leave
-        // its busy stranded (the failure event carried no project id). Now the
-        // failure resolves the op into a keyed error that REPLACES the busy.
+        // A PR-lookup FAILURE resolves its op into a keyed error that REPLACES
+        // the busy, so no busy is left stranded.
         let repo = init_repo_with_commit();
         let (mut engine, _tmp) = test_engine();
         enable_gh(&mut engine);
@@ -11979,7 +11977,7 @@ mod tests {
 
     #[test]
     fn drive_add_project_followup_reports_rolled_back_add_as_error() {
-        // Regression: the add is INLINE, so a config-write failure returns
+        // The add is INLINE, so a config-write failure returns
         // `Ok(EventReaction::Status(error))` (still a Rust `Ok`) after rolling
         // the project back. The follow-up must surface THAT error, not the
         // optimistic "added project" success. A dead writer fails every save.
@@ -13926,7 +13924,7 @@ mod tests {
             .worktree_path = repo.path().to_string_lossy().into_owned();
         engine.sessions.push(session);
 
-        // Empty before the watch (the regression).
+        // Empty before the watch.
         assert!(engine.unstaged_files.is_empty());
 
         let outcome = engine
@@ -15046,7 +15044,7 @@ mod tests {
         assert_ne!(statuses[0].tone, "busy", "must resolve, not re-show a busy");
     }
 
-    // ---- G2: fork ----------------------------------------------------------
+    // ---- fork --------------------------------------------------------------
 
     #[test]
     fn wire_fork_session_deserializes() {
@@ -15183,7 +15181,7 @@ mod tests {
         }
     }
 
-    // ---- G2: rename --------------------------------------------------------
+    // ---- rename ----------------------------------------------------------
 
     #[test]
     fn wire_rename_session_deserializes() {
@@ -15442,7 +15440,7 @@ mod tests {
         assert!(err.to_string().contains("unknown session"), "err: {err}");
     }
 
-    // ---- G2: reconnect -----------------------------------------------------
+    // ---- reconnect -------------------------------------------------------
 
     #[test]
     fn wire_reconnect_session_deserializes() {
@@ -17541,7 +17539,7 @@ mod tests {
     /// the ONLY field in the patch. This is the shape that catches a field
     /// missing from the presence check: with a lone field absent from that
     /// check the patch reads as empty and silently no-ops, while an all-fields
-    /// patch would still be non-empty and paper over it. That bug shipped once.
+    /// patch would still be non-empty and paper over it.
     /// The patch is built from the wire JSON rather than a Rust literal so the
     /// row exercises the same envelope a client sends.
     #[test]

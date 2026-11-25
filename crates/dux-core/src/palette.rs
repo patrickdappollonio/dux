@@ -768,12 +768,8 @@ mod tests {
         }
     }
 
-    // NOTE: this registry deliberately has NO cross-language pin to the web.
-    // It used to carry two: `web_surface_ids_match_expected_pin` (the exact set
-    // of web-surfaced ids) and `web_pin_matches_the_typescript_pin` (which
-    // parsed the vitest file to catch a one-sided edit). Both are gone along
-    // with the web projection they guarded: the web app menu
-    // (`crates/dux-web/web/src/lib/appMenu.ts`) is now an independent,
+    // NOTE: this registry deliberately has NO cross-language pin to the web: the
+    // web app menu (`crates/dux-web/web/src/lib/appMenu.ts`) is an independent,
     // client-owned surface with its own titles, its own item set, and submenus,
     // so a pin claiming a relationship between the two would be a false record.
     // Keeping the surfaces in step is a human step; see `AGENTS.md`.

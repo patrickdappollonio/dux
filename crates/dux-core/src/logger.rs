@@ -1492,8 +1492,8 @@ mod tests {
             );
         }
 
-        /// A set with a hole in it used to leave everything above the hole
-        /// behind, because the sweep stopped at the first missing position.
+        /// A set with a hole in it must not leave everything above the hole
+        /// behind: the sweep does not stop at the first missing position.
         #[test]
         fn the_sweep_cleans_positions_above_keep_across_a_hole() {
             let dir = tempfile::tempdir().unwrap();

@@ -128,18 +128,15 @@ fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
 /// immediately, which is the fail-fast property
 /// `a_refused_connection_is_an_error_with_no_hang` depends on.
 ///
-/// This used to bind `127.0.0.1:0`, drop the listener, and hand back the
-/// now-free ephemeral port, and that RACED with the other tests in this file.
-/// Freeing a port makes it available again, the kernel hands out ephemeral ports
-/// from a small range and reuses recently freed ones readily (12% of 500 fresh
-/// binds landed on a just-released port when this was measured), and `TestServer`
-/// is one-shot: its thread does exactly one `accept()` and exits. So a test using
-/// the dead URL could connect to a CONCURRENT test's server that had just been
-/// handed the same port and eat its single `accept()`. That server's own fetch
-/// was then refused, a refusal is a TRANSIENT error, and transient plus a stale
-/// cache returns the stale entry, so
-/// `a_definitive_404_does_not_fall_back_to_a_stale_entry` failed on its
-/// `expect_err`.
+/// It is port 1 rather than a freed ephemeral port: binding `127.0.0.1:0` and
+/// dropping the listener would hand back a now-free port that RACES with the
+/// other tests in this file. The kernel reuses recently freed ephemeral ports
+/// readily (12% of 500 fresh binds landed on a just-released port when this was
+/// measured), and `TestServer` is one-shot: its thread does exactly one
+/// `accept()` and exits. So a test using the dead URL could connect to a
+/// CONCURRENT test's server and eat its single `accept()`; that server's own
+/// fetch would then be refused, a refusal is a TRANSIENT error, and transient
+/// plus a stale cache returns the stale entry.
 ///
 /// Port 1 cannot be caught up in that. It is privileged, so nothing in the test
 /// suite can bind it, and it sits far below the ephemeral range the kernel
@@ -205,8 +202,8 @@ fn a_release_with_no_html_url_falls_back_to_the_releases_index() {
 
 #[test]
 fn the_startup_path_asks_for_the_running_versions_own_tag_never_the_latest_release() {
-    // THE regression: a user who upgrades to v0.7.0 while v0.8.0 is already
-    // published must be told about v0.7.0, the version they actually have.
+    // A user who upgrades to v0.7.0 while v0.8.0 is already published must be
+    // told about v0.7.0, the version they actually have.
     let server = TestServer::serving_sample_release(
         "v0.7.0",
         "https://github.com/patrickdappollonio/dux/releases/tag/v0.7.0",

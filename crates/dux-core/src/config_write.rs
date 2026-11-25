@@ -352,7 +352,6 @@ fn write_target(path: &Path) -> Result<PathBuf> {
 /// # Migration lock
 ///
 /// This function is intentionally `#[deprecated]` so that any new unrouted caller
-/// fails `cargo clippy --all-targets --all-features -- -D warnings`. This is a
 /// regression guard: all runtime config writes must go through `ConfigWriteQueue`.
 /// Legitimate sync-direct callers (boot, first-creation, `config regenerate`,
 /// recover, bootstrap project-sync) silence the lint with `#[expect(deprecated)]`
@@ -3592,18 +3591,16 @@ build = { text = \"cargo build\", surface = \"terminal\" }
     /// DIRECTORY, not on the file, so a `config.toml` the user deliberately
     /// made read-only at `0400` is replaced anyway and comes back `0600`.
     ///
-    /// This is pinned because the shipped template comment used to promise the
-    /// opposite. "dux only ever removes group and world access, so a `0400`
-    /// config stays read-only" is true of the tightening pass in
-    /// [`crate::file_modes`] and false of this function, and the comment did
-    /// not say which one it was talking about.
+    /// The template comment promises only what the tightening pass in
+    /// [`crate::file_modes`] does: "dux only ever removes group and world
+    /// access, so a `0400` config stays read-only" is true of that pass and
+    /// false of this function.
     ///
-    /// Preserving the destination mode instead was considered and deliberately
-    /// NOT done. It would carry a `0644` forward on every save, undoing the
-    /// startup tightening for a file that holds `[env]` tokens, and preserving
-    /// `0400` would make dux look as though it had honoured the read-only file
-    /// while having replaced its contents regardless, which is the more
-    /// misleading of the two outcomes. The honest fix was to stop claiming it.
+    /// Preserving the destination mode instead is deliberately NOT done. It
+    /// would carry a `0644` forward on every save, undoing the startup
+    /// tightening for a file that holds `[env]` tokens, and preserving `0400`
+    /// would make dux look as though it had honoured the read-only file while
+    /// having replaced its contents regardless.
     #[test]
     fn write_config_atomic_replaces_a_read_only_config_and_resets_its_mode() {
         use std::os::unix::fs::PermissionsExt;
@@ -4088,7 +4085,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
 
     #[test]
     fn file_drop_settings_default_and_round_trip() {
-        // The size default is the one the maintainer chose against real
+        // The size default is sized against real
         // screenshots, and it is deliberately far above the web framework's own
         // 2 MB body limit, which is the whole reason the route sets it.
         let rendered = render_config_plain(&Config::default());
@@ -4611,9 +4608,8 @@ unknown_key = \"untouched\"
 
     /// `projects = [ { ... } ]` is the OTHER legal TOML spelling of the same
     /// array. `toml` loads it identically, so a user who writes it that way has a
-    /// working config, and the carry has to see it too. It used to look only for
-    /// the array-of-tables spelling, so the key survived one spelling and was
-    /// deleted in the other.
+    /// working config, and the carry has to see it too: the key must survive
+    /// both spellings.
     #[test]
     fn patch_keeps_a_hand_added_key_written_in_the_inline_array_spelling() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -4683,7 +4679,7 @@ unknown_key = \"untouched\"
     }
 
     /// A comment block written ABOVE a `[[projects]]` header is user data, and it
-    /// used to be deleted on save: `toml_edit` files it on the entry's own decor
+    /// must survive a save: `toml_edit` files it on the entry's own decor
     /// rather than on any of its keys, so carrying the keys was not enough.
     #[test]
     fn patch_keeps_the_comment_written_above_a_project_header() {
@@ -4759,9 +4755,10 @@ unknown_key = \"untouched\"
 
     /// An entry with no `id` is a legal, loadable hand-edit: `ProjectConfig::id`
     /// carries `#[serde(default = "new_project_id")]`, so the loader mints one and
-    /// the file keeps working. The capture used to SKIP such an entry, which threw
-    /// away both its unmanaged keys and the comment above its header. `path` is the
-    /// only other stable field the rebuild writes, so it is the fallback identity.
+    /// the file keeps working. The capture must not SKIP such an entry, which
+    /// would throw away both its unmanaged keys and the comment above its header.
+    /// `path` is the only other stable field the rebuild writes, so it is the
+    /// fallback identity.
     #[test]
     fn patch_keeps_the_keys_and_comment_of_an_entry_that_carries_no_id() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -4966,7 +4963,7 @@ unknown_key = \"untouched\"
     /// `projects = [ ... ]` spelled across several lines can carry a comment
     /// BETWEEN its elements, which is legal TOML and pure user data. `toml_edit`
     /// files it as the prefix of the element that follows, so it is carryable
-    /// exactly like an array-of-tables header comment, and it used to be dropped.
+    /// exactly like an array-of-tables header comment.
     #[test]
     fn patch_keeps_comments_written_between_inline_array_entries() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -5000,7 +4997,7 @@ unknown_key = \"untouched\"
         // ...and the key carried out of an inline table is re-spaced for the block
         // table it lands in, rather than bleeding its inline spacing. Asserted as a
         // whole LINE, because `contains("note_a = 1")` also matches the bleeding
-        // form `" note_a = 1 "` and so would pass without the fix.
+        // form `" note_a = 1 "`.
         assert!(
             saved.lines().any(|line| line == "note_a = 1"),
             "the carried key kept its inline spacing: {saved}"
