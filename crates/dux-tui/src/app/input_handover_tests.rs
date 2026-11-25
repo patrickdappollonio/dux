@@ -805,20 +805,17 @@ mod waiting {
     /// a wait, and once the terminal reads again its input arrives.
     #[test]
     fn a_reader_whose_read_fails_waits_and_reads_again() {
+        use crate::app::input::READ_FAILS_WITH;
         for reader in READERS {
             let mut failing = rig(reader);
-            let directory = tempfile::tempdir().expect("tempdir");
-            let unreadable = std::fs::File::open(directory.path()).expect("open a directory");
-            failing.swap_terminal(&unreadable);
+            READ_FAILS_WITH.set(Some(rustix::io::Errno::INVAL));
+            failing.type_bytes(b"x");
             assert_waits(&mut failing, &format!("{reader:?}, failing reads"));
             assert!(
                 failing.app.terminal_reading != TerminalReading::Ended,
                 "{reader:?}: the input goes on"
             );
-            let (terminal, keyboard) = UnixStream::pair().expect("a socket pair");
-            failing.swap_terminal(&terminal);
-            failing.keyboard = keyboard;
-            failing.type_bytes(b"x");
+            READ_FAILS_WITH.set(None);
             failing.settle();
             let mut never_failed = rig(reader);
             never_failed.type_bytes(b"x");
