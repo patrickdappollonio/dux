@@ -6649,7 +6649,8 @@ impl Engine {
     /// The resolved environment an agent's processes run with. A managed agent
     /// gets the global environment merged with its project's; a standalone agent
     /// gets the global environment with no project overlay, like a standalone
-    /// terminal, because there is no project to overlay it with.
+    /// terminal, because there is no project to overlay it with. For the same
+    /// reason a standalone agent runs no startup command.
     ///
     /// A named, tested answer rather than an inherited code path: a site that
     /// looked the project up and fell through `unwrap_or_default` would silently

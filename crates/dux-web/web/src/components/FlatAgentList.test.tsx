@@ -2219,28 +2219,25 @@ describe("FlatAgentList working cue timing", () => {
 })
 
 
-// USER-LOCKED. The user decided that a working agent's and a running terminal's
-// sidebar glyph BOUNCES together with the pulse, four bounces per pulse on the
-// shared clock, and always finishes its cycle at rest: on a plain stop AND on a
-// hand-over to a higher state (needs-you, typing), where only the pulse yields
-// at once and the bounce in flight still finishes (user, 2026-09-28: "finish
-// the bounce of course but you can add the icon at any time, what we care to
-// maintain is the bounce so it doesn't teleport"). A hand-over also eases the
-// glyph's opacity back like a plain stop, and the higher state's look on the
-// glyph (the attention color and blink) waits until it has landed and then
-// eases in (user, 2026-10-14: "it just paints the icon in the middle of a
-// bounce and it's not transitioned colour but a flat \"bang!\""). It was
-// deleted once by an autonomous pass that rewrote the tenet to allow it; this
-// guard is what CLAUDE.md's "Locked by the user" section names. Do not edit,
-// weaken or delete it, or change what it pins, without the user's explicit
-// request.
+// USER-LOCKED. A working agent's and a running terminal's sidebar glyph
+// bounces together with the pulse, four bounces per pulse on the shared clock,
+// and always finishes its cycle at rest: on a plain stop and on a hand-over to
+// a higher state (needs-you, typing), where only the pulse yields at once and
+// the bounce in flight still finishes. A hand-over also eases the glyph's
+// opacity back like a plain stop, and the higher state's look on the glyph
+// (the attention color and blink) waits until it has landed and then eases in.
+// The USER-LOCKED line in `crates/dux-web/web/AGENTS.md` names this guard: do
+// not edit, weaken or delete it, or change what it pins, without an explicit
+// request for that change.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest", () => {
   const LOCKED =
-    'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
+    "This is a locked product decision, named by the USER-LOCKED line in " +
+    "crates/dux-web/web/AGENTS.md " +
     "(the web working glyph bounces with the pulse, four per pulse, finishes its " +
     "bounce at rest and eases back to full opacity on every stop, a hand-over to " +
     "a higher state included, and takes that state's look only once it has " +
-    "landed). Do not change it without the user's explicit request."
+    "landed). Change it only on an explicit request for that specific change; " +
+    "editing this test to make it pass is changing the decision."
   const ATTENTION = "[class*='animate-attention-pulse']"
   // The bounce rides a frame around the glyph and the pulse rides the glyph,
   // so dropping the pulse can never restart the bounce.

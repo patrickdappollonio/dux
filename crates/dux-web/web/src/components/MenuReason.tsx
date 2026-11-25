@@ -24,6 +24,10 @@ import { cn } from "@/lib/utils"
 // - a reason for one item sits right beneath that item, lined up with its
 //   words: `MenuItemReason`.
 //
+// However the reasons fall, a menu is never left with a leading, trailing or
+// doubled separator. On a phone the touch that opens the sheet chooses nothing
+// from it (`lib/openingTouch.ts`).
+//
 // Every item a reason greys names it as its description, so a screen reader
 // hears why on the item itself. The same sentence is said once however many
 // handles carry it.

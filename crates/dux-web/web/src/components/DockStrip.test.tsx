@@ -223,16 +223,19 @@ describe("DockStrip on a row this device does not drive", () => {
 
 // USER-LOCKED. A running terminal's pill icon bounces with the pulse and
 // finishes its bounce at rest on every stop, easing back to full opacity like
-// the sidebar list and the agent tab strip. This guard is named by CLAUDE.md's
-// "Locked by the user" section. Do not edit, weaken or delete it, or change
-// what it pins, without the user's explicit request.
+// the sidebar list and the agent tab strip. The USER-LOCKED line in
+// `crates/dux-web/web/AGENTS.md` names this guard: do not edit, weaken or
+// delete it, or change what it pins, without an explicit request for that
+// change.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (terminal dock strip)", () => {
   const LOCKED =
-    'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
+    "This is a locked product decision, named by the USER-LOCKED line in " +
+    "crates/dux-web/web/AGENTS.md " +
     "(the web working glyph bounces with the pulse, four per pulse, finishes its " +
     "bounce at rest and eases back to full opacity on every stop, a hand-over to " +
     "a higher state included, and takes that state's look only once it has " +
-    "landed). Do not change it without the user's explicit request."
+    "landed). Change it only on an explicit request for that specific change; " +
+    "editing this test to make it pass is changing the decision."
   const BOUNCE = "motion-safe:animate-working-bounce"
   const PULSE = "motion-safe:animate-working-pulse"
   const frameOf = (icon: Element) => icon.closest("[data-slot='working-glyph']")!
