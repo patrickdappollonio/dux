@@ -1001,8 +1001,10 @@ untouched.
 
 What a standalone agent does NOT have:
 
-- **No branch and no worktree.** The only thing dux ever creates on disk for it is the
-  folder of one started with only a name.
+- **No branch and no worktree.** On disk, dux creates the folder of one started with only
+  a name, and in it a small hidden file, `.dux-agent-folder`, that marks the folder as the
+  one dux created. In any standalone agent's folder, a file you drop on the agent lands in
+  a hidden upload directory dux creates there (see below).
 - **No project.** It sits among your other agents, told apart by the `✷` star over its
   folder on the row's second line. A standalone terminal wears the same star.
 - **No branch features.** Pushing, pulling, forking, pull requests and branch renaming
@@ -1024,9 +1026,16 @@ deleting the agent may do with the folder.
 > offers **Also delete its folder**, ticked, naming the folder, and says how many files
 > it holds: they are deleted with it. Untick it to keep the folder. Outside the dialogs it
 > goes too: `dux agents rm` deletes it unless you add `--keep-folder`, and a factory reset
-> deletes it. dux deletes it only once the agent has stopped, and only while the folder at
-> that path is still the one it created: if something else has been put there since, or
-> another agent or a project has moved in, it is kept and dux says why.
+> deletes it. dux deletes it only once the agent and everything it started there have
+> stopped, and only while the folder at that path is still the one it created. If something
+> else has been put there since, if another agent or a project has moved in, if a program
+> is still working in it, or if dux cannot tell, it is kept and dux says why. If dux quits
+> before the agent has stopped, it finishes the deletion the next time it starts.
+
+dux tells the folder it created from any other by the hidden `.dux-agent-folder` file it
+writes into it, which holds a random mark dux also keeps in its records. You can see the
+file in the folder; it says what it is for. Delete it and dux keeps the folder whatever
+happens to the agent. The delete dialog's file count leaves it out.
 
 > [!IMPORTANT]
 > **A folder you chose** is yours alone. dux does not create it, move it or remove it,

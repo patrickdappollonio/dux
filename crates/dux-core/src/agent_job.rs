@@ -3069,11 +3069,9 @@ fn run_create_standalone_agent_in_new_folder_job(
                 status_op_id: create_key,
                 attempted_name: None,
                 message: crate::status_text![
-                    "dux did not create the standalone agent ",
-                    q(title),
-                    ": a folder with that name is already there, at ",
+                    "The standalone agent was not created at ",
                     q(crate::home_path::shorten_home(&path)),
-                    ". Pick another name."
+                    ". A folder with that name is already there. Pick another name."
                 ],
             });
             return;
@@ -4471,10 +4469,10 @@ mod tests {
             drive_standalone_request(new_folder_request(&root, "taken"), &ghost_provider("true"));
         let failure = run.failure.expect("refused");
         assert!(
-            failure.contains("a folder with that name is already there"),
+            failure.ends_with(". A folder with that name is already there. Pick another name."),
             "{failure}"
         );
-        assert!(failure.contains("Pick another name."), "{failure}");
+        assert!(failure.contains("taken"), "the path is named: {failure}");
         assert!(run.launched.is_none());
         assert_eq!(
             folder_snapshot(&root.join("taken")),
