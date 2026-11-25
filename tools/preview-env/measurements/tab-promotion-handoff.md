@@ -1,6 +1,6 @@
 # What the browser does when the first tab's provider exits cleanly
 
-Measured in the preview container (`DUX_SRC=<worktree> ./up.sh`),
+Measured on 2026-09-17 in the preview container (`DUX_SRC=<worktree> ./up.sh`),
 driving `measurements/tab-promotion-handoff.js`: an agent on the fake provider
 with two tabs, the browser parked on the FIRST one, and that tab's provider
 quit by typing its quit command into the terminal (fixture `quit-on-command`,

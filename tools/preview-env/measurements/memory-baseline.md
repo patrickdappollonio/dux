@@ -15,6 +15,7 @@ about 2 MiB is heap.
 
 | | |
 | --- | --- |
+| Measured on | 2026-09-17 |
 | Host kernel | 7.2.5-1-cachyos |
 | Container base | `archlinux:latest`, glibc 2.44 |
 | dux build | `cargo build --release --bin dux`, rustc 1.98.1 |
