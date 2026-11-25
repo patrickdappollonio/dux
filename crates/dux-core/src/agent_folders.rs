@@ -428,11 +428,11 @@ impl FolderKept {
         };
         for (at, err) in unrestored {
             if at.as_os_str().is_empty() {
-                reason.push(", and dux could not make the folder itself read-only again");
+                reason.push(", and dux could not give the folder itself its permissions back");
             } else {
-                reason.push(", and dux could not make ");
+                reason.push(", and dux could not give ");
                 reason.push_quoted(at.display());
-                reason.push(" read-only again");
+                reason.push(" its permissions back");
             }
             reason.push(format!(
                 " after making it writable to delete inside it ({err})"
@@ -1845,8 +1845,8 @@ mod tests {
         let text = reason.message();
         assert!(
             text.contains(
-                ", so nothing in it was deleted, and dux could not make \"a\" read-only again \
-                 after making it writable to delete inside it ("
+                ", so nothing in it was deleted, and dux could not give \"a\" its permissions \
+                 back after making it writable to delete inside it ("
             ),
             "{text}"
         );
