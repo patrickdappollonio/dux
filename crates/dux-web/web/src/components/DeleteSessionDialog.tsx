@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
-import { Check, CircleAlert } from "lucide-react"
+import { Check, CircleAlert, TriangleAlert } from "lucide-react"
 import { Spinner } from "@/components/Spinner"
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { Notice } from "@/components/Notice"
 import { WorktreeFilesNote } from "@/components/WorktreeFilesNote"
 import { InlineCode } from "@/components/ui/inline-code"
 import { AttachedSection } from "@/components/AttachedSection"
@@ -23,6 +24,8 @@ import {
   currentBranchLabelProse,
   branchLossProse,
   currentBranchWarningProse,
+  folderBoxLabelProse,
+  folderFilesProse,
   otherBranchesLabelProse,
   otherBranchesWarningProse,
   protectedBranchesProse,
@@ -36,6 +39,7 @@ import {
   type BranchBoxAnswer,
   type BranchOffer,
   type DeleteBranchAnswers,
+  type FolderFilesReply,
   type OfferedBranch,
   sessionsApi,
 } from "@/lib/sessionsApi"
@@ -326,16 +330,19 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 // be lost or git could not answer. Quiet grey and a soft yellow rather than
 // green and strong tints, by the user's decision of 2026-11-23: the pill
 // informs, the boxes and the loss warning under them are what ask for care.
-// Every state has an icon of its own, so the tone is never the only signal. The icon sits on the first line however many the text wraps to, and
-// a pill that wraps becomes a rounded rectangle, since a capsule that tall has
-// corners eating its text. A chip moves to the next line whole rather than
-// splitting, unless it is longer than a line on its own; its negative margin
-// keeps it from making its line taller than the text's, so a wrapped pill
-// grows by whole lines and its padding stays even.
+// Every state has an icon of its own, so the tone is never the only signal.
+// The icon sits on the first line however many the text wraps to, and a pill
+// that wraps becomes a rounded rectangle, since a capsule that tall has
+// corners eating its text. A chip flows with the sentence as it does in the
+// dialog's other prose, on the text's own line height, so a wrapped pill grows
+// by whole lines and its padding stays even.
 // The room a two-line pill takes, held from the dialog's first frame so an
 // answer of one or two lines moves nothing around it: two of the pill's text
-// lines plus its `py-[5px]` and its 1px border, top and bottom.
-const PILL_SLOT = "min-h-[calc(2*var(--text-xs)*var(--text-xs--line-height)+12px)]"
+// lines plus its `py-[5px]` and its 1px border, top and bottom, plus the one
+// pixel a line holding a chip runs taller than the text's own line height (the
+// chip's monospace font at 0.85em measures 16.6px on a 16px line, so a two-line
+// answer with a chip on it is 44.6px, not 44).
+const PILL_SLOT = "min-h-[calc(2*var(--text-xs)*var(--text-xs--line-height)+13px)]"
 
 const QUIET_PILL = "border-border/60 bg-muted/40 text-muted-foreground"
 const WARNING_PILL = "border-dux-warning/30 bg-dux-warning/10"
@@ -374,10 +381,7 @@ function BranchCheckPill({ check }: { check: BranchCheck }) {
       )}
     >
       {icon}
-      <span
-        ref={text}
-        className="min-w-0 [&_[data-slot=inline-code]]:-my-[3px] [&_[data-slot=inline-code]]:inline-block [&_[data-slot=inline-code]]:leading-none"
-      >
+      <span ref={text} className="min-w-0">
         {renderProse(prose)}
       </span>
     </div>
@@ -399,6 +403,13 @@ export function DeleteSessionDialog() {
   const [currentAnswer, setCurrentAnswer] = useState<boolean | null>(null)
   const [othersAnswer, setOthersAnswer] = useState<boolean | null>(null)
   const [entry, setEntry] = useState<OfferEntry | null>(null)
+  // The folder box of an agent whose folder dux created: ticked unless untouched
+  // and then its default, which is ticked.
+  const [deleteFolder, setDeleteFolder] = useState(true)
+  const [folderFiles, setFolderFiles] = useState<{
+    target: string
+    reply: FolderFilesReply
+  } | null>(null)
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const ours = entry !== null && entry.target === deleteTarget ? entry : null
@@ -428,7 +439,15 @@ export function DeleteSessionDialog() {
   const firstBoxShown =
     ready === null || current !== null || currentBranchFailed(ready)
 
+  const createdFolder = folder?.created_by_dux === true ? folder : null
+  const filesWarning =
+    createdFolder !== null && deleteFolder && folderFiles?.target === deleteTarget
+      ? folderFilesProse(folderFiles.reply.files)
+      : null
+
   function reset() {
+    setDeleteFolder(true)
+    setFolderFiles(null)
     setDeleteWorktree(false)
     setCurrentAnswer(null)
     setOthersAnswer(null)
@@ -466,6 +485,22 @@ export function DeleteSessionDialog() {
     }
   }, [askOffer, deleteTarget, asked])
 
+  // Counted once per open; a failed count leaves the box to speak alone.
+  const askFiles = isOpen && createdFolder !== null
+  useEffect(() => {
+    if (!askFiles || !deleteTarget) return
+    let live = true
+    sessionsApi
+      .folderFiles(deleteTarget)
+      .then((reply) => {
+        if (live) setFolderFiles({ target: deleteTarget, reply })
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [askFiles, deleteTarget])
+
   async function handleConfirm() {
     if (!deleteTarget) return
     // The server REFUSES a worktree-removing delete on a standalone agent, and this
@@ -477,8 +512,10 @@ export function DeleteSessionDialog() {
         ? branchAnswers(offer, deleteCurrent, deleteOthers)
         : null
     const target = deleteTarget
+    // The folder answer is sent only when its box was on screen.
+    const folderAnswer = createdFolder !== null ? deleteFolder : null
     const done = await confirm((accepted) =>
-      deleteSession(target, removeWorktree, branchesToSend, accepted),
+      deleteSession(target, removeWorktree, branchesToSend, accepted, folderAnswer),
     )
     if (!done) return
     reset()
@@ -513,14 +550,29 @@ export function DeleteSessionDialog() {
         This removes the agent session <InlineCode>{name}</InlineCode> from
         dux.
       </p>
-      {folder && (
+      {createdFolder !== null && (
+        <div className="flex flex-col gap-3">
+          <CheckboxRow
+            id="delete-folder"
+            checked={deleteFolder}
+            onCheckedChange={setDeleteFolder}
+          >
+            {renderProse(folderBoxLabelProse(createdFolder.folder_label))}
+          </CheckboxRow>
+          {filesWarning !== null && (
+            <Notice shape="box" tone="warning" icon={TriangleAlert} announce="static">
+              {renderProse(filesWarning)}
+            </Notice>
+          )}
+        </div>
+      )}
+      {folder && createdFolder === null && (
         // Said out loud because the sentence above reads as though something on
-        // disk goes too: a standalone agent's folder is left exactly as it was.
+        // disk goes too: a folder the user chose is left exactly as it was.
         <p className="text-sm text-muted-foreground">
           Its folder <InlineCode>{folder.folder_label}</InlineCode> is left
-          untouched: dux never creates, moves or removes a
-          standalone agent&rsquo;s folder. Anything the agent wrote there is
-          still there.
+          untouched: dux never moves or removes a folder you chose for a
+          standalone agent. Anything the agent wrote there is still there.
         </p>
       )}
       {managed && (

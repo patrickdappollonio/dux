@@ -63,6 +63,13 @@ export type CreateSessionBody =
       name?: string
       provider?: string
     }
+  // A STANDALONE agent in a new folder the server creates for it, named after
+  // the agent, in the standalone agents folder. The name is required.
+  | {
+      kind: "standalone_new_folder"
+      name: string
+      provider?: string
+    }
 
 // The parsed body of the server's existing-branch refusal (409). Present on a
 // `SessionsApiError` when the server asks the client to confirm attaching a new
@@ -235,6 +242,27 @@ export interface BranchBoxAnswer {
   offered?: string[]
 }
 
+// What the delete dialog says about a standalone agent's folder: whether dux
+// created it, and, when it did, how many files it holds.
+export interface FolderFilesReply {
+  created_by_dux: boolean
+  files:
+    | { state: "counted"; count: number }
+    | { state: "missing" }
+    | { state: "unreadable" }
+    | null
+}
+
+// Where a new standalone agent called `name` would run, home-shortened, and
+// whether the create would refuse the name for its folder: something is
+// already there, or an agent is recorded there (`taken_by_agent`).
+export interface NewAgentFolderReply {
+  root_label: string
+  folder_label: string | null
+  taken: boolean
+  taken_by_agent?: string | null
+}
+
 // Both boxes' answers. Both are always sent: a box left out means nobody was
 // asked, and the server would then apply its own default.
 export interface DeleteBranchAnswers {
@@ -281,17 +309,34 @@ export const sessionsApi = {
   // `branches` is the delete dialog's two branch boxes, sent as the body. `null`
   // means no box was on screen (the worktree is kept, or a standalone agent),
   // and the request then carries no body at all.
+  // `deleteFolder` is the folder box's answer, `null` when no box was on
+  // screen (a folder the user chose, or an agent in a worktree), and then the
+  // request carries none.
   remove: (
     id: string,
     deleteWorktree: boolean,
     branches: DeleteBranchAnswers | null,
     accepted: readonly string[] | null = null,
+    deleteFolder: boolean | null = null,
   ) =>
     request<void>(
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(id)}?delete_worktree=${deleteWorktree}` +
+        (deleteFolder === null ? "" : `&delete_folder=${deleteFolder}`) +
         forceConnectedQuery(accepted, false),
       branches === null ? undefined : { branches },
+    ),
+  // Whether dux created a standalone agent's folder and how many files it holds.
+  folderFiles: (id: string) =>
+    request<FolderFilesReply>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(id)}/folder-files`,
+    ),
+  // The folder a new standalone agent called `name` would get.
+  newAgentFolder: (name: string) =>
+    request<NewAgentFolderReply>(
+      "GET",
+      `/api/v1/standalone-agents/new-folder?name=${encodeURIComponent(name)}`,
     ),
   // What the delete dialog's branch boxes offer, each pinned to the commit a
   // tick deletes, and how much work each would destroy.

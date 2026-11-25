@@ -1,9 +1,9 @@
-// The agent-name controls both name-taking dialogs share: the name input with
-// its pet-name spinner, and the "Use randomized pet name" checkbox. The state
-// behind them lives in the store, so each dialog hands in its own value and
-// actions and the two cannot drift on how a name is typed or sanitized.
+// The agent-name controls every dialog that takes an agent's name shares: the
+// name input with its pet-name spinner, and the "Use randomized pet name"
+// checkbox. Each dialog hands in its own value and actions, so none can drift
+// on how a name is typed or sanitized.
 
-import type { ChangeEvent, KeyboardEvent } from "react"
+import { type ChangeEvent, type CompositionEvent, type KeyboardEvent, useState } from "react"
 
 import { Spinner } from "@/components/Spinner"
 import { CheckboxRow } from "@/components/CheckboxRow"
@@ -34,17 +34,39 @@ export function AgentNameInput({
   autoFocus,
   field,
 }: AgentNameInputProps) {
-  function handleChange(event: ChangeEvent<HTMLInputElement>): void {
-    const input = event.target
+  // The text of an IME composition in progress, shown as typed: rewriting it
+  // (a space turned into a dash) would break the composition.
+  const [composing, setComposing] = useState<string | null>(null)
+
+  function report(input: HTMLInputElement): void {
     const raw = input.value
     const caret = input.selectionStart ?? raw.length
     onChange(raw)
     const sanitized = sanitizeAgentName(raw)
     if (sanitized === raw) return
     const next = Math.max(0, caret - (raw.length - sanitized.length))
-    // Controlled sanitization moves the caret to the end; restore its adjusted
-    // position after removed characters shorten a mid-string edit.
-    requestAnimationFrame(() => input.setSelectionRange(next, next))
+    // Writing the sanitized value puts the caret at the end. React writes it
+    // before this event's dispatch returns, so a microtask puts the caret back
+    // before the next key can arrive; a later callback (an animation frame)
+    // lands after a fast typist's next key and moves the caret back past it.
+    queueMicrotask(() => input.setSelectionRange(next, next))
+  }
+
+  function handleChange(event: ChangeEvent<HTMLInputElement>): void {
+    if (composing !== null || (event.nativeEvent as InputEvent).isComposing === true) {
+      setComposing(event.target.value)
+      return
+    }
+    report(event.target)
+  }
+
+  function handleCompositionStart(event: CompositionEvent<HTMLInputElement>): void {
+    setComposing(event.currentTarget.value)
+  }
+
+  function handleCompositionEnd(event: CompositionEvent<HTMLInputElement>): void {
+    setComposing(null)
+    report(event.currentTarget)
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
@@ -57,8 +79,10 @@ export function AgentNameInput({
     <div className="relative">
       <Input
         {...field}
-        value={value}
+        value={composing ?? value}
         onChange={handleChange}
+        onCompositionStart={handleCompositionStart}
+        onCompositionEnd={handleCompositionEnd}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
         disabled={generating}

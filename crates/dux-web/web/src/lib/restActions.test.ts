@@ -111,6 +111,18 @@ describe("sessionsApi", () => {
     expect(c.body).toEqual({ branches })
   })
 
+  it("remove carries the folder box's answer only when one was on screen", async () => {
+    const fetchMock = stubOkFetch(204, null)
+    await sessionsApi.remove("s1", false, null, null, true)
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/sessions/s1?delete_worktree=false&delete_folder=true",
+    )
+    await sessionsApi.remove("s1", false, null, null, false)
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/sessions/s1?delete_worktree=false&delete_folder=false",
+    )
+  })
+
   it("patch PATCHes the session with the title/provider/auto_reopen body", async () => {
     const fetchMock = stubOkFetch(200, {
       provider_change: "pending_reconnect",

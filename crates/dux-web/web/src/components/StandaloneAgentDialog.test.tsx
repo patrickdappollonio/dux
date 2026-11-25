@@ -21,12 +21,33 @@ const browseDir = vi.fn((path: string) =>
   Promise.resolve(browseLands ? path : null),
 )
 const createStandaloneAgent = vi.fn()
+const createStandaloneAgentInNewFolder = vi.fn()
 const closeStandaloneAgentPicker = vi.fn()
 vi.mock("@/lib/store", () => ({
   useDux: () => mockState,
   browseDir: (path: string) => browseDir(path),
   createStandaloneAgent: (...a: unknown[]) => createStandaloneAgent(...a),
+  createStandaloneAgentInNewFolder: (...a: unknown[]) => createStandaloneAgentInNewFolder(...a),
   closeStandaloneAgentPicker: () => closeStandaloneAgentPicker(),
+}))
+
+// The generated name and the folder answers the name step asks the server for.
+const agentName = vi.fn(() => Promise.resolve({ name: "brave-otter" }))
+vi.mock("@/lib/browseApi", () => ({
+  browseApi: { agentName: () => agentName() },
+}))
+let takenNames: string[] = []
+let recordedAgents: Record<string, string> = {}
+const newAgentFolder = vi.fn((name: string) =>
+  Promise.resolve({
+    root_label: "~/.config/dux/agents",
+    folder_label: name === "" ? null : `~/.config/dux/agents/${name}`,
+    taken: takenNames.includes(name) || name in recordedAgents,
+    taken_by_agent: recordedAgents[name] ?? null,
+  }),
+)
+vi.mock("@/lib/sessionsApi", () => ({
+  sessionsApi: { newAgentFolder: (name: string) => newAgentFolder(name) },
 }))
 
 import { StandaloneAgentDialog } from "@/components/StandaloneAgentDialog"
@@ -53,8 +74,9 @@ const SHORTCUTS: ProjectShortcutListView = {
   ],
 }
 
-function seed(shortcuts: ProjectShortcutListView | null, projects = 2) {
+function seed(shortcuts: ProjectShortcutListView | null, projects = 2, randomize = true) {
   mockState = {
+    bootstrap: { randomize_agent_names_by_default: randomize },
     spine: { projects: Array.from({ length: projects }, (_, i) => ({ id: `p-${i}` })) },
     standaloneAgentPickerOpen: true,
     standaloneProjectShortcuts: shortcuts,
@@ -73,7 +95,16 @@ afterEach(() => cleanup())
 beforeEach(() => {
   vi.clearAllMocks()
   browseLands = true
+  takenNames = []
+  recordedAgents = {}
 })
+
+// Open the dialog and go to its existing-folder step.
+function renderOnFolderStep() {
+  const view = render(<StandaloneAgentDialog />)
+  fireEvent.click(screen.getByRole("button", { name: "Use an existing folder or project…" }))
+  return view
+}
 
 const createButton = () =>
   screen.getByRole<HTMLButtonElement>("button", { name: "Create agent" })
@@ -88,7 +119,7 @@ async function pick(row: HTMLButtonElement) {
 describe("StandaloneAgentDialog project shortcuts", () => {
   it("renders the server's rows in the server's order and words", () => {
     seed(SHORTCUTS)
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     const rows = shortcutRows()
     expect(rows.map((row) => row.dataset.projectShortcut)).toEqual([
       "p-site",
@@ -102,7 +133,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
 
   it("moves the explorer to a picked project's folder and targets it", async () => {
     seed(SHORTCUTS)
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     await pick(shortcutRows()[0])
     expect(browseDir).toHaveBeenCalledWith("/home/u/code/site")
     expect(shortcutRows()[0].dataset.picked).toBe("")
@@ -119,7 +150,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     }
     try {
       seed(SHORTCUTS)
-      render(<StandaloneAgentDialog />)
+      renderOnFolderStep()
       expect(scrolled).toEqual([])
       await pick(shortcutRows()[0])
       const nameBlock = document.querySelector("[data-standalone-name]")
@@ -154,7 +185,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     try {
       // A folder is chosen in the explorer before the project list answers.
       seed(null)
-      const view = render(<StandaloneAgentDialog />)
+      const view = renderOnFolderStep()
       fireEvent.click(screen.getByRole("button", { name: /Run an agent here/ }))
       expect(scrolled).toHaveLength(1)
 
@@ -179,7 +210,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
   it("targets nothing when the explorer never reached the project's folder", async () => {
     seed(SHORTCUTS)
     browseLands = false
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     await pick(shortcutRows()[0])
     expect(browseDir).toHaveBeenCalledWith("/home/u/code/site")
     expect(createButton().disabled).toBe(true)
@@ -188,7 +219,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
 
   it("keeps the footer outside the part that scrolls", () => {
     seed(SHORTCUTS)
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     const body = document.querySelector('[data-slot="modal-body"]')!
     expect(body.className).toContain("overflow-y-auto")
     expect(body.contains(createButton())).toBe(false)
@@ -201,7 +232,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     vi.stubGlobal("innerWidth", 390)
     try {
       seed(SHORTCUTS)
-      render(<StandaloneAgentDialog />)
+      renderOnFolderStep()
       const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
       expect(popup.dataset.presentation).toBe("cover")
       const row = createButton().closest(".grid-cols-2")!
@@ -214,7 +245,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
 
   it("does not let a greyed-out row be picked", () => {
     seed(SHORTCUTS)
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     const blocked = shortcutRows()[1]
     expect(blocked.disabled).toBe(true)
     fireEvent.click(blocked)
@@ -226,7 +257,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
   // does not grow under the pointer when the list arrives.
   it("keeps the project list's space while the list is on its way", () => {
     seed(null)
-    const view = render(<StandaloneAgentDialog />)
+    const view = renderOnFolderStep()
     const pending = document.querySelector("[data-project-shortcuts-pending]")
     // The rows' own height for as many rows as there are projects, which is
     // how many arrive.
@@ -243,14 +274,14 @@ describe("StandaloneAgentDialog project shortcuts", () => {
   // will never come and the card does not shrink once the answer arrives.
   it("holds no room while the list is on its way when there are no projects", () => {
     seed(null, 0)
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     expect(document.querySelector("[data-project-shortcuts-pending]")).toBeNull()
     expect(screen.queryByText("Your projects")).toBeNull()
   })
 
   it("draws no list when there are no projects", () => {
     seed({ caption: "Caption from the server.", rows: [] })
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     expect(shortcutRows()).toEqual([])
     expect(screen.queryByText("Your projects")).toBeNull()
     expect(screen.queryByText("Caption from the server.")).toBeNull()
@@ -260,7 +291,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
 describe("StandaloneAgentDialog name field", () => {
   async function chooseFolder() {
     seed(SHORTCUTS)
-    render(<StandaloneAgentDialog />)
+    renderOnFolderStep()
     await pick(shortcutRows()[0])
     return screen.getByRole<HTMLInputElement>("textbox", { name: "Agent name" })
   }
@@ -290,5 +321,105 @@ describe("StandaloneAgentDialog name field", () => {
     await chooseFolder()
     const chip = screen.getByText("/home/u/code/site")
     expect(chip.parentElement!.textContent).toMatch(/runs in/i)
+  })
+})
+
+describe("StandaloneAgentDialog name step", () => {
+  // Let the generated name and the folder answers land.
+  async function settle() {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+  }
+  const nameField = () => screen.getByRole<HTMLInputElement>("textbox", { name: "Agent name" })
+
+  it("asks for a name, pre-filled with a generated one, and names the folder dux creates", async () => {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    expect(screen.getByRole("heading", { name: "New standalone agent" })).toBeTruthy()
+    expect(nameField().value).toBe("brave-otter")
+    const chip = screen.getByText("~/.config/dux/agents/brave-otter")
+    expect(chip.parentElement!.textContent).toBe(
+      "The agent runs in ~/.config/dux/agents/brave-otter. dux creates the folder.",
+    )
+    fireEvent.click(createButton())
+    expect(createStandaloneAgentInNewFolder).toHaveBeenCalledWith("brave-otter")
+    expect(closeStandaloneAgentPicker).toHaveBeenCalled()
+  })
+
+  it("starts empty, generating nothing, when random names are off by default", async () => {
+    seed(SHORTCUTS, 2, false)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    expect(nameField().value).toBe("")
+    expect(agentName).not.toHaveBeenCalled()
+    expect(createButton().disabled).toBe(true)
+  })
+
+  it("follows the typed name in the folder it names", async () => {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    fireEvent.change(nameField(), { target: { value: "team/notes" } })
+    expect(screen.getByText("~/.config/dux/agents/team-notes")).toBeTruthy()
+  })
+
+  it("disables Create agent for an empty name, and says why", async () => {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    fireEvent.change(nameField(), { target: { value: "" } })
+    expect(createButton().disabled).toBe(true)
+    fireEvent.click(createButton())
+    expect(createStandaloneAgentInNewFolder).not.toHaveBeenCalled()
+  })
+
+  it("refuses a name whose folder is already there", async () => {
+    takenNames = ["taken"]
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    fireEvent.change(nameField(), { target: { value: "taken" } })
+    await settle()
+    expect(
+      screen.getByText("A folder with that name is already there. Pick another name."),
+    ).toBeTruthy()
+    expect(createButton().disabled).toBe(true)
+  })
+
+  it("names the agent already recorded at the name's folder", async () => {
+    recordedAgents = { otter: "old-otter" }
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    fireEvent.change(nameField(), { target: { value: "otter" } })
+    await settle()
+    const agent = screen.getByText("old-otter")
+    expect(agent.parentElement!.textContent).toBe(
+      "Agent old-otter already has that folder. Pick another name.",
+    )
+    expect(createButton().disabled).toBe(true)
+  })
+
+  it("refuses a name git would not take", async () => {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    fireEvent.change(nameField(), { target: { value: "a..b" } })
+    expect(nameField().getAttribute("aria-invalid")).toBe("true")
+    expect(createButton().disabled).toBe(true)
+  })
+
+  it("leads to the existing-folder picker and back, keeping the name", async () => {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await settle()
+    fireEvent.change(nameField(), { target: { value: "kept-name" } })
+    fireEvent.click(screen.getByRole("button", { name: "Use an existing folder or project…" }))
+    expect(screen.getByRole("heading", { name: "Use an existing folder or project" })).toBeTruthy()
+    expect(shortcutRows()).toHaveLength(2)
+    fireEvent.click(screen.getByRole("button", { name: /New standalone agent/ }))
+    expect(nameField().value).toBe("kept-name")
   })
 })

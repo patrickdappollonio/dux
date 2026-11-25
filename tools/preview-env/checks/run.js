@@ -133,7 +133,10 @@ async function backToSeed() {
   const by = await lib.agents()
   for (const [title, session] of Object.entries(by)) {
     if (lib.SIDEBAR_ORDER.includes(title)) continue
-    await lib.api("DELETE", `/api/v1/sessions/${session.id}?delete_worktree=true&force_connected=true`)
+    // A standalone agent has no worktree to remove; its folder goes when dux
+    // created it and stays when it did not.
+    const worktree = session.workspace?.kind === "managed"
+    await lib.api("DELETE", `/api/v1/sessions/${session.id}?delete_worktree=${worktree}&force_connected=true`)
     console.log(`removed the agent ${title}, which no seed makes`)
   }
   for (const s of await lib.get("/api/v1/sessions")) {

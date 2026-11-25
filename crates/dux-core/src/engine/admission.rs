@@ -384,6 +384,7 @@ mod tests {
             session_id: id.to_string(),
             delete_worktree: false,
             delete_branch: None,
+            delete_folder: None,
         };
         // (what, command, the sentence it is refused with, or `None` to go ahead)
         let commands: Vec<(&str, Command, Option<&[&str]>)> = vec![

@@ -62,6 +62,10 @@ enum Workspace {
     Folder {
         folder_path: String,
         folder_label: String,
+        /// Whether dux created the folder, which a delete that asks nobody
+        /// then deletes. Absent from a dux that predates it.
+        #[serde(default)]
+        created_by_dux: bool,
     },
 }
 
@@ -1319,6 +1323,12 @@ pub enum NewAgent {
         /// The provider to launch, or `None` for the global default.
         provider: Option<String>,
     },
+    /// In a new folder dux creates for it, named after the agent, with no
+    /// project.
+    StandaloneNewFolder {
+        /// The provider to launch, or `None` for the global default.
+        provider: Option<String>,
+    },
 }
 
 /// `dux agents add`.
@@ -1405,6 +1415,14 @@ pub fn agents_add(
                 json!({ "kind": "fork", "session_id": source.id, "name": name }),
             )
         }
+        NewAgent::StandaloneNewFolder { provider } => (
+            format!("Create {called} in a new folder dux creates for it"),
+            json!({
+                "kind": "standalone_new_folder",
+                "name": name,
+                "provider": provider,
+            }),
+        ),
         NewAgent::Standalone { folder, provider } => {
             let folder = output::path_for_target(&folder, client.remote_name(), cwd)?;
             (
@@ -2335,6 +2353,7 @@ pub fn agents_rm(
     worktree: Worktrees,
     delete_branch: Option<bool>,
     delete_other_branches: Option<bool>,
+    delete_folder: Option<bool>,
     if_attached: IfAttached,
 ) -> Result<Planned, CliError> {
     let delete_worktree = worktree.deleted();
@@ -2347,6 +2366,10 @@ pub fn agents_rm(
     if delete_worktree {
         let _ = write!(question, " and its worktree {}", agent.directory());
     }
+    if let Some(delete) = delete_folder {
+        let _ = write!(path, "&delete_folder={delete}");
+    }
+    question.push_str(&folder_clause(&agent.workspace, delete_folder));
     let flagged = delete_branch.is_some() || delete_other_branches.is_some();
     let managed = matches!(agent.workspace, Workspace::Managed { .. });
     if !flagged || !managed || !delete_worktree {
@@ -2391,6 +2414,26 @@ pub fn agents_rm(
         .collect();
     planned.notice = (!notes.is_empty()).then(|| notes.join(" "));
     Ok(planned)
+}
+
+/// What the delete question says about a standalone agent's folder, as the
+/// server will decide it: an answer when one was given, else who made the
+/// folder. Nothing for an agent in a worktree.
+fn folder_clause(workspace: &Workspace, delete_folder: Option<bool>) -> String {
+    let Workspace::Folder {
+        folder_label,
+        created_by_dux,
+        ..
+    } = workspace
+    else {
+        return String::new();
+    };
+    match (delete_folder, created_by_dux) {
+        (Some(true), _) | (None, true) => {
+            format!(", deleting its folder {folder_label} with everything in it")
+        }
+        (Some(false), _) | (None, false) => format!(", keeping its folder {folder_label}"),
+    }
 }
 
 /// `dux agents stop <a>`.
@@ -3546,10 +3589,36 @@ mod agents_rm_tests {
             worktree,
             delete,
             others,
+            None,
             IfAttached::Refuse,
         );
         let paths = fake.seen().into_iter().map(|seen| seen.path).collect();
         (planned, paths)
+    }
+
+    /// The delete question says what the server will do with a standalone
+    /// agent's folder: a folder dux created goes unless kept, and a folder the
+    /// user chose stays unless deleting it was asked for (which the server
+    /// refuses).
+    #[test]
+    fn the_delete_question_says_what_becomes_of_the_folder() {
+        let folder = |created_by_dux| Workspace::Folder {
+            folder_path: "/home/me/.config/dux/agents/otter".to_string(),
+            folder_label: "~/.config/dux/agents/otter".to_string(),
+            created_by_dux,
+        };
+        let deleting = ", deleting its folder ~/.config/dux/agents/otter with everything in it";
+        let keeping = ", keeping its folder ~/.config/dux/agents/otter";
+        assert_eq!(folder_clause(&folder(true), None), deleting);
+        assert_eq!(folder_clause(&folder(true), Some(false)), keeping);
+        assert_eq!(folder_clause(&folder(false), None), keeping);
+        assert_eq!(folder_clause(&folder(false), Some(true)), deleting);
+        let managed = Workspace::Managed {
+            project_id: "p".to_string(),
+            branch_name: "b".to_string(),
+            worktree_path: "/w".to_string(),
+        };
+        assert_eq!(folder_clause(&managed, None), "");
     }
 
     /// The project's own branch is offered in no box: the command line says

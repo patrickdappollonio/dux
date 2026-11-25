@@ -411,6 +411,7 @@ enum PromptMouseTarget {
     CloneChooseExisting,
     AttachPullRequestInput,
     NameStandaloneAgentInput,
+    NameStandaloneAgentUseExisting,
     MacroNameInput,
     MacroTextInput,
     /// Index into `MacroSurface`'s `Agent, Terminal, Both` order.
@@ -435,6 +436,9 @@ impl ButtonPressedTarget {
         match target {
             PromptMouseTarget::PullRequestChooseProject => {
                 Some(ButtonPressedTarget::PullRequestChooseProject)
+            }
+            PromptMouseTarget::NameStandaloneAgentUseExisting => {
+                Some(ButtonPressedTarget::StandaloneUseExistingFolder)
             }
             PromptMouseTarget::CloneChooseExisting => {
                 Some(ButtonPressedTarget::CloneChooseExisting)
@@ -1717,7 +1721,7 @@ impl App {
             self.close_agent_filter();
         }
         {
-            self.open_standalone_agent_browser();
+            self.open_new_standalone_agent();
         }
     }
 
@@ -2257,9 +2261,13 @@ impl App {
                     input.insert_str(text);
                 }
             }
-            PromptState::AttachPullRequestInput { input, .. }
-            | PromptState::NameStandaloneAgent { input, .. } => {
+            PromptState::AttachPullRequestInput { input, .. } => {
                 input.insert_str(text);
+            }
+            PromptState::NameStandaloneAgent { input, focus, .. } => {
+                if matches!(focus, NameStandaloneAgentFocus::Input) {
+                    input.insert_str(text);
+                }
             }
             PromptState::NameNewAgent { input, focus, .. } => {
                 if matches!(focus, NameNewAgentFocus::Input) {
@@ -5411,7 +5419,7 @@ impl App {
             self.confirm_project_chooser_selection()?;
         }
         if go_standalone {
-            self.open_standalone_agent_browser();
+            self.open_new_standalone_agent();
         }
         Ok(Some(false))
     }
@@ -5588,6 +5596,10 @@ impl App {
                 DeleteAgentFocus::OtherBranchesCheckbox,
                 branch_boxes && offer.others_answerable(),
             ),
+            (
+                DeleteAgentFocus::FolderCheckbox,
+                target.offers_folder_checkbox(),
+            ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
@@ -5608,6 +5620,7 @@ impl App {
                 DeleteAgentFocus::OtherBranchesCheckbox => {
                     *delete_other_branches = Some(!offer.others_ticked(*delete_other_branches));
                 }
+                DeleteAgentFocus::FolderCheckbox => toggle_folder_box(target),
                 DeleteAgentFocus::Cancel => {
                     return Some(self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel));
                 }
@@ -6129,28 +6142,48 @@ impl App {
         Some(false)
     }
 
-    /// The standalone-agent name field. One single-line control, so the shape
-    /// is the attach-PR modal's: the close key abandons, the confirm key
-    /// creates, and everything else is typing.
+    /// The standalone-agent name field, and for a new folder its button on to
+    /// the folder browser: the close key abandons, the confirm key creates from
+    /// the field or presses the button, the focus keys move between the two,
+    /// and everything else typed into the field is typing.
     fn handle_name_standalone_agent_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
-        if !matches!(self.prompt, PromptState::NameStandaloneAgent { .. }) {
+        let PromptState::NameStandaloneAgent { focus, folder, .. } = &self.prompt else {
             return None;
-        }
-        let action = if binding_lookup_is_suppressed(
-            key,
-            crate::app::modal::TextFieldFocus::Field,
-            self.extended_keys,
-        ) {
+        };
+        let field_focused = *focus == NameStandaloneAgentFocus::Input;
+        let has_button = *folder == StandaloneFolder::New;
+        let field = if field_focused {
+            crate::app::modal::TextFieldFocus::Field
+        } else {
+            crate::app::modal::TextFieldFocus::Elsewhere
+        };
+        let action = if binding_lookup_is_suppressed(key, field, self.extended_keys) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Field) {
+        match modal_key_step(action, key, field) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::Confirm => self.confirm_standalone_agent_name(),
-            ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::Confirm if field_focused => self.confirm_standalone_agent_name(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus if !field_focused => {
+                self.open_standalone_agent_browser();
+            }
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::MoveFocus(_) => {
+                if has_button
+                    && let PromptState::NameStandaloneAgent { focus, .. } = &mut self.prompt
+                {
+                    *focus = if field_focused {
+                        NameStandaloneAgentFocus::UseExistingFolder
+                    } else {
+                        NameStandaloneAgentFocus::Input
+                    };
+                }
+            }
             ModalKeyStep::FallThroughToField => {
-                if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
+                if field_focused
+                    && let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt
+                {
                     input.handle_key(key);
                 }
             }
@@ -6252,6 +6285,12 @@ impl App {
             CreateAgentRequest::Standalone { folder, .. } => format!(
                 "Creating a standalone agent \"{name}\" in \"{}\"...",
                 dux_core::home_path::shorten_home(folder)
+            ),
+            CreateAgentRequest::StandaloneInNewFolder { root, .. } => format!(
+                "Creating the folder \"{}\" and a standalone agent \"{name}\" in it...",
+                dux_core::home_path::shorten_home(&dux_core::agent_folders::folder_path_for(
+                    root, name
+                ))
             ),
             CreateAgentRequest::ForkSession { source_label, .. } => format!(
                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
@@ -8249,8 +8288,17 @@ impl App {
                 contains_point(input, column, row)
                     .then_some(PromptMouseTarget::AttachPullRequestInput)
             }
-            OverlayMouseLayout::NameStandaloneAgent { input } => contains_point(input, column, row)
-                .then_some(PromptMouseTarget::NameStandaloneAgentInput),
+            OverlayMouseLayout::NameStandaloneAgent {
+                input,
+                use_existing,
+            } => {
+                if use_existing.is_some_and(|button| contains_point(button, column, row)) {
+                    Some(PromptMouseTarget::NameStandaloneAgentUseExisting)
+                } else {
+                    contains_point(input, column, row)
+                        .then_some(PromptMouseTarget::NameStandaloneAgentInput)
+                }
+            }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
                 Self::checkbox_before_buttons_target(
                     checkbox,
@@ -9631,7 +9679,7 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_delete_agent(&mut self, answer: ConfirmAnswer) -> bool {
-        let (session_id, delete_worktree, branch_answers) = match &self.prompt {
+        let (session_id, delete_worktree, branch_answers, folder_answer) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
                 session_id,
                 delete_worktree,
@@ -9653,6 +9701,7 @@ impl App {
                     *delete_branch,
                     *delete_other_branches,
                 ),
+                target.folder_answer(),
             ),
             _ => return false,
         };
@@ -9662,7 +9711,7 @@ impl App {
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
             let refused = self.guarded_by(&asked, |app| {
-                app.begin_delete_session(
+                app.begin_delete_session_with_folder(
                     &session_id,
                     if delete_worktree {
                         dux_core::engine::WorktreeOnDelete::Remove
@@ -9670,6 +9719,7 @@ impl App {
                         dux_core::engine::WorktreeOnDelete::Keep
                     },
                     branch_answers,
+                    folder_answer,
                 )
             });
             if let Some(refused) = refused {
@@ -10445,7 +10495,8 @@ impl App {
             CreateAgentRequest::ForkSession { .. }
             | CreateAgentRequest::ExistingManagedWorktree { .. }
             | CreateAgentRequest::ForkExternalWorktree { .. }
-            | CreateAgentRequest::Standalone { .. } => unreachable!(),
+            | CreateAgentRequest::Standalone { .. }
+            | CreateAgentRequest::StandaloneInNewFolder { .. } => unreachable!(),
         };
         if let Err(e) = self.dispatch_create_agent_request(request, msg) {
             self.set_error(format!("{e:#}"));
@@ -10500,14 +10551,16 @@ impl App {
     }
 
     fn set_standalone_name_cursor_from_mouse(&mut self, column: u16) {
-        let OverlayMouseLayout::NameStandaloneAgent { input: input_area } =
-            self.overlay_layout.active
+        let OverlayMouseLayout::NameStandaloneAgent {
+            input: input_area, ..
+        } = self.overlay_layout.active
         else {
             return;
         };
-        if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
-            // The single-line renderer pads by one leading space. No focus to
-            // move: the field is the modal's only control and always has it.
+        if let PromptState::NameStandaloneAgent { input, focus, .. } = &mut self.prompt {
+            // The single-line renderer pads by one leading space. A click in
+            // the field gives it focus.
+            *focus = NameStandaloneAgentFocus::Input;
             input.cursor =
                 cursor_from_single_line_click(&input.text, input.cursor, input_area, 1, column);
         }
@@ -10861,6 +10914,14 @@ impl App {
             }
             OverlayCheckboxId::DeleteAgentBranch | OverlayCheckboxId::DeleteAgentOtherBranches => {
                 self.toggle_delete_agent_branch_box(checkbox_id);
+            }
+            OverlayCheckboxId::DeleteAgentFolder => {
+                if let PromptState::ConfirmDeleteAgent { target, focus, .. } = &mut self.prompt
+                    && target.offers_folder_checkbox()
+                {
+                    toggle_folder_box(target);
+                    *focus = DeleteAgentFocus::FolderCheckbox;
+                }
             }
             OverlayCheckboxId::RecreateRestartTabs => {
                 if let PromptState::ConfirmRecreateWorkingCopy {
@@ -11491,7 +11552,8 @@ impl App {
             PromptMouseTarget::NameStandaloneAgentInput => {
                 self.set_standalone_name_cursor_from_mouse(mouse.column);
             }
-            PromptMouseTarget::PullRequestChooseProject => {}
+            PromptMouseTarget::PullRequestChooseProject
+            | PromptMouseTarget::NameStandaloneAgentUseExisting => {}
             PromptMouseTarget::StartupCommandInput => {
                 self.click_startup_command_input(mouse);
             }
@@ -11595,6 +11657,10 @@ impl App {
             ButtonPressedTarget::TakeOverCard | ButtonPressedTarget::DormantTabCard => false,
             ButtonPressedTarget::PullRequestChooseProject => {
                 self.open_pull_request_project_picker();
+                false
+            }
+            ButtonPressedTarget::StandaloneUseExistingFolder => {
+                self.open_standalone_agent_browser();
                 false
             }
             ButtonPressedTarget::CloneChooseExisting => {
@@ -13852,7 +13918,8 @@ fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: 
         // folder-browser flow does it), and the field is a plain non-optional
         // `title` rather than an optional custom name, precisely because a
         // standalone agent must always have one.
-        CreateAgentRequest::Standalone { title, .. } => {
+        CreateAgentRequest::Standalone { title, .. }
+        | CreateAgentRequest::StandaloneInNewFolder { title, .. } => {
             *title = name;
         }
     }
@@ -13895,6 +13962,16 @@ enum CompletionKey {
     NeedsCandidates(CompletionAnswer),
 }
 
+/// Flip the delete dialog's folder box, where it is offered.
+fn toggle_folder_box(target: &mut crate::app::DeleteAgentTarget) {
+    if let crate::app::DeleteAgentTarget::Folder {
+        created: Some(folder_box),
+        ..
+    } = target
+    {
+        folder_box.delete = !folder_box.delete;
+    }
+}
 #[cfg(test)]
 mod tests {
 
@@ -16056,10 +16133,9 @@ not_a_real_action = ["x"]
             .get_mut(0)
             .expect("the fixture has an agent");
         session.title = Some("notes".to_string());
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.to_string_lossy().to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.to_string_lossy().to_string()),
+        );
     }
 
     /// The key-driven git actions go through the same workspace gate the HTTP
@@ -25719,10 +25795,9 @@ not_a_real_action = ["x"]
             !app.filtered_palette_commands("pull-requests").is_empty(),
             "offered without gh"
         );
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/tmp/notes".to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/tmp/notes".to_string()),
+        );
         assert!(
             app.filtered_palette_commands("pull-requests").is_empty(),
             "a standalone agent has no branch for pull requests"
@@ -29522,7 +29597,9 @@ cyan = "#00ffff"
         app.engine.projects.clear();
 
         app.execute_command("new-standalone-agent")
-            .expect("should open the folder browser");
+            .expect("should open the name step");
+        assert_in_the_standalone_name_step(&app, "palette");
+        use_existing_folder(&mut app);
 
         match &app.prompt {
             PromptState::BrowseProjects { purpose, .. } => {
@@ -29532,17 +29609,24 @@ cyan = "#00ffff"
         }
     }
 
-    fn assert_in_the_standalone_folder_browser(app: &App, note: &str) {
+    /// Every way to start a standalone agent opens its name step first, for a
+    /// new folder dux creates.
+    fn assert_in_the_standalone_name_step(app: &App, note: &str) {
         match &app.prompt {
-            PromptState::BrowseProjects { purpose, .. } => {
-                assert_eq!(
-                    *purpose,
-                    crate::app::BrowsePurpose::StandaloneAgent,
-                    "{note}"
-                );
+            PromptState::NameStandaloneAgent { folder, .. } => {
+                assert_eq!(*folder, crate::app::StandaloneFolder::New, "{note}");
             }
-            other => panic!("{note}: expected the folder browser, got {other:?}"),
+            other => panic!("{note}: expected the standalone name step, got {other:?}"),
         }
+    }
+
+    /// From the name step, move to its button and press it: the folder browser
+    /// for a folder the user already has.
+    fn use_existing_folder(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("the focus key must be handled");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
     }
 
     /// The agents pane reaches the same folder browser the palette command
@@ -29566,7 +29650,29 @@ cyan = "#00ffff"
 
             app.handle_key(key).expect("the key must be handled");
 
-            assert_in_the_standalone_folder_browser(&app, &format!("{key:?}"));
+            assert_in_the_standalone_name_step(&app, &format!("{key:?}"));
+        }
+    }
+
+    /// The key opens the new-folder name step with its field focused, so a name
+    /// typed straight after the key lands whole.
+    #[test]
+    fn a_name_typed_straight_after_the_standalone_key_lands_whole() {
+        let mut app = test_app(default_bindings());
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = false;
+        app.focus = FocusPane::Left;
+
+        for ch in "stui-chosen".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .expect("the key must be handled");
+        }
+
+        match &app.prompt {
+            PromptState::NameStandaloneAgent { input, .. } => assert_eq!(input.text, "tui-chosen"),
+            other => panic!("expected the standalone name step, got {other:?}"),
         }
     }
 
@@ -29600,7 +29706,7 @@ cyan = "#00ffff"
                 app.agent_filter.is_none(),
                 "{section}: the filter must not survive behind the browser"
             );
-            assert_in_the_standalone_folder_browser(&app, section);
+            assert_in_the_standalone_name_step(&app, section);
         }
     }
 
@@ -29620,7 +29726,7 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .expect("the key must be handled");
 
-        assert_in_the_standalone_folder_browser(&app, "terminal row");
+        assert_in_the_standalone_name_step(&app, "terminal row");
     }
 
     /// Inside the project chooser, with the search idle, both keys fire:
@@ -29638,7 +29744,7 @@ cyan = "#00ffff"
 
             app.handle_key(key).expect("the key must be handled");
 
-            assert_in_the_standalone_folder_browser(&app, &format!("{key:?}"));
+            assert_in_the_standalone_name_step(&app, &format!("{key:?}"));
         }
     }
 
@@ -29702,7 +29808,7 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .expect("the chord must be handled");
 
-        assert_in_the_standalone_folder_browser(&app, "searching chooser");
+        assert_in_the_standalone_name_step(&app, "searching chooser");
     }
 
     /// The new key must not have taken the chooser's own confirm with it: the
@@ -29823,7 +29929,12 @@ cyan = "#00ffff"
 
         match &app.prompt {
             PromptState::NameStandaloneAgent { folder: picked, .. } => {
-                assert_eq!(*picked, folder.path().to_string_lossy().to_string());
+                assert_eq!(
+                    *picked,
+                    crate::app::StandaloneFolder::Picked(
+                        folder.path().to_string_lossy().to_string()
+                    )
+                );
             }
             other => panic!("expected the standalone name prompt, got {other:?}"),
         }
@@ -29835,10 +29946,9 @@ cyan = "#00ffff"
     fn a_typed_standalone_path_goes_through_the_shared_refusals() {
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: folder.path().to_string_lossy().to_string(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(folder.path().to_string_lossy().to_string()),
+        );
 
         app.open_standalone_agent_browser();
         type_path_and_confirm(&mut app, folder.path());
@@ -29906,7 +30016,12 @@ cyan = "#00ffff"
 
         match &app.prompt {
             PromptState::NameStandaloneAgent { folder: picked, .. } => {
-                assert_eq!(*picked, folder.path().to_string_lossy().to_string());
+                assert_eq!(
+                    *picked,
+                    crate::app::StandaloneFolder::Picked(
+                        folder.path().to_string_lossy().to_string()
+                    )
+                );
             }
             other => panic!("expected the name prompt, got {other:?}"),
         }
@@ -29985,10 +30100,9 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
         let occupied = folder.path().to_string_lossy().to_string();
-        app.engine.sessions[0].workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: occupied.clone(),
-            });
+        app.engine.sessions[0].workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(occupied.clone()),
+        );
 
         pick_standalone_folder(&mut app, folder.path());
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -30099,6 +30213,7 @@ cyan = "#00ffff"
         palette
             .execute_command("new-standalone-agent")
             .expect("the palette command must open the browser");
+        use_existing_folder(&mut palette);
         aim_and_pick(&mut palette, folder.path());
         assert!(
             matches!(palette.prompt, PromptState::NameStandaloneAgent { .. }),
@@ -30112,6 +30227,7 @@ cyan = "#00ffff"
             let mut app = test_app(default_bindings());
             app.focus = FocusPane::Left;
             app.handle_key(key).expect("the key must be handled");
+            use_existing_folder(&mut app);
             aim_and_pick(&mut app, folder.path());
             assert!(
                 matches!(app.prompt, PromptState::NameStandaloneAgent { .. }),
@@ -30129,6 +30245,7 @@ cyan = "#00ffff"
         chooser
             .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .expect("the chord must be handled");
+        use_existing_folder(&mut chooser);
         aim_and_pick(&mut chooser, folder.path());
         assert!(
             matches!(chooser.prompt, PromptState::NameStandaloneAgent { .. }),

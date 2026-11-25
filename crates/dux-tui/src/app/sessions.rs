@@ -93,8 +93,27 @@ impl App {
         }
     }
 
-    /// Palette command (`new-standalone-agent`): pick a folder you already
-    /// have and run a provider in it.
+    /// Ask for a new standalone agent's name, pre-filled with a pet name when
+    /// the random pet-name default is on; dux creates its folder, and the
+    /// modal's button leads on to the folder browser instead.
+    pub(crate) fn open_new_standalone_agent(&mut self) {
+        let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
+        if self
+            .engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default
+        {
+            input.insert_str(&crate::git::docker_style_name());
+        }
+        self.prompt = PromptState::NameStandaloneAgent {
+            folder: crate::app::StandaloneFolder::New,
+            input,
+            focus: crate::app::NameStandaloneAgentFocus::Input,
+        };
+    }
+
+    /// Pick a folder you already have and run a provider in it.
     ///
     /// Reuses the add-project folder browser with the purpose switched: picking
     /// a folder here goes nowhere near the add-project validator, which rejects
@@ -117,8 +136,9 @@ impl App {
     /// here, and nothing is initialized in the user's directory.
     pub(crate) fn open_standalone_agent_name_prompt(&mut self, path: String) {
         self.prompt = PromptState::NameStandaloneAgent {
-            folder: path,
+            folder: crate::app::StandaloneFolder::Picked(path),
             input: TextInput::new().with_char_map(crate::git::agent_name_char_map),
+            focus: crate::app::NameStandaloneAgentFocus::Input,
         };
     }
 
@@ -131,14 +151,19 @@ impl App {
     pub(crate) fn planned_standalone_agent_create(
         &self,
     ) -> Option<Result<(CreateAgentRequest, dux_core::status_text::StatusText)>> {
-        let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
+        let PromptState::NameStandaloneAgent { folder, input, .. } = &self.prompt else {
             return None;
         };
-        // No branch is created here, but the name follows the agent-name rules
-        // the engine enforces, and an empty field means the folder's own name
-        // converted into one. The provider is the global default, retargetable
-        // afterwards.
-        Some(self.engine.plan_standalone_agent(folder, &input.text, None))
+        // In a picked folder an empty name means the folder's own; a new folder
+        // is named after the agent, so its name is required.
+        Some(match folder {
+            crate::app::StandaloneFolder::New => self
+                .engine
+                .plan_standalone_agent_in_new_folder(&input.text, None),
+            crate::app::StandaloneFolder::Picked(folder) => {
+                self.engine.plan_standalone_agent(folder, &input.text, None)
+            }
+        })
     }
 
     /// Confirm on the standalone name field: create the agent and close.
@@ -151,10 +176,16 @@ impl App {
     /// Create and reports the server's refusal as a toast rather than holding
     /// the folder hostage behind an open form.
     pub(crate) fn confirm_standalone_agent_name(&mut self) {
-        let PromptState::NameStandaloneAgent { input, .. } = &self.prompt else {
+        let PromptState::NameStandaloneAgent { input, folder, .. } = &self.prompt else {
             return;
         };
         let typed = input.text.trim();
+        if typed.is_empty() && *folder == crate::app::StandaloneFolder::New {
+            self.set_error(
+                "Give the agent a name first: dux names the folder it creates after the agent.",
+            );
+            return;
+        }
         if !typed.is_empty() && !crate::git::is_valid_agent_name(typed) {
             let refusal = crate::git::invalid_agent_name_refusal(typed);
             self.set_error(refusal);
@@ -1224,7 +1255,8 @@ impl App {
             | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => custom_name.clone(),
             // A standalone create already has its title (resolved from the
             // folder), so the prompt opens pre-filled with it.
-            CreateAgentRequest::Standalone { title, .. } => Some(title.clone()),
+            CreateAgentRequest::Standalone { title, .. }
+            | CreateAgentRequest::StandaloneInNewFolder { title, .. } => Some(title.clone()),
             CreateAgentRequest::PullRequest {
                 custom_name,
                 head_branch,
@@ -2632,10 +2664,20 @@ impl App {
                     folder_label: dux_core::home_path::shorten_home(std::path::Path::new(
                         &folder.folder_path,
                     )),
+                    created: session.workspace.folder_created_by_dux().then_some(
+                        crate::app::CreatedFolderBox {
+                            delete: true,
+                            files: None,
+                        },
+                    ),
                 }
             }
         };
         let offers_branches = target.offers_worktree_checkbox();
+        let counts_folder = target
+            .offers_folder_checkbox()
+            .then(|| session.folder_path().map(str::to_string))
+            .flatten();
         self.prompt = PromptState::ConfirmDeleteAgent {
             attached: Vec::new(),
             session_id: session.id.clone(),
@@ -2649,6 +2691,52 @@ impl App {
         };
         if offers_branches {
             self.spawn_branch_offer(&session.id);
+        }
+        if let Some(folder) = counts_folder {
+            self.spawn_folder_files_count(&session.id, folder);
+        }
+    }
+
+    /// Count the files in a folder dux created, off the UI thread, for the
+    /// delete dialog's warning under its folder box.
+    fn spawn_folder_files_count(&mut self, session_id: &str, folder: String) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.folder_files_rx = Some(rx);
+        let session_id = session_id.to_string();
+        std::thread::spawn(move || {
+            let files = dux_core::agent_folders::count_folder_files(std::path::Path::new(&folder));
+            let _ = tx.send((session_id, files));
+        });
+    }
+
+    /// Fold a landed file count into the delete dialog that asked for it, and
+    /// only that one: another dialog opened since is about another agent.
+    pub(crate) fn drain_folder_files(&mut self) {
+        let Some(rx) = self.folder_files_rx.as_ref() else {
+            return;
+        };
+        let (session, files) = match rx.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.folder_files_rx = None;
+                return;
+            }
+        };
+        self.folder_files_rx = None;
+        self.mark_frame_dirty();
+        if let PromptState::ConfirmDeleteAgent {
+            session_id,
+            target:
+                crate::app::DeleteAgentTarget::Folder {
+                    created: Some(folder_box),
+                    ..
+                },
+            ..
+        } = &mut self.prompt
+            && *session_id == session
+        {
+            folder_box.files = Some(files);
         }
     }
 
@@ -2728,7 +2816,7 @@ impl App {
         worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
     ) -> Result<()> {
-        self.begin_delete_session_asking(session_id, worktree, delete_branch, None);
+        self.begin_delete_session_asking(session_id, worktree, delete_branch, None, None);
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
         while self.pending_delete_ops.contains_key(session_id)
             || self.engine.pending_deletions.contains(session_id)
@@ -2808,25 +2896,41 @@ impl App {
 
     /// Start deleting an agent. A refusal naming who is attached is returned for
     /// the dialog; any other failure goes on the status line.
+    #[cfg(test)]
     pub(crate) fn begin_delete_session(
         &mut self,
         session_id: &str,
         worktree: dux_core::engine::WorktreeOnDelete,
         branches: Option<dux_core::branch_history::BranchAnswersWire>,
     ) -> Option<dux_core::engine::Attached> {
-        self.begin_delete_session_asking(session_id, worktree, None, branches)
+        self.begin_delete_session_asking(session_id, worktree, None, branches, None)
     }
 
-    /// [`Self::begin_delete_session`] with the older single branch answer too,
-    /// which only a test still sends.
+    /// Start deleting an agent with the folder box's answer, `None` when the
+    /// dialog offered no folder box. A refusal naming who is attached is
+    /// returned for the dialog; any other failure goes on the status line.
+    pub(crate) fn begin_delete_session_with_folder(
+        &mut self,
+        session_id: &str,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branches: Option<dux_core::branch_history::BranchAnswersWire>,
+        delete_folder: Option<bool>,
+    ) -> Option<dux_core::engine::Attached> {
+        self.begin_delete_session_asking(session_id, worktree, None, branches, delete_folder)
+    }
+
+    /// [`Self::begin_delete_session_with_folder`] with the older single branch
+    /// answer too, which only a test still sends.
     fn begin_delete_session_asking(
         &mut self,
         session_id: &str,
         worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
         branches: Option<dux_core::branch_history::BranchAnswersWire>,
+        delete_folder: Option<bool>,
     ) -> Option<dux_core::engine::Attached> {
-        let begun = self.row_begin_delete(session_id, worktree, delete_branch, branches)?;
+        let begun =
+            self.row_begin_delete(session_id, worktree, delete_branch, branches, delete_folder)?;
         match begun {
             Ok(reaction) => self.apply_reaction(reaction),
             Err(e) => match super::attachment_presence::attached_refusal(e) {
@@ -5890,6 +5994,7 @@ mod tests {
             process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
+            pending_folder_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             unsaved_branch_drifts: std::collections::HashMap::new(),
@@ -6005,6 +6110,7 @@ mod tests {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
+            folder_files_rx: None,
             project_worktree_files: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
@@ -6222,10 +6328,9 @@ mod tests {
     fn forking_a_standalone_agent_refuses_in_the_shared_words() {
         let mut session = make_session("sa1", "claude", "/unused");
         session.title = Some("My Notes".to_string());
-        session.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: "/home/someone/My Notes".to_string(),
-            });
+        session.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen("/home/someone/My Notes".to_string()),
+        );
         let mut app = test_app_with_sessions(vec![session], Vec::new());
         app.selected_left = 1;
 
@@ -6332,6 +6437,7 @@ mod tests {
             process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
+            pending_folder_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             unsaved_branch_drifts: std::collections::HashMap::new(),

@@ -157,6 +157,8 @@ export function openTerminal(options: OpenTerminalOptions): Disposable {
 
   term.open(container)
   if (term.textarea) {
+    // Set explicitly: xterm's own defaults do not hold on every mobile browser
+    // (autocorrect still fires), and a shell has no buffer for a correction to fix.
     term.textarea.setAttribute("autocomplete", "off")
     term.textarea.setAttribute("autocorrect", "off")
     term.textarea.setAttribute("autocapitalize", "off")

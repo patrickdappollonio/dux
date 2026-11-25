@@ -1,11 +1,12 @@
-// The New standalone agent dialog with the project shortcuts over the folder
-// explorer: one project picked, so the explorer stands in its folder, and one
+// The New standalone agent dialog's existing-folder step, with the project
+// shortcuts over the folder explorer: one project picked, so the explorer stands in its folder, and one
 // greyed out because a standalone agent already works in its folder.
 const {
   agents,
   api,
   boxOf,
   clearToasts,
+  clickText,
   containerSh,
   expectDialogOpen,
   expectVisible,
@@ -90,6 +91,9 @@ module.exports = {
     await takeOver(page)
     await clearToasts(page)
     await openLauncherEntry(page, "new-standalone-agent")
+    // The entry asks for a name first; its button leads on to the folder step.
+    await expectDialogOpen(page, "New standalone agent")
+    await clickText(page, "^Use an existing folder or project…$", '[role="dialog"] button')
     await sleep(1500)
     const row = await page.evaluate((name) => {
       const button = [...document.querySelectorAll("[data-project-shortcut]")].find((b) =>
@@ -110,7 +114,7 @@ module.exports = {
     // The dialog, the list with its sentence, the row that cannot be picked
     // and why, and the explorer standing in the picked project's folder,
     // which is what the caption says the picture shows.
-    await expectDialogOpen(page, "New standalone agent")
+    await expectDialogOpen(page, "Use an existing folder or project")
     await expectVisibleText(page, "Your projects", { selector: '[role="dialog"] div' })
     await expectVisible(
       page,

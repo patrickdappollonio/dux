@@ -2034,6 +2034,12 @@ fn patch_defaults_env_and_logging(doc: &mut DocumentMut, config: &Config) {
         "start_directory",
         config.defaults.start_directory.as_deref(),
     );
+    patch_table_opt_str(
+        doc,
+        "defaults",
+        "standalone_agents_directory",
+        config.defaults.standalone_agents_directory.as_deref(),
+    );
     // The AI commit-message feature was removed; drop its now-obsolete prompt key
     // from any existing config so saves stop carrying it forward.
     remove_table_key(doc, "defaults", "commit_prompt");

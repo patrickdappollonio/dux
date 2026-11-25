@@ -478,10 +478,9 @@ mod tests {
         // A standalone agent in one project's folder, and a managed agent
         // whose working copy is another's (a project added from a worktree).
         let mut standalone = crate::test_support::sample_agent("standalone");
-        standalone.workspace =
-            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
-                folder_path: taken.to_string_lossy().into_owned(),
-            });
+        standalone.workspace = dux_core::model::AgentWorkspace::Folder(
+            dux_core::model::FolderWorkspace::chosen(taken.to_string_lossy().into_owned()),
+        );
         engine.sessions.push(standalone);
         let mut managed = crate::test_support::sample_agent("managed");
         if let dux_core::model::AgentWorkspace::Managed(workspace) = &mut managed.workspace {

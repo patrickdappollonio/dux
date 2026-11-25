@@ -271,6 +271,8 @@ export function registerTerminalInputWiring(
     composeActive: () => options.live.current.composeActive,
     focusTypingSurface: options.focusTypingSurface,
   })
+  // xterm holds one custom key handler and a second registration replaces the
+  // first, so the soft newline and the clipboard chords share this one.
   options.term.attachCustomKeyEventHandler((event) =>
     terminalKeyAction(event, options),
   )

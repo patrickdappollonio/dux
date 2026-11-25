@@ -55,7 +55,9 @@ A handful of subcommands handle the file without you hunting for it:
   - `dux config reset` removes the config, the log, the server log with its rotated copies
     and your saved remotes. It **keeps your agents and worktrees**.
   - `dux config reset --all` is the full factory reset: all of that, plus the session
-    database and every worktree dux made. It keeps one thing, the note that you have
+    database, every worktree dux made, and every folder dux created for a standalone agent
+    that it still has a record of. A folder you kept when you deleted its agent stays. Of
+    its own records it keeps one, the note that you have
     already seen the welcome screen, so the next start does not greet you as a stranger.
     Browser tabs and saved remotes that knew it treat the reset dux as a different one.
     See the warning below.
@@ -222,8 +224,10 @@ the comments around them.
 ### Factory reset in detail
 
 > [!WARNING]
-> A factory reset (`dux config reset --all`) deletes every worktree dux made, **uncommitted
-> work included**. It is all or nothing, and it refuses to run while another dux is running.
+> A factory reset (`dux config reset --all`) deletes every worktree dux made and every
+> folder dux created for a standalone agent that it still has a record of, **uncommitted
+> work and everything in them included**. It is all or nothing, and it refuses to run
+> while another dux is running.
 
 Here is what the reset does, in order:
 
@@ -245,7 +249,13 @@ Some things to know:
 - **If a folder cannot be removed** once deleting has begun, the reset stops there, keeps
   the database and the config, lists what it removed and what failed, and exits with status
   1. Fix that and run it again.
-- **A folder a standalone agent runs in is never removed.**
+- **A folder you chose for a standalone agent is never removed.** A folder dux created for
+  one is removed when dux still has a record of it: its agent's, or a deletion with the
+  agent that had not finished. It goes only while it is still the folder dux created (its
+  hidden `.dux-agent-folder` file still holds the mark dux wrote there) and no other
+  agent's folder or project is in it; otherwise it is kept with a warning saying why, its
+  hidden file is removed, and the reset goes on. A folder you kept when you deleted its agent is no longer recorded,
+  and stays.
 - **Branches kept with a left-over folder go too,** when dux created them and they still
   point where they did when the folder was left behind. A branch that existed before its
   agent is kept, as a delete keeps it.

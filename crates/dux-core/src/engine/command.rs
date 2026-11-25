@@ -48,6 +48,9 @@ pub enum Command {
         delete_branch: Option<bool>,
         /// Both delete-dialog boxes' answers, when the caller sends them.
         branches: Option<crate::branch_history::BranchAnswersWire>,
+        /// Whether a standalone agent's folder goes too; asking for one dux
+        /// did not create is refused. `None` leaves it to who made the folder.
+        delete_folder: Option<bool>,
     },
     /// Persist a project mutation. `Add` is handled inline: the handler writes
     /// SQLite and config.toml in `apply` and returns
@@ -678,6 +681,7 @@ impl Engine {
                 delete_worktree,
                 delete_branch,
                 branches,
+                delete_folder,
             } => {
                 let worktree = if delete_worktree {
                     crate::engine::WorktreeOnDelete::Remove
@@ -689,7 +693,9 @@ impl Engine {
                     delete_branch,
                 )
                 .map_err(|reason| anyhow::anyhow!("The agent was not deleted: {reason}."))?;
-                let outcome = self.begin_delete_session_with(&session_id, worktree, &request);
+                let folder = crate::engine::FolderOnDelete::from_answer(delete_folder);
+                let outcome =
+                    self.begin_delete_session_full(&session_id, worktree, &request, folder);
                 Ok(EventReaction::BeginDeleteSessionView(Box::new(
                     BeginDeleteSessionView {
                         session_id,
@@ -1030,6 +1036,8 @@ impl Engine {
                 worktree_path, ..
             } => Some(worktree_path.clone()),
             crate::worker::CreateAgentRequest::Standalone { folder, .. } => Some(folder.clone()),
+            // `StandaloneInNewFolder`: the folder does not exist yet; the job
+            // creates it and refuses one that is already there.
             _ => None,
         };
         // A pull request create tells a branch an agent holds from one

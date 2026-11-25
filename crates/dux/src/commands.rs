@@ -403,9 +403,13 @@ pub(crate) struct GuardedChangeFlags {
 /// request says where the agent comes from. A pull request may also come with
 /// a project, which then names where it goes.
 #[derive(Args, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches, each its own flag"
+)]
 #[command(group(
     clap::ArgGroup::new("source")
-        .args(["project", "fork", "standalone", "from_pr"])
+        .args(["project", "fork", "standalone", "new_folder", "from_pr"])
         .required(true)
         .multiple(true)
 ))]
@@ -458,6 +462,18 @@ pub(crate) struct AddAgentArgs {
     /// Not with --fork.
     #[arg(long, value_name = "FOLDER", conflicts_with = "fork")]
     pub standalone: Option<String>,
+    /// Create a standalone agent in a new folder dux creates for it, named
+    /// after --name, in the standalone agents folder ([defaults]
+    /// `standalone_agents_directory`). A name whose folder is already there is
+    /// refused, except a folder dux created for a start that was interrupted:
+    /// while it holds only its marker file and nothing uses it, it is used
+    /// again. Needs --name.
+    #[arg(
+        long,
+        requires = "name",
+        conflicts_with_all = ["project", "fork", "standalone", "from_pr", "from_worktree", "existing_branch", "copy_uncommitted"]
+    )]
+    pub new_folder: bool,
     /// The provider a standalone agent runs (the global default otherwise).
     /// Not with --project, --fork or --from-pr.
     #[arg(long, value_name = "NAME", conflicts_with_all = ["project", "fork", "from_pr"])]
@@ -583,7 +599,8 @@ pub(crate) enum AgentsSub {
     Add(AddAgentArgs),
     /// Delete an agent. With no branch flag, only the branch dux made for the
     /// agent goes with the worktree, and only while dux can prove it is still
-    /// that branch; every other branch is kept.
+    /// that branch; every other branch is kept. With no folder flag, a
+    /// standalone agent's folder goes only when dux created it.
     #[command(visible_alias = "remove")]
     Rm {
         /// An agent's id or name; a name two agents share is refused with both ids.
@@ -591,6 +608,16 @@ pub(crate) enum AgentsSub {
         /// Also remove the agent's worktree.
         #[arg(long)]
         delete_worktree: bool,
+        /// Delete the standalone agent's folder too, with everything in it.
+        /// Only a folder dux created for the agent can be: for a folder you
+        /// chose the delete is refused. With neither --delete-folder nor
+        /// --keep-folder, a folder dux created goes and a folder you chose
+        /// stays. Not with --keep-folder or --delete-worktree.
+        #[arg(long, conflicts_with_all = ["keep_folder", "delete_worktree"])]
+        delete_folder: bool,
+        /// Keep the standalone agent's folder, even one dux created for it.
+        #[arg(long)]
+        keep_folder: bool,
         /// Delete the branch its worktree is on, at the commit it points at
         /// now. Needs --delete-worktree: git will not delete a branch a
         /// worktree still has checked out. Not with --keep-branch.
@@ -1347,6 +1374,18 @@ codes:
             "codex",
         ],
         &["agents", "add", "--fork", "a", "--name", "b"],
+        &["agents", "add", "--new-folder", "--name", "otter"],
+        &[
+            "agents",
+            "add",
+            "--new-folder",
+            "--name",
+            "otter",
+            "--provider",
+            "codex",
+        ],
+        &["agents", "rm", "a", "--delete-folder"],
+        &["agents", "rm", "a", "--keep-folder"],
         &["agents", "ls", "--worktrees", "--project", "app"],
         &["agents", "rm", "a", "--delete-worktree", "--keep-branch"],
         &["agents", "rm", "a", "--keep-branch"],
@@ -1408,6 +1447,27 @@ codes:
         ],
         &["agents", "rm", "a", "--delete-branch", "--keep-branch"],
         &["agents", "rm", "a", "--delete-branch"],
+        &["agents", "add", "--new-folder"],
+        &[
+            "agents",
+            "add",
+            "--new-folder",
+            "--name",
+            "a",
+            "--standalone",
+            "/x",
+        ],
+        &[
+            "agents",
+            "add",
+            "--new-folder",
+            "--name",
+            "a",
+            "--project",
+            "app",
+        ],
+        &["agents", "rm", "a", "--delete-folder", "--keep-folder"],
+        &["agents", "rm", "a", "--delete-folder", "--delete-worktree"],
         &[
             "agents",
             "rm",

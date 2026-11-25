@@ -159,7 +159,8 @@ function NewFolderControl({
 // and the selected-target line so the two render identically.
 // "row" shares a wrapping row with the New folder control; "column" sits in a
 // column, where a flex basis would be its height.
-function PathField({ value, place, name }: { value: string; place: "row" | "column"; name: string }) {
+// `help` is a sentence drawn above the box and read with it.
+function PathField({ value, place, name, help }: { value: string; place: "row" | "column"; name: string; help?: string }) {
   const ref = useRef<HTMLInputElement>(null)
   // useLayoutEffect so the scroll-to-end happens before paint: otherwise the
   // browser paints the leading segment for one frame and snaps to the tail.
@@ -170,7 +171,7 @@ function PathField({ value, place, name }: { value: string; place: "row" | "colu
   }, [value])
   return (
     <div className={cn("min-w-0", place === "row" && "flex-1 basis-56")}>
-      <FormGroup layout="stacked" control="single" spokenName={name}>
+      <FormGroup layout="stacked" control="single" spokenName={name} help={help} helpAt="above">
         {(field) => (
           <input
             {...field}
@@ -297,7 +298,7 @@ function SelectionDetails({
       <FormGroup layout="stacked" control="single" label="Project name" optional>
         {(field) => <Input {...field} value={name} onChange={(event) => setName(event.target.value)} />}
       </FormGroup>
-      <PathField value={selected} place="column" name="Chosen folder" />
+      <PathField value={selected} place="column" name="Chosen folder" help="The project is added from this folder." />
       {inspecting ? (
         <LoadingSentence spinner="glyph" size="xs">
           Checking the folder…

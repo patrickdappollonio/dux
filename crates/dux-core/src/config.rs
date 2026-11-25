@@ -175,6 +175,10 @@ pub struct Defaults {
     pub provider: String,
     /// The directory the project browser opens in.
     pub start_directory: Option<String>,
+    /// The folder dux creates new standalone agents' folders in. Unset or
+    /// empty means the `agents` folder inside dux's own folder.
+    #[serde(default, deserialize_with = "deserialize_blank_as_none")]
+    pub standalone_agents_directory: Option<String>,
     /// Whether the new-agent name prompt starts with a random two-word pet name.
     pub enable_randomized_pet_name_by_default: bool,
     /// Whether dux fast-forward pulls a project's source checkout before creating an agent
@@ -1704,6 +1708,15 @@ impl ComposeBarMode {
 /// settings: the warn-once-and-degrade happens at load
 /// ([`compose_bar_load_warning`]) and at use ([`ComposeBarMode::from_config_str`]),
 /// so one typo does not take the whole config file down with it.
+/// An optional text setting where an empty or blank value means unset.
+fn deserialize_blank_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(value.filter(|text| !text.trim().is_empty()))
+}
+
 fn deserialize_compose_bar<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -2359,6 +2372,7 @@ impl Default for Defaults {
         Self {
             provider: "claude".to_string(),
             start_directory,
+            standalone_agents_directory: None,
             enable_randomized_pet_name_by_default: false,
             pull_before_creating_agent_by_default: true,
             copy_uncommitted_changes_by_default: true,
@@ -2805,6 +2819,54 @@ impl DuxPaths {
             .with_context(|| format!("failed to create {}", self.worktrees_root.display()))?;
         Ok(())
     }
+}
+
+/// The folder new standalone agents' folders are created in:
+/// `[defaults] standalone_agents_directory` when it names one, with a leading
+/// `~/` read as the home directory, else `agents` inside dux's own folder.
+pub fn standalone_agents_root(config: &Config, paths: &DuxPaths) -> PathBuf {
+    let configured = config
+        .defaults
+        .standalone_agents_directory
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let home = || home::home_dir().filter(|home| home.is_absolute());
+    let resolved = configured.and_then(|value| match value.strip_prefix("~/") {
+        Some(rest) => home().map(|home| home.join(rest)),
+        None if value == "~" => home(),
+        None => Some(PathBuf::from(value)),
+    });
+    // A relative value is refused at load; one that reaches here all the
+    // same, or a home directory that cannot be found, falls back too, so a
+    // folder is never created relative to wherever dux was started.
+    match resolved {
+        Some(path) if path.is_absolute() => path,
+        _ => default_standalone_agents_root(paths),
+    }
+}
+
+/// The warning the load gives for a `[defaults] standalone_agents_directory`
+/// that is neither an absolute path nor one starting with `~/`, or `None` for
+/// a usable value or none.
+pub(crate) fn standalone_agents_directory_load_warning(configured: Option<&str>) -> Option<String> {
+    let value = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if value == "~" || value.starts_with("~/") || Path::new(value).is_absolute() {
+        return None;
+    }
+    Some(format!(
+        "defaults.standalone_agents_directory = {value:?} cannot be used because it is not an \
+         absolute path or one starting with ~/, and dux would read it against whatever folder \
+         it was started from. Falling back to the default, the agents folder inside dux's own \
+         folder."
+    ))
+}
+
+/// `agents` inside dux's own folder, beside `worktrees`.
+pub fn default_standalone_agents_root(paths: &DuxPaths) -> PathBuf {
+    paths.root.join("agents")
 }
 
 /// `[server] control_socket` as a path: relative to the config folder, or
@@ -6110,6 +6172,17 @@ fn load_corrections(mut config: Config) -> (Config, Vec<(Vec<String>, String)>) 
         corrections.push((key_path(&["ui", "upload_directory"]), warning));
         config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
     }
+    // And once more for an agents folder dux would read against wherever it
+    // was started.
+    if let Some(warning) = standalone_agents_directory_load_warning(
+        config.defaults.standalone_agents_directory.as_deref(),
+    ) {
+        corrections.push((
+            key_path(&["defaults", "standalone_agents_directory"]),
+            warning,
+        ));
+        config.defaults.standalone_agents_directory = None;
+    }
     // And once more for a `ui.compose_bar` naming a mode dux does not know.
     // Corrected in memory so the bootstrap projection publishes a mode the
     // browser can act on rather than passing the typo through to it.
@@ -7162,6 +7235,39 @@ mod tests {
             None,
             "the corrected value must not warn a second time"
         );
+    }
+
+    /// A relative agents folder would be read against wherever dux was
+    /// started, so the load refuses it, says why, and uses the default.
+    #[test]
+    fn a_relative_standalone_agents_directory_is_refused_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(
+            &paths.config_path,
+            "[defaults]\nstandalone_agents_directory = \"agents\"\n",
+        )
+        .expect("write config");
+        let warning = standalone_agents_directory_load_warning(Some("agents")).expect("a warning");
+        assert!(warning.contains("absolute"), "{warning}");
+        let config = load_config(&paths).expect("config loads");
+        assert_eq!(config.defaults.standalone_agents_directory, None);
+        assert_eq!(
+            standalone_agents_root(&config, &paths),
+            paths.root.join("agents")
+        );
+    }
+
+    #[test]
+    fn an_absolute_or_home_standalone_agents_directory_is_kept() {
+        for value in ["/srv/agents", "~/agents", "~"] {
+            assert_eq!(
+                standalone_agents_directory_load_warning(Some(value)),
+                None,
+                "{value}"
+            );
+        }
+        assert_eq!(standalone_agents_directory_load_warning(None), None);
     }
 
     #[test]

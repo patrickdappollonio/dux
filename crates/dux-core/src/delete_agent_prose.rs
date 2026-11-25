@@ -342,9 +342,11 @@ pub fn branches_checked_prose(
             (many, true) => prose.push_text(format!("the {many} branches")),
             (many, false) => prose.push_text(format!("any of the {many} branches")),
         }
-        if no_remote {
-            prose.push_text(" is also on another branch, and this repository has no remote");
-        }
+        prose.push_text(if no_remote {
+            " is also on another branch, and this repository has no remote."
+        } else {
+            "."
+        });
         return Ok(Some(BranchesChecked {
             prose,
             loses_commits: false,
@@ -371,10 +373,10 @@ pub fn branches_checked_prose(
         push_list(&mut prose, &holding, " and ");
     }
     prose.push_text(match (no_remote, one) {
-        (false, true) => " isn't pushed anywhere",
-        (false, false) => " aren't pushed anywhere",
-        (true, true) => " is on no other branch, and this repository has no remote",
-        (true, false) => " are on no other branch, and this repository has no remote",
+        (false, true) => " isn't pushed anywhere.",
+        (false, false) => " aren't pushed anywhere.",
+        (true, true) => " is on no other branch, and this repository has no remote.",
+        (true, false) => " are on no other branch, and this repository has no remote.",
     });
     Ok(Some(BranchesChecked {
         prose,
@@ -408,6 +410,34 @@ pub fn protected_branches_prose(branches: &[&str]) -> Prose {
     } else {
         " are the project's own branches, so dux keeps them."
     })
+}
+
+/// The folder box's label for an agent whose folder dux created, naming the
+/// folder a tick deletes.
+pub fn folder_box_label_prose(folder_label: &str) -> Prose {
+    Prose::new()
+        .text("Also delete its folder ")
+        .name(folder_label)
+}
+
+/// The warning under a ticked folder box: how many files go with the folder
+/// dux created, or that dux could not count them. `None` for an empty or
+/// missing folder, which loses nothing.
+pub fn folder_files_prose(files: &crate::agent_folders::FolderFiles) -> Option<Prose> {
+    match files {
+        crate::agent_folders::FolderFiles::Counted { count: 0 }
+        | crate::agent_folders::FolderFiles::Missing => None,
+        crate::agent_folders::FolderFiles::Counted { count: 1 } => {
+            Some(Prose::new().text("The folder holds 1 file. It will be deleted with the folder."))
+        }
+        crate::agent_folders::FolderFiles::Counted { count } => Some(Prose::new().text(format!(
+            "The folder holds {count} files. They will be deleted with it."
+        ))),
+        crate::agent_folders::FolderFiles::Unreadable => Some(Prose::new().text(
+            "dux could not count the files in the folder. Everything in it will be deleted \
+             with it.",
+        )),
+    }
 }
 
 #[cfg(test)]

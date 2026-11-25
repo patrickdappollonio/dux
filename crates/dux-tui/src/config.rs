@@ -54,8 +54,11 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
         .into());
     }
     if purpose == ConfigRead::Start && !paths.config_path.exists() {
-        dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
-            .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
+        dux_core::config_write::write_config_secure(
+            &paths.config_path,
+            &render_first_config(paths),
+        )
+        .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
     // Fails closed BEFORE anything else, migrations included (they write the
@@ -520,6 +523,17 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # built into dux and extended via pull request; it is deliberately not a setting.",
             )),
             value_fn: |c| FieldValue::OptStr(c.defaults.start_directory.clone()),
+        },
+        ConfigEntry::Field {
+            key: "standalone_agents_directory",
+            comment: Some(CommentSource::Static(
+                "# The folder dux creates a new standalone agent's folder in. Starting a\n\
+                 # standalone agent with only a name creates <this folder>/<name>, and deleting\n\
+                 # that agent can delete the folder too. A folder you pick for a standalone agent\n\
+                 # yourself is never created or deleted by dux. An absolute path, or one starting\n\
+                 # with ~/; empty means the agents folder inside dux's own folder.",
+            )),
+            value_fn: |c| FieldValue::OptStr(c.defaults.standalone_agents_directory.clone()),
         },
         ConfigEntry::Blank,
         ConfigEntry::Field {
@@ -2094,6 +2108,31 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
     out
 }
 
+/// Write out every unset default that depends on where dux keeps its files
+/// as the path it resolves to, as a first start writes it.
+pub(crate) fn resolve_path_defaults(config: &mut Config, paths: &DuxPaths) {
+    if config.defaults.standalone_agents_directory.is_none() {
+        config.defaults.standalone_agents_directory = Some(
+            dux_core::config::default_standalone_agents_root(paths)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+}
+
+/// The config a first start writes: the defaults, with the paths resolved.
+pub(crate) fn first_config(paths: &DuxPaths) -> Config {
+    let mut config = Config::default();
+    resolve_path_defaults(&mut config, paths);
+    config
+}
+
+pub(crate) fn render_first_config(paths: &DuxPaths) -> String {
+    let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
+    render_config(&first_config(paths), &bindings)
+}
+
+#[cfg(test)]
 pub(crate) fn render_default_config() -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
     render_config(&Config::default(), &bindings)
@@ -5035,6 +5074,33 @@ args = [\"-l\"]
         assert_eq!(
             mode, 0o600,
             "first-created config must be 0600, got {mode:o}"
+        );
+    }
+
+    /// A first start writes the agents folder as the path it resolves to,
+    /// beside the worktrees folder, so the file shows a working value.
+    #[test]
+    fn a_first_start_writes_the_resolved_standalone_agents_folder() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
+            worktrees_root: root.join("worktrees"),
+            root: root.clone(),
+        };
+        let config = crate::config::ensure_config(&paths).expect("ensure");
+        let expected = root.join("agents").to_string_lossy().into_owned();
+        assert_eq!(
+            config.defaults.standalone_agents_directory.as_deref(),
+            Some(expected.as_str())
+        );
+        let text = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(
+            text.contains("# The folder dux creates a new standalone agent's folder in."),
+            "the setting is explained in the file"
         );
     }
 

@@ -782,6 +782,8 @@ pub(crate) fn agents(
             keep_branch,
             delete_other_branches,
             keep_other_branches,
+            delete_folder,
+            keep_folder,
             guarded,
         } => {
             // Neither flag of a pair leaves that box to how the branch came
@@ -793,13 +795,14 @@ pub(crate) fn agents(
             };
             let branch = answer(delete_branch, keep_branch);
             let others = answer(delete_other_branches, keep_other_branches);
+            let folder = answer(delete_folder, keep_folder);
             let worktree = if delete_worktree {
                 workspace::Worktrees::Delete
             } else {
                 workspace::Worktrees::Keep
             };
             guarded_on_dux(selection, err, &guarded, |client, force| {
-                workspace::agents_rm(client, &agent, worktree, branch, others, force)
+                workspace::agents_rm(client, &agent, worktree, branch, others, folder, force)
             })
         }
         AgentsSub::Stop { agent, guarded } => {
@@ -882,6 +885,11 @@ fn new_agent(args: &AddAgentArgs) -> workspace::NewAgent {
     if let Some(agent) = &args.fork {
         return workspace::NewAgent::Fork {
             agent: agent.clone(),
+        };
+    }
+    if args.new_folder {
+        return workspace::NewAgent::StandaloneNewFolder {
+            provider: args.provider.clone(),
         };
     }
     if let Some(folder) = &args.standalone {

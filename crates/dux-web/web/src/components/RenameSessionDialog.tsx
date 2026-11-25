@@ -3,9 +3,9 @@ import { useEffect, useState } from "react"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
+import { AgentNameInput } from "@/components/AgentNameFields"
 import { FormGroup } from "@/components/ui/form-group"
-import { Input } from "@/components/ui/input"
-import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
+import { INVALID_AGENT_NAME, isValidAgentName } from "@/lib/agentName"
 import { matchWorkspace, standaloneAgentDefaultName } from "@/lib/agentWorkspace"
 import { renderProse } from "@/lib/prose"
 import {
@@ -124,29 +124,14 @@ export function RenameSessionDialog() {
         invalid={invalidNonEmpty}
       >
         {(field) => (
-          <Input
-            {...field}
+          <AgentNameInput
+            field={field}
             value={renameDraft}
-            onChange={(e) => {
-              const el = e.target
-              const raw = el.value
-              const caret = el.selectionStart ?? raw.length
-              setRenameDraft(raw)
-              // Keep the caret put when sanitization shrinks the string (same
-              // approach as the new-agent input).
-              const sanitized = sanitizeAgentName(raw)
-              if (sanitized !== raw) {
-                const next = Math.max(0, caret - (raw.length - sanitized.length))
-                requestAnimationFrame(() => el.setSelectionRange(next, next))
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault()
-                handleSubmit()
-              }
-            }}
+            onChange={setRenameDraft}
+            onSubmit={handleSubmit}
             placeholder={fallbackName}
+            generating={false}
+            autoFocus={false}
           />
         )}
       </FormGroup>

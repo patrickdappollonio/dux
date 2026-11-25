@@ -253,7 +253,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     },
     WelcomeTip {
         web: Some(
-            "`Add project…` in the launcher's `⋯` menu browses the server's own disk, so you can adopt a repo from a phone on the sofa.",
+            "`Add project…` in the launcher's `▾` menu browses the server's own disk, so you can adopt a repo from a phone on the sofa.",
         ),
         tui: Some(|cx| {
             format!(
@@ -410,11 +410,11 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     },
     WelcomeTip {
         web: Some(
-            "No worktree, no branch, just a folder you already have: `New standalone agent…` in the launcher's `⋯` menu. dux never creates, moves or removes that folder.",
+            "Just want to talk to an agent? `New standalone agent…` in the launcher's `▾` menu asks for a name and dux creates a folder for it: no project, no branch, no worktree. Rather use a folder you already have? One click away, and dux never moves or removes it.",
         ),
         tui: Some(|cx| {
             format!(
-                "`new-standalone-agent` in the palette (`{}`) starts an agent in a folder you already have, worktree not included. dux never creates, moves or removes that folder.",
+                "Just want to talk to an agent? `new-standalone-agent` in the palette (`{}`) asks for a name and dux creates a folder for it, worktree not included. Rather use a folder you already have? One key away, and dux never moves or removes it.",
                 cx.key(Action::OpenPalette)
             )
         }),

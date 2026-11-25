@@ -703,9 +703,9 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_focused_tab: None,
-                workspace: AgentWorkspace::Folder(FolderWorkspace {
-                    folder_path: "/home/someone/My Notes".to_string(),
-                }),
+                workspace: AgentWorkspace::Folder(FolderWorkspace::chosen(
+                    "/home/someone/My Notes".to_string(),
+                )),
             })
             .expect("create a standalone agent");
         sessions.sort_by(|a, b| a.id.cmp(&b.id));

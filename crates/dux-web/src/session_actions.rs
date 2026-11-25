@@ -91,6 +91,14 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/sessions/{id}/branch-pushed",
             axum::routing::get(session_branch_pushed),
         )
+        .route(
+            "/api/v1/sessions/{id}/folder-files",
+            axum::routing::get(session_folder_files),
+        )
+        .route(
+            "/api/v1/standalone-agents/new-folder",
+            axum::routing::get(standalone_new_folder),
+        )
         .route("/api/v1/sessions/{id}/reconnect", post(reconnect_session))
         .route(
             "/api/v1/sessions/{id}/rerun-startup-command",
@@ -204,6 +212,13 @@ enum CreateSessionBody {
         #[serde(default)]
         provider: Option<String>,
     },
+    /// A STANDALONE agent in a new folder dux creates for it, named after the
+    /// agent, in the standalone agents folder. The name is required.
+    StandaloneNewFolder {
+        name: String,
+        #[serde(default)]
+        provider: Option<String>,
+    },
 }
 
 impl CreateSessionBody {
@@ -260,6 +275,9 @@ impl CreateSessionBody {
                 name,
                 provider,
             },
+            CreateSessionBody::StandaloneNewFolder { name, provider } => {
+                WireCommand::CreateStandaloneAgentInNewFolder { name, provider }
+            }
         }
     }
 }
@@ -835,6 +853,137 @@ async fn session_uncommitted_files(
     .into_response()
 }
 
+/// What the delete dialog says about a standalone agent's folder.
+#[derive(Serialize)]
+struct FolderFilesResponse {
+    /// Whether dux created the folder, so deleting the agent may delete it.
+    created_by_dux: bool,
+    /// How many files the folder holds, or why that is not known. Counted only
+    /// for a folder dux created; `None` for a folder the user chose.
+    files: Option<dux_core::agent_folders::FolderFiles>,
+}
+
+/// `GET /api/v1/sessions/{id}/folder-files`: whether dux created a standalone
+/// agent's folder and, when it did, how many files it holds. The count walks
+/// the folder, so it runs on the blocking pool.
+async fn session_folder_files(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let (path, created_by_dux) = match state.engine.standalone_folder(id).await {
+        crate::engine_actor::StandaloneFolderAnswer::UnknownSession => return unknown_session(),
+        crate::engine_actor::StandaloneFolderAnswer::InWorktree => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "This agent runs in a worktree, not in a standalone agent's folder.",
+            )
+                .into_response();
+        }
+        crate::engine_actor::StandaloneFolderAnswer::Folder {
+            path,
+            created_by_dux,
+        } => (path, created_by_dux),
+    };
+    if !created_by_dux {
+        return axum::Json(FolderFilesResponse {
+            created_by_dux,
+            files: None,
+        })
+        .into_response();
+    }
+    let counted = tokio::task::spawn_blocking(move || {
+        dux_core::agent_folders::count_folder_files(std::path::Path::new(&path))
+    })
+    .await
+    .unwrap_or(dux_core::agent_folders::FolderFiles::Unreadable);
+    axum::Json(FolderFilesResponse {
+        created_by_dux,
+        files: Some(counted),
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct NewFolderQuery {
+    #[serde(default)]
+    name: String,
+}
+
+/// Where a new standalone agent's folder would be.
+#[derive(Serialize)]
+struct NewFolderResponse {
+    /// The folder new agents' folders are created in, home-shortened.
+    root_label: String,
+    /// The folder the agent called `name` would run in, home-shortened, or
+    /// `None` for an empty name.
+    folder_label: Option<String>,
+    /// Whether the create would refuse the name for its folder: something it
+    /// would not take over is at the folder's path, or an agent is recorded
+    /// there. `false` for an empty name.
+    taken: bool,
+    /// The agent recorded at the folder's path, by its label, when that is
+    /// why the name is taken.
+    taken_by_agent: Option<String>,
+}
+
+/// `GET /api/v1/standalone-agents/new-folder?name=`: the folder a standalone
+/// agent called `name` would get, and whether that name is taken, answered by
+/// the rules the create applies. A read; the create itself asks again,
+/// atomically. A name the agent-name rules refuse is refused here as the
+/// create refuses it.
+async fn standalone_new_folder(
+    State(state): State<AppState>,
+    Query(query): Query<NewFolderQuery>,
+) -> Response {
+    let typed = query.name.trim();
+    if !typed.is_empty() && !dux_core::git::is_valid_agent_name(typed) {
+        return (
+            StatusCode::BAD_REQUEST,
+            dux_core::git::invalid_agent_name_refusal(typed),
+        )
+            .into_response();
+    }
+    let Some(lookup) = state.engine.new_folder_lookup(typed.to_string()).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dux is shutting down, so the folder could not be looked up.",
+        )
+            .into_response();
+    };
+    let answer = tokio::task::spawn_blocking(move || {
+        let root_label = dux_core::home_path::shorten_home(&lookup.root);
+        if lookup.name.is_empty() {
+            return NewFolderResponse {
+                root_label,
+                folder_label: None,
+                taken: false,
+                taken_by_agent: None,
+            };
+        }
+        let folder = dux_core::agent_folders::folder_path_for(&lookup.root, &lookup.name);
+        let (taken, taken_by_agent) = match lookup.taken() {
+            dux_core::agent_job::NewFolderTaken::No => (false, None),
+            dux_core::agent_job::NewFolderTaken::FolderThere => (true, None),
+            dux_core::agent_job::NewFolderTaken::AgentRecorded(agent) => (true, Some(agent)),
+        };
+        NewFolderResponse {
+            root_label,
+            folder_label: Some(dux_core::home_path::shorten_home(&folder)),
+            taken,
+            taken_by_agent,
+        }
+    })
+    .await;
+    match answer {
+        Ok(answer) => axum::Json(answer).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the folder lookup stopped unexpectedly",
+        )
+            .into_response(),
+    }
+}
+
 /// What the rename dialog warns about under its "also rename the git branch" box.
 #[derive(Serialize)]
 struct BranchPushedResponse {
@@ -871,14 +1020,19 @@ struct DeleteQuery {
     /// Also remove the agent's worktree from disk (mirrors the WS command's
     /// `delete_worktree`). Defaults to false (keep the worktree) so a missing
     /// query parameter never deletes user data.
-    #[serde(default)]
-    delete_worktree: bool,
+    #[serde(default, rename = "delete_worktree")]
+    worktree: bool,
     /// The delete dialog's "also delete the branch" answer. Absent means nobody
     /// was asked, which keeps the provenance default: dux deletes only the
     /// branches it created. A caller that never learned about this parameter
     /// therefore behaves exactly as it did before it existed.
-    #[serde(default)]
-    delete_branch: Option<bool>,
+    #[serde(default, rename = "delete_branch")]
+    branch: Option<bool>,
+    /// Also delete a standalone agent's folder. Only a folder dux created can
+    /// be; asking for any other refuses the whole delete. Absent means nobody
+    /// was asked: a folder dux created goes and a folder the user chose stays.
+    #[serde(default, rename = "delete_folder")]
+    folder: Option<bool>,
 }
 
 /// The most a delete's body may hold: the branch answers, a few branch names
@@ -931,10 +1085,9 @@ async fn delete_session(
     };
     // Refused here, before anything is dispatched, so a malformed pin is a
     // 400 and never a delete without one.
-    if let Err(reason) = dux_core::branch_history::BranchAnswersWire::to_request(
-        body.branches.as_ref(),
-        q.delete_branch,
-    ) {
+    if let Err(reason) =
+        dux_core::branch_history::BranchAnswersWire::to_request(body.branches.as_ref(), q.branch)
+    {
         return (
             StatusCode::BAD_REQUEST,
             format!("The agent was not deleted: {reason}."),
@@ -946,9 +1099,10 @@ async fn delete_session(
     }
     let command = WireCommand::DeleteSession {
         session_id: id.clone(),
-        delete_worktree: q.delete_worktree,
-        delete_branch: q.delete_branch,
+        delete_worktree: q.worktree,
+        delete_branch: q.branch,
         branches: body.branches,
+        delete_folder: q.folder,
     };
     let result = match dispatch_guarded(
         &state,

@@ -683,6 +683,7 @@ mod tests {
                     agent_label: "my cool agent".to_string(),
                     target: DeleteAgentTarget::Folder {
                         folder_label: "~/notes/my project".to_string(),
+                        created: None,
                     },
                     focus: DeleteAgentFocus::Cancel,
                     delete_worktree: false,

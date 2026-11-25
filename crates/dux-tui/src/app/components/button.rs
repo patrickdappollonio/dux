@@ -152,6 +152,8 @@ pub(crate) enum ButtonPressedTarget {
     /// back in project-first mode.
     PullRequestChooseProject,
     CloneChooseExisting,
+    /// The standalone name modal's way on to the existing-folder browser.
+    StandaloneUseExistingFolder,
     AgentInfoClose,
     StartupCommandLogsClose,
     /// The first-load modal's two pill buttons. Not drawn by [`Button`] (they

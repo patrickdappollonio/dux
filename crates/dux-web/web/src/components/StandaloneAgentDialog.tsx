@@ -1,21 +1,200 @@
-import { useEffect, useRef, useState } from "react"
+import { type ReactNode, useEffect, useRef, useState } from "react"
+import { FolderOpen } from "lucide-react"
 
 import { AgentNameInput } from "@/components/AgentNameFields"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, type ModalButtonAction, useModalLifetime } from "@/components/modal"
 import { ProjectShortcutList } from "@/components/ProjectShortcutList"
+import { Button } from "@/components/ui/button"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { FormGroup } from "@/components/ui/form-group"
 import { InlineCode } from "@/components/ui/inline-code"
-import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
+import {
+  agentFolderName,
+  INVALID_AGENT_NAME,
+  isValidAgentName,
+  sanitizeAgentName,
+} from "@/lib/agentName"
 import { standaloneAgentDefaultName } from "@/lib/agentWorkspace"
+import { browseApi } from "@/lib/browseApi"
+import { type Prose, prose, quotedChip, renderProse } from "@/lib/prose"
+import { sessionsApi } from "@/lib/sessionsApi"
 import type { ProjectShortcutView } from "@/lib/types"
 import {
   browseDir,
   closeStandaloneAgentPicker,
   createStandaloneAgent,
+  createStandaloneAgentInNewFolder,
   useDux,
 } from "@/lib/store"
+
+/** Why the server's create would refuse a name for its folder: something is
+ * already there, or an agent is recorded there (`agent`). */
+interface FolderTaken {
+  agent: string | null
+}
+
+/** Why the name's folder is taken, as the create says it. */
+function folderTakenWords(taken: FolderTaken): Prose {
+  return taken.agent === null
+    ? prose`A folder with that name is already there.`
+    : prose`Agent ${quotedChip(taken.agent)} already has that folder.`
+}
+
+/** Why Create agent waits on the name step, or `null` when it may go. */
+function newFolderBlocker(name: string, taken: FolderTaken | null): string | Prose | null {
+  if (name === "") return "Give the agent a name first."
+  if (!isValidAgentName(name)) return INVALID_AGENT_NAME
+  if (taken !== null) return folderTakenWords(taken)
+  return null
+}
+
+/** What one step puts in the modal: its words, its submit and its body. */
+interface StepParts {
+  title: string
+  description: string
+  submit: ModalButtonAction
+  body: ReactNode
+}
+
+/** The name step: dux creates the agent's folder, named after it. A taken name
+ * is refused here, and again atomically by the server's create. The box starts
+ * with a generated name only while random names are on by default, as every
+ * new-agent name does. */
+function useNewFolderStep(onUseExisting: () => void): StepParts {
+  const randomizeByDefault = useDux().bootstrap?.randomize_agent_names_by_default ?? false
+  // Read once, at opening, as the New agent dialog reads it.
+  const [randomize] = useState(randomizeByDefault)
+  const [name, setName] = useState("")
+  const [generating, setGenerating] = useState(randomize)
+  const [rootLabel, setRootLabel] = useState<string | null>(null)
+  // The latest answer about whether the create would refuse a name for its
+  // folder, kept with the name it answers so a stale one never speaks for
+  // another.
+  const [takenAnswer, setTakenAnswer] = useState<{
+    name: string
+    taken: FolderTaken | null
+  } | null>(null)
+
+  useEffect(() => {
+    let live = true
+    if (randomize) {
+      browseApi
+        .agentName()
+        .then((reply) => {
+          if (live) setName(sanitizeAgentName(reply.name))
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (live) setGenerating(false)
+        })
+    }
+    sessionsApi
+      .newAgentFolder("")
+      .then((reply) => {
+        if (live) setRootLabel(reply.root_label)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [randomize])
+
+  const valid = name !== "" && isValidAgentName(name)
+  useEffect(() => {
+    if (!valid) return
+    let live = true
+    // Asked once typing settles, not on every key.
+    const timer = setTimeout(() => {
+      sessionsApi
+        .newAgentFolder(name)
+        .then((reply) => {
+          if (!live) return
+          setRootLabel(reply.root_label)
+          setTakenAnswer({
+            name,
+            taken: reply.taken ? { agent: reply.taken_by_agent ?? null } : null,
+          })
+        })
+        .catch(() => {})
+    }, 150)
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [name, valid])
+
+  const taken = takenAnswer !== null && takenAnswer.name === name ? takenAnswer.taken : null
+  const blocker = newFolderBlocker(name, taken)
+  const error =
+    name !== "" && !valid
+      ? INVALID_AGENT_NAME
+      : taken !== null
+        ? renderProse(prose`${folderTakenWords(taken)} Pick another name.`)
+        : null
+
+  function handleCreate() {
+    if (blocker !== null || generating) return
+    createStandaloneAgentInNewFolder(name)
+    closeStandaloneAgentPicker()
+  }
+
+  return {
+    title: "New standalone agent",
+    description:
+      "Give the agent a name and dux creates a folder for it to run in: no project, no branch, no worktree.",
+    submit: {
+      label: "Create agent",
+      tone: "primary",
+      onSelect: handleCreate,
+      disabledReason: generating ? "dux is still picking a name for the agent." : blocker,
+    },
+    body: (
+      <>
+        <FormGroup
+          layout="stacked"
+          control="single"
+          label="Agent name"
+          help={
+            <>
+              The agent runs in{" "}
+              <InlineCode>{newAgentFolderLabel(rootLabel, valid ? name : null)}</InlineCode>. dux
+              creates the folder.
+            </>
+          }
+          error={error}
+        >
+          {(field) => (
+            <AgentNameInput
+              field={field}
+              value={name}
+              onChange={(raw) => setName(sanitizeAgentName(raw))}
+              onSubmit={handleCreate}
+              generating={generating}
+              autoFocus={false}
+            />
+          )}
+        </FormGroup>
+        {/* 40px under a finger and on a phone; on a computer its neighbours, the
+          * field and the footer's rule, are clear of it by the body's gap. */}
+        <Button
+          variant="ghost"
+          className="self-start max-md:min-h-10 pointer-coarse:min-h-10"
+          onClick={onUseExisting}
+        >
+          <FolderOpen data-icon="inline-start" />
+          Use an existing folder or project…
+        </Button>
+      </>
+    ),
+  }
+}
+
+/** The folder a new agent called `name` gets, home-collapsed as the server
+ * says it, with `…` for a part not known yet. */
+function newAgentFolderLabel(rootLabel: string | null, name: string | null): string {
+  return `${rootLabel ?? "…"}/${name === null ? "…" : agentFolderName(name)}`
+}
 
 /**
  * Pick a folder you already have and run an agent in it.
@@ -41,7 +220,7 @@ import {
  * Every refusal is the server's and arrives as a toast, shared with the terminal
  * UI so the two surfaces cannot answer the same question differently.
  */
-function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+function useExistingFolderStep(): StepParts {
   const { browsePath, browseEntries, browseLoading, standaloneProjectShortcuts, spine } =
     useDux()
   // One shortcut row per project, so the projects the app already holds say
@@ -107,28 +286,24 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
     })
   }
 
-  return (
-    <Modal
-      kind="form"
-      open={open}
-      onClose={closeStandaloneAgentPicker}
-      onClosed={onClosed}
-      size="xl"
-      title="New standalone agent"
-      // The words "standalone agent" appear here on purpose: every other
-      // surface uses that name, so the dialog that creates one teaches it.
-      description="Pick any folder and a standalone agent runs there directly: no branch, no worktree, and dux never creates, moves or removes the folder."
-      submit={{
-        label: "Create agent",
-        tone: "primary",
-        onSelect: handleCreate,
-        disabledReason: !selected
-          ? "Choose a folder for the agent to run in first."
-          : invalidName
-            ? INVALID_AGENT_NAME
-            : null,
-      }}
-    >
+  return {
+    title: "Use an existing folder or project",
+    // The words "standalone agent" appear here on purpose: every other
+    // surface uses that name, so the dialog that creates one teaches it.
+    description:
+      "Pick any folder and a standalone agent runs there directly: no branch, no worktree, and dux never creates, moves or removes the folder.",
+    submit: {
+      label: "Create agent",
+      tone: "primary",
+      onSelect: handleCreate,
+      disabledReason: !selected
+        ? "Choose a folder for the agent to run in first."
+        : invalidName
+          ? INVALID_AGENT_NAME
+          : null,
+    },
+    body: (
+      <>
       {standaloneProjectShortcuts === null ? (
         knownProjects === 0 ? null : (
           <ProjectShortcutList
@@ -209,6 +384,39 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
           </FormGroup>
         </div>
       ) : null}
+      </>
+    ),
+  }
+}
+
+/** One modal in two steps, so its history entry carries across them; each step
+ * keeps what it holds while the other is shown. */
+function StandaloneAgentSteps({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const [step, setStep] = useState<"name" | "folder">("name")
+  const named = useNewFolderStep(() => setStep("folder"))
+  const existing = useExistingFolderStep()
+  const shown = step === "name" ? named : existing
+  return (
+    <Modal
+      kind="form"
+      open={open}
+      onClose={closeStandaloneAgentPicker}
+      onClosed={onClosed}
+      size={step === "name" ? "lg" : "xl"}
+      step={step}
+      // The picker's own height, rather than the shorter name step's it comes
+      // from, so the explorer is not squeezed.
+      height={step === "name" ? "content" : "h680"}
+      back={
+        step === "folder"
+          ? { label: "New standalone agent", onSelect: () => setStep("name") }
+          : undefined
+      }
+      title={shown.title}
+      description={shown.description}
+      submit={shown.submit}
+    >
+      {shown.body}
     </Modal>
   )
 }
@@ -216,9 +424,9 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
 export function StandaloneAgentDialog() {
   const { standaloneAgentPickerOpen } = useDux()
   const life = useModalLifetime(standaloneAgentPickerOpen)
-  // Keyed by the open, so the choice and the name start empty on every one.
+  // Keyed by the open, so the name and the choice start afresh on every one.
   return life.mounted ? (
-    <StandaloneAgentBrowser
+    <StandaloneAgentSteps
       key={life.epoch}
       open={standaloneAgentPickerOpen}
       onClosed={life.onClosed}

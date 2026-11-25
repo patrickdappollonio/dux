@@ -471,23 +471,33 @@ fn run_diff(paths: &DuxPaths, form: DiffForm, out: &mut dyn std::io::Write) -> R
     // The text it was read from, so a name the summary may not print is
     // placed by its line.
     current.source_text = dux_core::config::SourceText::of(&current_raw);
+    // An unset path default and the path a first start writes for it are the
+    // same setting.
+    config::resolve_path_defaults(&mut current, paths);
+    let baseline = config::first_config(paths);
 
     if form == DiffForm::Raw {
-        run_diff_raw(&current_raw, &current, out)
+        run_diff_raw(&current, &baseline, out)
     } else {
-        run_diff_summary(&current, out)
+        run_diff_summary(&current, &baseline, out)
     }
 }
 
-fn run_diff_raw(_current_raw: &str, current: &Config, out: &mut dyn std::io::Write) -> Result<()> {
-    write!(out, "{}", raw_diff_text(current))?;
+fn run_diff_raw(current: &Config, baseline: &Config, out: &mut dyn std::io::Write) -> Result<()> {
+    write!(out, "{}", raw_diff_text_against(current, baseline))?;
     Ok(())
 }
 
-/// What `dux config diff --raw` prints for `current`.
+/// What `dux config diff --raw` prints for `current` against the defaults.
+#[cfg(test)]
 pub(crate) fn raw_diff_text(current: &Config) -> String {
+    raw_diff_text_against(current, &Config::default())
+}
+
+fn raw_diff_text_against(current: &Config, baseline: &Config) -> String {
     let bindings = RuntimeBindings::from_keys_config(&current.keys);
-    let default_rendered = config::render_default_config();
+    let default_rendered =
+        config::render_config_with(baseline, &RuntimeBindings::from_keys_config(&baseline.keys));
     // Re-render current config to normalize it before diffing.
     let current_rendered = render_config_for_diff(current, &bindings);
     if current_rendered == default_rendered {
@@ -496,8 +506,12 @@ pub(crate) fn raw_diff_text(current: &Config) -> String {
     unified_diff("default", "current", &default_rendered, &current_rendered)
 }
 
-fn run_diff_summary(current: &Config, out: &mut dyn std::io::Write) -> Result<()> {
-    let changes = collect_config_changes(current);
+fn run_diff_summary(
+    current: &Config,
+    baseline: &Config,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
+    let changes = collect_config_changes_against(current, baseline);
     if changes.is_empty() {
         writeln!(out, "config matches defaults, so there are no differences")?;
     } else {
@@ -508,28 +522,34 @@ fn run_diff_summary(current: &Config, out: &mut dyn std::io::Write) -> Result<()
     Ok(())
 }
 
-/// Every setting whose current value differs from the default, as display lines.
+/// Every setting whose current value differs from [`Config::default()`].
+#[cfg(test)]
+pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
+    collect_config_changes_against(current, &Config::default())
+}
+
+/// Every setting whose current value differs from `baseline`, as display lines.
 /// `env` and `projects` are summarized so their values and paths never reach the
-/// output; `--raw` ([`raw_diff_text`]) prints `[env]` values and is not safe to
-/// paste into a bug report.
+/// output; `--raw` ([`raw_diff_text_against`]) prints `[env]` values and is not
+/// safe to paste into a bug report.
 ///
-/// Derived, never hand-maintained: `current` and [`Config::default()`] are both
+/// Derived, never hand-maintained: `current` and `baseline` are both
 /// projected to `serde_json::Value` and walked structurally, so a config key
 /// added anywhere in the struct tree is reported without being registered here.
 ///
 /// `serde_json` and not `toml` on purpose. TOML has no null and its serializer
 /// omits a `None` struct field, which would make every default-`None` setting
-/// (`defaults.start_directory`, the optional provider fields) invisible to the
-/// comparison. JSON keeps them as an explicit null.
+/// (the optional provider fields) invisible to the comparison. JSON keeps them
+/// as an explicit null.
 ///
-/// What is compared is the parsed file against [`Config::default()`]: neither
-/// `load_config` nor `ProvidersConfig::ensure_defaults` runs, so the summary
-/// reports what the file says rather than what dux normalizes it into, with no
-/// value clamping and no shipped provider injected into a config that does not
-/// name it.
-pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
+/// What is compared is the parsed file against the defaults a first start
+/// writes: neither `load_config` nor `ProvidersConfig::ensure_defaults` runs, so
+/// the summary reports what the file says rather than what dux normalizes it
+/// into, with no value clamping and no shipped provider injected into a config
+/// that does not name it.
+fn collect_config_changes_against(current: &Config, baseline: &Config) -> Vec<String> {
     let (Ok(default_json), Ok(current_json)) = (
-        serde_json::to_value(Config::default()),
+        serde_json::to_value(baseline),
         serde_json::to_value(current),
     ) else {
         return Vec::new();
@@ -754,7 +774,7 @@ fn run_regenerate(
     held_back: dux_core::config_keys::HeldBack,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    let fresh = config::render_default_config();
+    let fresh = config::render_first_config(paths);
 
     if rewrite == ConfigRewrite::Preview {
         refuse_dangling_config_link(paths)?;
@@ -1081,7 +1101,19 @@ pub(crate) fn restore_docs_preview(
 // Agent data reset
 // ---------------------------------------------------------------------------
 
-fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
+/// What the reset reads from the session database before deleting anything.
+struct ResetRecords {
+    occupied_folders: Vec<PathBuf>,
+    recorded_folders: Vec<PathBuf>,
+    sessions: Vec<dux_core::model::AgentSession>,
+    recorded: Vec<dux_core::process_sessions::StoredSession>,
+    kept_with_leftovers: Vec<(PathBuf, dux_core::leftover_folders::LeftoverFolderRecord)>,
+    histories: BranchHistories,
+    project_records: Vec<(String, String)>,
+    pending_folders: Vec<dux_core::storage::PendingFolderRemoval>,
+}
+
+fn load_reset_records(paths: &DuxPaths) -> Result<ResetRecords> {
     // Folders a standalone agent occupies: the sweep of the whole worktrees
     // root below is otherwise indiscriminate, and nothing stops a user pointing
     // a standalone agent at a directory inside dux's managed area, which dux
@@ -1090,7 +1122,6 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     // The same folders as recorded (never resolved), for the link rule: a
     // link in the root is kept when one of these is at or through it.
     let mut recorded_folders: Vec<PathBuf> = Vec::new();
-    let seen_welcome = last_seen_welcome(paths);
     let mut sessions: Vec<dux_core::model::AgentSession> = Vec::new();
     // What dux recorded starting, this boot only: a session from another boot
     // is void.
@@ -1100,6 +1131,11 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     let mut kept_with_leftovers: Vec<(PathBuf, dux_core::leftover_folders::LeftoverFolderRecord)> =
         Vec::new();
     let mut histories = BranchHistories::new();
+    // Every project as its name and repository path, for the occupancy rule.
+    let mut project_records: Vec<(String, String)> = Vec::new();
+    // Folders dux created for agents already deleted with them, whose
+    // deletion had not finished.
+    let mut pending_folders: Vec<dux_core::storage::PendingFolderRemoval> = Vec::new();
     if paths.sessions_db_path.exists() {
         let db = paths.sessions_db_path.display();
         let store = SessionStore::open(&paths.sessions_db_path).map_err(|error| {
@@ -1139,6 +1175,22 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
                 .map(|project| canonical_or_original(Path::new(&project.path))),
         );
         recorded_folders.extend(projects.iter().map(|project| PathBuf::from(&project.path)));
+        project_records = projects
+            .iter()
+            .map(|project| {
+                (
+                    project.name.clone().unwrap_or_else(|| project.path.clone()),
+                    project.path.clone(),
+                )
+            })
+            .collect();
+        pending_folders = store.load_pending_folder_removals().map_err(|error| {
+            ResetRefused::unreadable_records(
+                format_args!("the folders waiting to be deleted in {db} could not be read"),
+                paths,
+                error,
+            )
+        })?;
         kept_with_leftovers = branches_kept_with_leftovers(&store, &projects, paths)?;
         histories = branch_histories(&store, &sessions);
         recorded = store
@@ -1148,10 +1200,45 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
             .filter(|entry| entry.session.is_this_boot())
             .collect();
     }
+    Ok(ResetRecords {
+        occupied_folders,
+        recorded_folders,
+        sessions,
+        recorded,
+        kept_with_leftovers,
+        histories,
+        project_records,
+        pending_folders,
+    })
+}
 
+fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
+    let seen_welcome = last_seen_welcome(paths);
+    let ResetRecords {
+        occupied_folders,
+        recorded_folders,
+        sessions,
+        recorded,
+        kept_with_leftovers,
+        histories,
+        project_records,
+        pending_folders,
+    } = load_reset_records(paths)?;
+
+    // The folders dux created for standalone agents go with the reset, as the
+    // worktrees it created do; a folder the user chose stays.
+    let mut kept_folders = Vec::new();
+    let created_folders = created_folders_reset_removes(
+        &sessions,
+        &pending_folders,
+        &project_records,
+        &mut kept_folders,
+        report,
+    );
     // Nothing is deleted until everything dux started has stopped and one last
     // look finds nothing left in the way.
-    let removing = folders_reset_removes(paths, &sessions, &occupied_folders);
+    let mut removing = folders_reset_removes(paths, &sessions, &occupied_folders);
+    removing.extend(created_folders.iter().map(|(path, _)| path.clone()));
     stop_recorded_programs(paths, &recorded, report)?;
     ensure_nothing_runs(&recorded, &removing)?;
 
@@ -1174,6 +1261,7 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         }
     }
     report.say(format_args!("{}", removed_worktrees_line(removed.len())));
+    remove_created_folders(&created_folders, &mut kept_folders, report);
 
     // What the loop above could not account for goes with the root, except a folder
     // a standalone agent occupies; it stops at the first entry it cannot remove.
@@ -1186,6 +1274,10 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     )?;
     delete_branches_kept_with_leftovers(&kept_with_leftovers, report);
     remove_file_with_message(&paths.sessions_db_path, report)?;
+    // No record names them any more, so they are the person's.
+    for (path, mark) in &kept_folders {
+        dux_core::agent_folders::let_go(path, *mark);
+    }
     // The welcome screen was already seen, and a reset does not make it new
     // again: the fresh database starts with that one record.
     if let Some(version) = seen_welcome {
@@ -1199,6 +1291,95 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The folders dux created for standalone agents, those of agents still
+/// recorded and those of agents deleted with their folder whose deletion had
+/// not finished, with the identity each had when dux created it. A folder that
+/// another agent's folder or a project's repository is, or is inside, is kept
+/// with a warning saying why, decided by the occupancy rule an agent delete
+/// asks, and added to `kept`.
+fn created_folders_reset_removes(
+    sessions: &[dux_core::model::AgentSession],
+    pending: &[dux_core::storage::PendingFolderRemoval],
+    projects: &[(String, String)],
+    kept: &mut Vec<(PathBuf, Option<dux_core::model::FolderMark>)>,
+    report: &mut ResetReport,
+) -> Vec<(PathBuf, dux_core::model::DirectoryIdentity)> {
+    let recorded =
+        sessions
+            .iter()
+            .filter_map(|session| match session.workspace.folder_removal_right() {
+                dux_core::model::FolderRemovalRight::CreatedByDux { path, identity } => {
+                    Some((session.id.as_str(), PathBuf::from(path), identity))
+                }
+                dux_core::model::FolderRemovalRight::ChosenByUser { .. }
+                | dux_core::model::FolderRemovalRight::NotAFolder => None,
+            });
+    let deleted = pending.iter().map(|row| {
+        (
+            row.session_id.as_str(),
+            PathBuf::from(&row.path),
+            row.identity,
+        )
+    });
+    let mut removing = Vec::new();
+    for (owner, path, identity) in recorded.chain(deleted) {
+        match dux_core::engine::created_folder_occupant(&path, owner, sessions, projects) {
+            Some(reason) => {
+                report.warn(format_args!(
+                    "warning: kept the standalone agent folder {}: {reason}",
+                    path.display()
+                ));
+                kept.push((path, identity.mark));
+            }
+            None => removing.push((path, identity)),
+        }
+    }
+    removing
+}
+
+/// Delete the folders dux created for standalone agents, each only while it
+/// is still the directory dux created. A folder that cannot be deleted, in
+/// whole or in part, is a warning, is added to `kept`, and the reset goes on.
+fn remove_created_folders(
+    folders: &[(PathBuf, dux_core::model::DirectoryIdentity)],
+    kept: &mut Vec<(PathBuf, Option<dux_core::model::FolderMark>)>,
+    report: &mut ResetReport,
+) {
+    let mut removed = 0_usize;
+    for (path, identity) in folders {
+        // Asked again just before the deletion: the reset's first look was
+        // before the worktrees were removed.
+        if let Some(reason) = dux_core::engine::program_working_in(path) {
+            report.warn(format_args!(
+                "warning: kept the standalone agent folder {}: {reason}",
+                path.display()
+            ));
+            kept.push((path.clone(), identity.mark));
+            continue;
+        }
+        match dux_core::agent_folders::remove_created_folder(path, *identity) {
+            Ok(_) => removed += 1,
+            Err(folder_kept) => {
+                report.warn(format_args!(
+                    "warning: {} the standalone agent folder {}: {}",
+                    if folder_kept.deleted_some {
+                        "deleted only part of"
+                    } else {
+                        "kept"
+                    },
+                    path.display(),
+                    folder_kept.reason.message()
+                ));
+                kept.push((path.clone(), identity.mark));
+            }
+        }
+    }
+    report.say(format_args!(
+        "removed {}",
+        count_of(removed, "standalone agent folder dux created")
+    ));
 }
 
 /// Every left-over folder record, with the repository its project lives in.
@@ -1856,6 +2037,60 @@ mod tests {
         assert_eq!(own.to_string(), "unknown flag: --nope");
     }
 
+    /// The agents folder a first start writes, and an unset one, are both the
+    /// default.
+    #[test]
+    fn config_diff_reports_no_agents_folder_for_a_fresh_install_or_an_unset_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+            worktrees_root: tmp.path().join("worktrees"),
+        };
+        crate::config::ensure_config(&paths).expect("first start");
+        let unset = fs::read_to_string(&paths.config_path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("standalone_agents_directory"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for text in [fs::read_to_string(&paths.config_path).unwrap(), unset] {
+            fs::write(&paths.config_path, &text).unwrap();
+            for form in [DiffForm::Summary, DiffForm::Raw] {
+                let mut out = Vec::new();
+                run_diff(&paths, form, &mut out).expect("diff");
+                let said = String::from_utf8(out).unwrap();
+                assert!(!said.contains("standalone_agents_directory"), "{said}");
+            }
+        }
+    }
+
+    #[test]
+    fn config_regenerate_and_restore_docs_have_nothing_to_do_on_a_fresh_install() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+            worktrees_root: tmp.path().join("worktrees"),
+        };
+        crate::config::ensure_config(&paths).expect("first start");
+        let held_back = dux_core::config_keys::HeldBack::Masked;
+        let mut out = Vec::new();
+        run_regenerate(&paths, ConfigRewrite::Preview, held_back, &mut out).expect("regenerate");
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("nothing to do"), "{said}");
+        let mut out = Vec::new();
+        run_restore_docs(&paths, ConfigRewrite::Preview, held_back, &mut out).expect("restore");
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("nothing to do"), "{said}");
+    }
+
     /// A config.toml that is a link to a file that is gone is not "no config
     /// file": the commands that read it say what the link points at.
     #[test]
@@ -2416,6 +2651,230 @@ mod tests {
         }
     }
 
+    /// A factory reset removes the folder dux created for a standalone agent,
+    /// with everything in it, and keeps a folder the user chose.
+    #[test]
+    fn a_factory_reset_removes_the_folders_dux_created_and_keeps_chosen_ones() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+        };
+        let created =
+            dux_core::agent_folders::create_agent_folder(&tmp.path().join("agents"), "otter")
+                .expect("created");
+        fs::write(created.path.join("notes.txt"), "agent wrote this\n").expect("seed");
+        let chosen = tmp.path().join("my-notes");
+        fs::create_dir_all(&chosen).expect("chosen dir");
+        fs::write(chosen.join("notes.txt"), "mine\n").expect("seed");
+
+        let now = Utc::now();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        for (id, workspace) in [
+            (
+                "made",
+                dux_core::model::FolderWorkspace {
+                    folder_path: created.path.to_string_lossy().into_owned(),
+                    origin: dux_core::model::FolderOrigin::CreatedByDux(created.identity),
+                },
+            ),
+            (
+                "picked",
+                dux_core::model::FolderWorkspace::chosen(chosen.to_string_lossy().to_string()),
+            ),
+        ] {
+            store
+                .upsert_session(&AgentSession {
+                    id: id.to_string(),
+                    slot_tab_id: format!("{id}-slot"),
+                    provider: ProviderKind::new("claude"),
+                    workspace: dux_core::model::AgentWorkspace::Folder(workspace),
+                    title: Some(id.to_string()),
+                    started_providers: Vec::new(),
+                    desired_running: false,
+                    auto_reopen_enabled: false,
+                    status: SessionStatus::Detached,
+                    created_at: now,
+                    updated_at: now,
+                    last_focused_tab: None,
+                })
+                .expect("upsert");
+        }
+        drop(store);
+
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
+
+        assert!(!created.path.exists(), "the folder dux created goes");
+        assert_eq!(
+            fs::read_to_string(chosen.join("notes.txt")).expect("kept"),
+            "mine\n",
+            "the folder the user chose stays"
+        );
+    }
+
+    /// A project whose repository IS a folder dux created for a standalone
+    /// agent keeps that folder through a factory reset.
+    #[test]
+    fn a_factory_reset_keeps_a_created_folder_that_is_a_projects_repository() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+        };
+        let created =
+            dux_core::agent_folders::create_agent_folder(&tmp.path().join("agents"), "otter")
+                .expect("created");
+        fs::write(created.path.join("notes.txt"), "project work\n").expect("seed");
+        let now = Utc::now();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_session(&AgentSession {
+                id: "made".to_string(),
+                slot_tab_id: "made-slot".to_string(),
+                provider: ProviderKind::new("claude"),
+                workspace: dux_core::model::AgentWorkspace::Folder(
+                    dux_core::model::FolderWorkspace {
+                        folder_path: created.path.to_string_lossy().into_owned(),
+                        origin: dux_core::model::FolderOrigin::CreatedByDux(created.identity),
+                    },
+                ),
+                title: Some("otter".to_string()),
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .expect("upsert");
+        store
+            .upsert_project(&dux_core::config::ProjectConfig {
+                id: "p1".to_string(),
+                path: created.path.to_string_lossy().into_owned(),
+                name: Some("otter".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: BTreeMap::default(),
+            })
+            .expect("upsert project");
+        drop(store);
+
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
+
+        assert_eq!(
+            fs::read_to_string(created.path.join("notes.txt")).expect("kept"),
+            "project work\n"
+        );
+        assert!(
+            !created
+                .path
+                .join(dux_core::agent_folders::MARKER_FILE_NAME)
+                .exists(),
+            "a folder the reset keeps is let go of"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct Heard(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Heard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A program that starts working in a folder dux created after the reset's
+    /// first look keeps that folder.
+    #[test]
+    fn a_factory_reset_keeps_a_created_folder_a_program_is_working_in() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let created =
+            dux_core::agent_folders::create_agent_folder(&tmp.path().join("agents"), "otter")
+                .expect("created");
+        let mut working = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&created.path)
+            .spawn()
+            .expect("a program working in the folder");
+        let warnings = Heard::default();
+        let mut report = ResetReport {
+            out: Box::new(std::io::sink()),
+            err: Box::new(warnings.clone()),
+        };
+        let mut kept = Vec::new();
+
+        remove_created_folders(
+            &[(created.path.clone(), created.identity)],
+            &mut kept,
+            &mut report,
+        );
+        let _ = working.kill();
+        let _ = working.wait();
+
+        assert!(created.path.is_dir(), "the folder is kept");
+        assert_eq!(kept, vec![(created.path.clone(), created.identity.mark)]);
+        let heard = String::from_utf8(warnings.0.borrow().clone()).unwrap();
+        assert!(
+            heard.contains(&format!(
+                "warning: kept the standalone agent folder {}: sleep (pid {}) is working in it",
+                created.path.display(),
+                working.id()
+            )),
+            "{heard}"
+        );
+    }
+
+    /// A folder whose agent was deleted with it, and whose deletion had not
+    /// finished, goes with a factory reset too.
+    #[test]
+    fn a_factory_reset_finishes_deleting_a_folder_whose_agent_is_gone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+        };
+        let created =
+            dux_core::agent_folders::create_agent_folder(&tmp.path().join("agents"), "otter")
+                .expect("created");
+        fs::write(created.path.join("notes.txt"), "agent wrote this\n").expect("seed");
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .delete_session_with_folder_removal(
+                "gone",
+                Some(&dux_core::storage::PendingFolderRemoval {
+                    session_id: "gone".to_string(),
+                    label: "otter".to_string(),
+                    path: created.path.to_string_lossy().into_owned(),
+                    identity: created.identity,
+                }),
+            )
+            .expect("written down");
+        drop(store);
+
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
+
+        assert!(!created.path.exists());
+    }
+
     /// A factory reset must not remove a STANDALONE agent's folder, even when
     /// the user pointed that agent at a directory inside dux's own managed
     /// area. The per-session loop already skips it; the sweep of the whole
@@ -2451,9 +2910,9 @@ mod tests {
                 slot_tab_id: "sa1-slot".to_string(),
                 provider: ProviderKind::new("claude"),
                 workspace: dux_core::model::AgentWorkspace::Folder(
-                    dux_core::model::FolderWorkspace {
-                        folder_path: occupied.to_string_lossy().to_string(),
-                    },
+                    dux_core::model::FolderWorkspace::chosen(
+                        occupied.to_string_lossy().to_string(),
+                    ),
                 ),
                 title: Some("my-notes".to_string()),
                 started_providers: Vec::new(),
@@ -2546,9 +3005,9 @@ mod tests {
                 slot_tab_id: "sa1-slot".to_string(),
                 provider: ProviderKind::new("claude"),
                 workspace: dux_core::model::AgentWorkspace::Folder(
-                    dux_core::model::FolderWorkspace {
-                        folder_path: occupied.to_string_lossy().to_string(),
-                    },
+                    dux_core::model::FolderWorkspace::chosen(
+                        occupied.to_string_lossy().to_string(),
+                    ),
                 ),
                 title: Some("notes".to_string()),
                 started_providers: Vec::new(),
@@ -3487,7 +3946,8 @@ mod tests {
     fn diff_summary_reports_no_differences_for_defaults() {
         // Just verify it runs without error on defaults.
         let defaults = Config::default();
-        run_diff_summary(&defaults, &mut std::io::sink()).expect("a sink takes every line");
+        run_diff_summary(&defaults, &defaults, &mut std::io::sink())
+            .expect("a sink takes every line");
     }
 
     #[test]
