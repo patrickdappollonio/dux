@@ -1111,6 +1111,12 @@ mod tests {
         tempfile::tempdir().expect("temp dir")
     }
 
+    /// The temp directory's own path with every link on the way resolved, the
+    /// way the product records a folder's path.
+    fn resolved(tmp: &tempfile::TempDir) -> PathBuf {
+        std::fs::canonicalize(tmp.path()).unwrap()
+    }
+
     fn refusal(path: &Path, identity: DirectoryIdentity) -> String {
         remove_created_folder(path, identity)
             .unwrap_err()
@@ -1936,13 +1942,13 @@ mod tests {
     #[test]
     fn an_agents_folder_turned_into_a_symbolic_link_is_not_followed() {
         let tmp = root();
-        let agents = tmp.path().join("agents");
+        let agents = resolved(&tmp).join("agents");
         let created = create_agent_folder(&agents, "otter").unwrap();
         std::fs::write(created.path.join("file.txt"), "x").unwrap();
         // The real agents folder moves away and a link to it takes its place:
         // the same directory is reachable at the recorded path only through
         // the link.
-        let real = tmp.path().join("real-agents");
+        let real = resolved(&tmp).join("real-agents");
         std::fs::rename(&agents, &real).unwrap();
         std::os::unix::fs::symlink(&real, &agents).unwrap();
         let refused = refusal(&created.path, created.identity);
@@ -1960,11 +1966,24 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_made_under_a_path_that_already_held_a_link_is_deleted() {
+        let tmp = root();
+        let real = resolved(&tmp).join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = resolved(&tmp).join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let created = create_agent_folder(&link.join("agents"), "otter").unwrap();
+        assert_eq!(created.path, real.join("agents/otter"));
+        remove_created_folder(&created.path, created.identity).unwrap();
+        assert!(!created.path.exists());
+    }
+
+    #[test]
     fn a_path_that_now_leads_elsewhere_without_a_link_is_kept_and_says_so() {
         let tmp = root();
-        let created = create_agent_folder(&tmp.path().join("agents"), "otter").unwrap();
-        std::fs::create_dir(tmp.path().join("other")).unwrap();
-        let roundabout = tmp.path().join("other/../agents/otter");
+        let created = create_agent_folder(&resolved(&tmp).join("agents"), "otter").unwrap();
+        std::fs::create_dir(resolved(&tmp).join("other")).unwrap();
+        let roundabout = resolved(&tmp).join("other/../agents/otter");
         let refused = refusal(&roundabout, created.identity);
         assert_eq!(
             refused,
@@ -1972,7 +1991,7 @@ mod tests {
                 "the folders on the way to it now lead to \"{}\" instead of the path dux \
                  recorded, so one of them was renamed or moved, and dux deletes only at the \
                  path it recorded",
-                tmp.path().join("agents").display()
+                resolved(&tmp).join("agents").display()
             )
         );
         assert!(created.path.is_dir());
