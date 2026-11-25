@@ -11,10 +11,15 @@
 //! paste once the bytes after it complete the marker; a held Escape or Alt-[
 //! is a key typed by hand and is dropped alone. The end marker goes through
 //! the typing gate, so a program in a row another device drives stays in the
-//! paste. The windowed
-//! interface ends what it holds the same way when its keys move between
-//! polls, which no key it read did: a dialog a worker opens over it, or its
-//! program exiting, although it stays the reader. The
+//! paste. The windowed interface stays the reader while the place its keys go
+//! changes, and ends what it holds the same way when that place changes
+//! between polls, which no key it read did: a dialog a worker opens over it,
+//! or the program its keys go to exiting. Where its keys go is the server log
+//! viewer, else the open dialog, else the startup log viewer, else the macro
+//! bar, else the focused pane and input target and, while keys are typed into
+//! a program, which program; held input survives every other change, such as
+//! a program starting or exiting or focus moving under an open dialog or the
+//! macro bar. The
 //! `resize` module says how each half is tested: the first by a signal that
 //! cannot interrupt the waiting thread, so only the wake can end the wait.
 //!
@@ -2085,6 +2090,171 @@ mod hand_overs_without_a_key {
         rig.type_bytes(b"x");
         rig.settle();
         assert_eq!(rig.outcome().received, "x");
+    }
+
+    /// What takes the windowed interface's keys in a case where held input
+    /// must outlast a change around it.
+    #[derive(Clone, Copy, Debug)]
+    enum Taker {
+        Palette,
+        /// A dialog with a text field: renaming the agent.
+        RenameDialog,
+        MacroBar,
+    }
+
+    const TAKERS: [Taker; 3] = [Taker::Palette, Taker::RenameDialog, Taker::MacroBar];
+
+    fn default_key(action: Action) -> Vec<u8> {
+        default_bindings()
+            .byte_patterns_for(action)
+            .into_iter()
+            .next()
+            .expect("the action has a default key")
+    }
+
+    /// Open `taker` from the agents list.
+    fn open(rig: &mut Rig, taker: Taker) {
+        rig.app.focus = FocusPane::Left;
+        match taker {
+            Taker::Palette => {
+                rig.type_bytes(&default_key(Action::OpenPalette));
+                rig.settle();
+                assert_eq!(prompt_name(&rig.app.prompt), "Command");
+            }
+            Taker::RenameDialog => {
+                rig.type_bytes(&default_key(Action::RenameSession));
+                rig.settle();
+                assert_eq!(prompt_name(&rig.app.prompt), "RenameSession");
+            }
+            Taker::MacroBar => {
+                rig.app.macro_bar = Some(MacroBarState {
+                    input: TextInput::new(),
+                    selected: 0,
+                    previous_input_target: rig.app.input_target,
+                });
+                rig.app.input_target = InputTarget::None;
+            }
+        }
+    }
+
+    /// The text typed into `taker`'s field.
+    fn typed_into(app: &App, taker: Taker) -> String {
+        match (taker, &app.prompt) {
+            (Taker::Palette, PromptState::Command { input, .. })
+            | (Taker::RenameDialog, PromptState::RenameSession { input, .. }) => input.text.clone(),
+            (Taker::MacroBar, _) => app
+                .macro_bar
+                .as_ref()
+                .expect("the macro bar is open")
+                .input
+                .text
+                .clone(),
+            (_, prompt) => panic!("{taker:?} is not open: {}", prompt_name(prompt)),
+        }
+    }
+
+    /// A paste typed into `taker`, cut by a poll, `change` made while it is
+    /// held and another poll made, arrives whole in `taker`.
+    fn assert_a_paste_outlasts(rig: &mut Rig, taker: Taker, change: impl FnOnce(&mut Rig)) {
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[200~abc");
+        change(rig);
+        rig.turn();
+        rig.type_bytes(b"def\x1b[201~");
+        rig.settle();
+        assert_eq!(typed_into(&rig.app, taker), "abcdef", "{taker:?}");
+    }
+
+    /// A terminal of the agent's dock, running a program, brought in front of
+    /// the agent without moving the keys.
+    fn bring_a_dock_terminal_to_the_front(rig: &mut Rig) {
+        let received = rig.received.with_file_name("terminal received");
+        let id = "dock-terminal".to_string();
+        rig.app.engine.companion_terminals.insert(
+            id.clone(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
+                label: id.clone(),
+                foreground_cmd: None,
+                client: ready_program(&received, Program::Plain),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+                list_after: None,
+            },
+        );
+        rig.app.rebuild_left_items();
+        rig.app.active_terminal_id = Some(id);
+        rig.app.session_surface = crate::model::SessionSurface::Terminal;
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_the_selected_program_exiting() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, the_agent_exits);
+        }
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_the_selected_program_starting() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            the_agent_exits(&mut rig);
+            rig.turn();
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, |rig| {
+                let tab = TabId::new(rig.app.engine.sessions[0].slot_tab_id().to_string());
+                let client = ready_program(&rig.received, Program::Plain);
+                rig.app.engine.providers.insert(tab, client);
+            });
+        }
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_another_program_coming_to_the_front() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, bring_a_dock_terminal_to_the_front);
+        }
+    }
+
+    #[test]
+    fn a_paste_into_a_dialog_or_the_macro_bar_outlasts_focus_moving_under_it() {
+        for taker in TAKERS {
+            let mut rig = Rig::new(WINDOWED);
+            open(&mut rig, taker);
+            assert_a_paste_outlasts(&mut rig, taker, |rig| rig.app.focus = FocusPane::Center);
+        }
+    }
+
+    /// The palette, opened over a row a browser drives, keeps a paste while
+    /// another browser takes the row over.
+    #[test]
+    fn a_paste_into_the_palette_outlasts_a_browser_taking_the_row_over() {
+        let mut rig = Rig::new(Setup {
+            driver: Driver::Browser,
+            ..WINDOWED
+        });
+        open(&mut rig, Taker::Palette);
+        assert_a_paste_outlasts(&mut rig, Taker::Palette, |rig| {
+            let seat = rig.app.pty_ownership().expect("dux serves the web");
+            let browser = seat.owners.next_conn_id();
+            seat.owners
+                .claim_for_resize(
+                    "session-1-slot",
+                    browser,
+                    dux_core::pty_owners::ResizeIntent::TakeOver {
+                        expected_owner: None,
+                    },
+                    Some("Firefox"),
+                    |_| {},
+                )
+                .epoch
+                .expect("the other browser took the row over");
+        });
     }
 }
 

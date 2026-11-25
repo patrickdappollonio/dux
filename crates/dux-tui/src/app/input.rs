@@ -1187,16 +1187,6 @@ impl App {
     }
 
     fn route_key_before_bindings(&mut self, key: KeyEvent) -> Result<KeyRoute> {
-        if !matches!(self.prompt, PromptState::None) {
-            return self.handle_prompt_key(key).map(KeyRoute::Return);
-        }
-        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
-            self.handle_startup_log_viewer_key(key);
-            return Ok(KeyRoute::Return(false));
-        }
-        if self.macro_bar.is_some() {
-            return Ok(KeyRoute::Return(self.handle_macro_bar_key(key)));
-        }
         debug_assert!(
             !matches!(
                 self.input_target,
@@ -1273,18 +1263,19 @@ impl App {
         if card_owns_center && self.handle_takeover_card_key(key, claim) {
             return true;
         }
-        if !card_owns_center && self.center_typeable() && typing_owns_key {
-            if !self.scroll_mode_active() {
-                self.forward_typing_key_to_center(&key);
-                return true;
-            }
-            if self.engine.config.ui.tab_reaches_agent
-                && matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
-            {
-                return true;
-            }
+        if !typing_owns_key {
+            return false;
         }
-        false
+        if self.keys_type_into_program() {
+            self.forward_typing_key_to_center(&key);
+            return true;
+        }
+        // Scrolled back, Tab reaching the agent is swallowed rather than
+        // moving panes.
+        !card_owns_center
+            && self.center_typeable()
+            && self.engine.config.ui.tab_reaches_agent
+            && matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
     }
 
     fn should_defer_global_key(&self, key: &KeyEvent) -> bool {
@@ -1452,8 +1443,44 @@ impl App {
         self.in_input_pass(Ok(false), |app| app.route_key(key))
     }
 
-    fn route_key(&mut self, key: KeyEvent) -> Result<bool> {
+    /// Where the windowed interface sends the next key it reads: the rungs
+    /// [`Self::route_key`] dispatches on, in its order, and for the window
+    /// the program [`Self::route_minimized_center_key`] types into.
+    pub(super) fn key_destination(&self) -> KeyDestination {
         if self.server_log_viewer.is_some() {
+            return KeyDestination::ServerLog;
+        }
+        if !matches!(self.prompt, PromptState::None) {
+            return KeyDestination::Dialog(std::mem::discriminant(&self.prompt));
+        }
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            return KeyDestination::StartupLog;
+        }
+        if self.macro_bar.is_some() {
+            return KeyDestination::MacroBar;
+        }
+        KeyDestination::Window {
+            focus: self.focus,
+            target: self.input_target,
+            program: if self.keys_type_into_program() {
+                self.selected_terminal_surface_id()
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Whether a typing key the windowed interface reads goes to the focused
+    /// part's program.
+    fn keys_type_into_program(&self) -> bool {
+        self.center_typeable()
+            && !self.scroll_mode_active()
+            && !self.takeover_card_owns_center_key()
+    }
+
+    fn route_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let destination = self.key_destination();
+        if destination == KeyDestination::ServerLog {
             self.handle_server_log_key(key);
             return Ok(false);
         }
@@ -1468,6 +1495,15 @@ impl App {
             && self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
         {
             return Ok(false);
+        }
+        match destination {
+            KeyDestination::Dialog(_) => return self.handle_prompt_key(key),
+            KeyDestination::StartupLog => {
+                self.handle_startup_log_viewer_key(key);
+                return Ok(false);
+            }
+            KeyDestination::MacroBar => return Ok(self.handle_macro_bar_key(key)),
+            KeyDestination::ServerLog | KeyDestination::Window { .. } => {}
         }
         match self.route_key_before_bindings(key)? {
             KeyRoute::Continue => {}

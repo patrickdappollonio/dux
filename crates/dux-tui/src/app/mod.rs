@@ -4527,15 +4527,23 @@ pub(crate) struct PendingMacroDelete {
     pub(crate) focus: ConfirmFocus,
 }
 
-/// Where the windowed interface's keys go: the dialog or bar that takes them,
-/// else the pane with focus and the program it may type into.
+/// Where the windowed interface's keys go, in the order its key handling asks.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KeyDestination {
-    prompt: std::mem::Discriminant<PromptState>,
-    macro_bar: bool,
-    focus: FocusPane,
-    target: InputTarget,
-    program: Option<String>,
+pub(crate) enum KeyDestination {
+    /// The server log viewer.
+    ServerLog,
+    /// The open dialog, of this kind.
+    Dialog(std::mem::Discriminant<PromptState>),
+    /// The startup log viewer.
+    StartupLog,
+    MacroBar,
+    /// The pane with focus and the input target; `program` is the pty typing
+    /// goes to, while keys are typed into one.
+    Window {
+        focus: FocusPane,
+        target: InputTarget,
+        program: Option<String>,
+    },
 }
 
 /// Which reader takes the run loop's input on one iteration.
@@ -6502,16 +6510,6 @@ impl App {
         should_exit
     }
 
-    fn key_destination(&self) -> KeyDestination {
-        KeyDestination {
-            prompt: std::mem::discriminant(&self.prompt),
-            macro_bar: self.macro_bar.is_some(),
-            focus: self.focus,
-            target: self.input_target,
-            program: self.selected_terminal_surface_id(),
-        }
-    }
-
     /// End what a reader other than `reader`, the one taking this poll's
     /// input, still holds unfinished: the start of a key is dropped, and a
     /// paste is ended with its rest dropped as it arrives. A reader that a key
@@ -6519,7 +6517,8 @@ impl App {
     /// holds nothing here, so this ends only what something other than a key
     /// cut off: a dialog a worker opens or one that closes by itself, a
     /// program exiting, another program selected. The windowed interface's
-    /// held input also ends when its keys moved since the last poll.
+    /// held input also ends when [`Self::key_destination`] moved since the
+    /// last poll, and only then.
     ///
     /// The rest of a paste cut off at an earlier hand-over stops being dropped
     /// at this one, so typing after input has moved on again is never taken
