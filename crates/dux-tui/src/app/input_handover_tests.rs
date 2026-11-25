@@ -1879,7 +1879,8 @@ mod hand_overs_without_a_key {
     /// The start of a key that only looked like a paste's start marker is
     /// dropped as any held key start is, and what follows it is read as
     /// keys: here F9 cut after `ESC[20`, then Escape, which closes the
-    /// dialog.
+    /// dialog. Neither F9 nor its `~` reaches the program, and a key typed
+    /// into the pane after the dialog does.
     #[test]
     fn a_held_key_start_that_is_no_paste_lets_what_follows_act() {
         let mut rig = Rig::new(MAXIMIZED);
@@ -1890,6 +1891,11 @@ mod hand_overs_without_a_key {
         rig.type_bytes(b"~");
         rig.settle();
         close_the_dialog(&mut rig);
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "x");
+        assert_eq!(outcome.fullscreen, FullscreenOverlay::Agent);
     }
 
     /// The same for the start of a paste's start marker the windowed
@@ -2419,6 +2425,25 @@ mod hand_overs_without_a_key {
             open(&mut rig, taker);
             assert_a_paste_outlasts(&mut rig, taker, |rig| rig.app.focus = FocusPane::Center);
         }
+    }
+
+    /// A paste the windowed interface is reading for a dialog a worker opened
+    /// over the macro bar, when the dialog closes with no key, reaches
+    /// neither: the macro bar gets only what follows the paste's end marker.
+    #[test]
+    fn a_paste_the_window_holds_when_its_dialog_closes_by_itself_never_reaches_the_macro_bar() {
+        let mut rig = Rig::new(WINDOWED);
+        open(&mut rig, Taker::MacroBar);
+        a_worker_opens_a_dialog(&mut rig);
+        rig.type_bytes(b"\x1b[200~abc");
+        rig.turn();
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b[200~abc");
+        // A dialog closing because of something other than a key.
+        rig.app.prompt = PromptState::None;
+        rig.turn();
+        rig.type_bytes(b"def\x1b[201~x");
+        rig.settle();
+        assert_eq!(typed_into(&rig.app, Taker::MacroBar), "x");
     }
 
     /// The palette, opened over a row a browser drives, keeps a paste while
