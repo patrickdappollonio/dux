@@ -357,7 +357,7 @@ dux agents [OPTIONS] <COMMAND>
 - [`dux agents ls`](#dux-agents-ls): List agents.
 - [`dux agents show`](#dux-agents-show): Show one agent.
 - [`dux agents add`](#dux-agents-add): Create an agent and print its id last.
-- [`dux agents rm`](#dux-agents-rm): Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept.
+- [`dux agents rm`](#dux-agents-rm): Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept. With no folder flag, a standalone agent's folder goes only when dux created it.
 - [`dux agents stop`](#dux-agents-stop): Stop everything an agent runs.
 - [`dux agents start`](#dux-agents-start): Start an agent.
 - [`dux agents tabs`](#dux-agents-tabs): An agent's provider tabs.
@@ -397,7 +397,7 @@ dux agents show [OPTIONS] <AGENT>
 Create an agent and print its id last.
 
 ```text
-dux agents add [OPTIONS] <--project <PROJECT>|--fork <AGENT>|--standalone <FOLDER>|--from-pr <PR>>
+dux agents add [OPTIONS] <--project <PROJECT>|--fork <AGENT>|--standalone <FOLDER>|--new-folder|--from-pr <PR>>
 ```
 
 | Flag | Value | Description |
@@ -410,6 +410,7 @@ dux agents add [OPTIONS] <--project <PROJECT>|--fork <AGENT>|--standalone <FOLDE
 | `--review-copy` |  | Agree to a separate review copy of the pull request when its own branch cannot be used as it is (it has diverged, is checked out elsewhere, or could not be compared). Without this such a create is refused and nothing is made, because pushes from a copy land on the copy's branch and not on the pull request. Needs `--from-pr`. |
 | `--from-worktree` | `<PATH>` | Create the agent on this worktree the project already has. Needs `--project`. |
 | `--standalone` | `<FOLDER>` | Create a standalone agent in this folder of your own, with no project. Not with `--fork`. |
+| `--new-folder` |  | Create a standalone agent in a new folder dux creates for it, named after `--name`, in the standalone agents folder ([defaults] standalone_agents_directory). A name whose folder is already there is refused. Needs `--name`. |
 | `--provider` | `<NAME>` | The provider a standalone agent runs (the global default otherwise). Not with `--project`, `--fork` or `--from-pr`. |
 | `--fork` | `<AGENT>` | Fork this agent: a new worktree from its branch. |
 | `--copy-uncommitted` |  | Copy the uncommitted changes of the project's checkout into the new worktree. Not with `--from-pr`, `--from-worktree`, `--fork` or `--standalone`. |
@@ -421,7 +422,7 @@ dux agents add [OPTIONS] <--project <PROJECT>|--fork <AGENT>|--standalone <FOLDE
 
 Also: `remove`
 
-Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept.
+Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept. With no folder flag, a standalone agent's folder goes only when dux created it.
 
 ```text
 dux agents rm [OPTIONS] <AGENT>
@@ -434,6 +435,8 @@ dux agents rm [OPTIONS] <AGENT>
 | Flag | Value | Description |
 |---|---|---|
 | `--delete-worktree` |  | Also remove the agent's worktree. |
+| `--delete-folder` |  | Delete the standalone agent's folder too, with everything in it. Only a folder dux created for the agent can be: for a folder you chose the delete is refused. With neither `--delete-folder` nor `--keep-folder`, a folder dux created goes and a folder you chose stays. Not with `--keep-folder` or `--delete-worktree`. |
+| `--keep-folder` |  | Keep the standalone agent's folder, even one dux created for it. |
 | `--delete-branch` |  | Delete the branch its worktree is on, at the commit it points at now. Needs `--delete-worktree`: git will not delete a branch a worktree still has checked out. Not with `--keep-branch`. |
 | `--keep-branch` |  | Keep the branch its worktree is on. With `--delete-worktree`, the other branches it has been on are still decided as the delete dialog would tick them, unless `--keep-other-branches` or `--delete-other-branches` says otherwise. |
 | `--delete-other-branches` |  | Delete every other branch its worktree has been on, each at the commit it points at now. Needs `--delete-worktree`, and not with `--keep-other-branches`. |
