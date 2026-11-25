@@ -12198,7 +12198,9 @@ impl App {
             if field_focused {
                 "create agent"
             } else {
-                "use an existing folder"
+                // Short enough that the move-focus hint, the only way back to
+                // the field, fits at the modal's width.
+                "choose a folder"
             },
         )];
         if new_folder {
@@ -28568,6 +28570,28 @@ mod tests {
             screen.contains(&app.bindings.label_for(Action::CloseOverlay)),
             "the hint must name the bound cancel key:\n{screen}"
         );
+    }
+
+    /// The new-folder step's footer keeps its move-focus hint whichever control
+    /// has focus: it is the only way from the button back to the field.
+    #[test]
+    fn the_new_standalone_agent_footer_names_the_move_focus_key_with_either_focus() {
+        for focus in [
+            crate::app::NameStandaloneAgentFocus::Input,
+            crate::app::NameStandaloneAgentFocus::UseExistingFolder,
+        ] {
+            let mut app = test_app(default_bindings());
+            app.prompt = PromptState::NameStandaloneAgent {
+                folder: crate::app::StandaloneFolder::New,
+                input: TextInput::new(),
+                focus,
+            };
+            let screen = drawn_screen(&draw(&mut app));
+            assert!(
+                screen.contains("move focus"),
+                "with focus on {focus:?} the footer must name the move-focus key:\n{screen}"
+            );
+        }
     }
 
     #[test]
