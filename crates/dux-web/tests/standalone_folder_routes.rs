@@ -173,6 +173,21 @@ async fn the_new_folder_route_names_the_folder_and_says_whether_it_is_taken() {
     );
 }
 
+/// A name the agent-name rules refuse is refused here too, so `..` cannot
+/// make the route report on the agents folder's parent.
+#[tokio::test]
+async fn the_new_folder_route_refuses_a_name_the_agent_name_rules_refuse() {
+    let fx = boot().await;
+    for name in ["..", "a%20b", "x/.."] {
+        let (status, body) = get_json(
+            fx.addr,
+            &format!("/api/v1/standalone-agents/new-folder?name={name}"),
+        )
+        .await;
+        assert_eq!(status, 400, "{name}: {body}");
+    }
+}
+
 #[tokio::test]
 async fn the_folder_files_route_counts_only_a_folder_dux_created() {
     let fx = boot().await;

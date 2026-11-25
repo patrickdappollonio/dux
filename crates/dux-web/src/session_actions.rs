@@ -920,11 +920,20 @@ struct NewFolderResponse {
 
 /// `GET /api/v1/standalone-agents/new-folder?name=`: the folder a standalone
 /// agent called `name` would get, and whether that name is taken. A read; the
-/// create itself refuses a taken name again, atomically.
+/// create itself refuses a taken name again, atomically. A name the
+/// agent-name rules refuse is refused here as the create refuses it.
 async fn standalone_new_folder(
     State(state): State<AppState>,
     Query(query): Query<NewFolderQuery>,
 ) -> Response {
+    let typed = query.name.trim();
+    if !typed.is_empty() && !dux_core::git::is_valid_agent_name(typed) {
+        return (
+            StatusCode::BAD_REQUEST,
+            dux_core::git::invalid_agent_name_refusal(typed),
+        )
+            .into_response();
+    }
     let Some(root) = state.engine.standalone_agents_root().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
