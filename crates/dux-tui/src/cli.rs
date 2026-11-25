@@ -1309,6 +1309,16 @@ fn remove_created_folders(
 ) {
     let mut removed = 0_usize;
     for (path, identity) in folders {
+        // Asked again just before the deletion: the reset's first look was
+        // before the worktrees were removed.
+        if let Some(reason) = dux_core::engine::program_working_in(path) {
+            report.warn(format_args!(
+                "warning: kept the standalone agent folder {}: {reason}",
+                path.display()
+            ));
+            kept.push((path.clone(), identity.mark));
+            continue;
+        }
         match dux_core::agent_folders::remove_created_folder(path, *identity) {
             Ok(_) => removed += 1,
             Err(folder_kept) => {
@@ -2709,6 +2719,60 @@ mod tests {
                 .join(dux_core::agent_folders::MARKER_FILE_NAME)
                 .exists(),
             "a folder the reset keeps is let go of"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct Heard(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Heard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A program that starts working in a folder dux created after the reset's
+    /// first look keeps that folder.
+    #[test]
+    fn a_factory_reset_keeps_a_created_folder_a_program_is_working_in() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let created =
+            dux_core::agent_folders::create_agent_folder(&tmp.path().join("agents"), "otter")
+                .expect("created");
+        let mut working = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&created.path)
+            .spawn()
+            .expect("a program working in the folder");
+        let warnings = Heard::default();
+        let mut report = ResetReport {
+            out: Box::new(std::io::sink()),
+            err: Box::new(warnings.clone()),
+        };
+        let mut kept = Vec::new();
+
+        remove_created_folders(
+            &[(created.path.clone(), created.identity)],
+            &mut kept,
+            &mut report,
+        );
+        let _ = working.kill();
+        let _ = working.wait();
+
+        assert!(created.path.is_dir(), "the folder is kept");
+        assert_eq!(kept, vec![(created.path.clone(), created.identity.mark)]);
+        let heard = String::from_utf8(warnings.0.borrow().clone()).unwrap();
+        assert!(
+            heard.contains(&format!(
+                "warning: kept the standalone agent folder {}: sleep (pid {}) is working in it",
+                created.path.display(),
+                working.id()
+            )),
+            "{heard}"
         );
     }
 

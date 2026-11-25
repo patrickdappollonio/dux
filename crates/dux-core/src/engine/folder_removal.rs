@@ -489,7 +489,7 @@ fn perform_created_folder_removal(
 /// Any program of this user, dux-started or not, whose current folder is the
 /// folder or one inside it, as the reason to keep it. A process list that
 /// cannot be read keeps it too.
-fn program_working_in(folder: &Path) -> Option<String> {
+pub fn program_working_in(folder: &Path) -> Option<String> {
     let table = match crate::process_sessions::read_process_table_strict() {
         Ok(table) => table,
         Err(why) => {

@@ -102,6 +102,7 @@ pub(crate) use events::{
     perform_deferred_removal, remove_after_last_look, standalone_processes_keep,
     wait_then_last_look,
 };
+pub use folder_removal::program_working_in;
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
     BranchRenameDispatch, BranchRenamePlan, BranchRenameRejection, InFlightKey, InFlightSet,
